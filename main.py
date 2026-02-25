@@ -98,9 +98,9 @@ def mlb_build_features(df):
 
 def train_mlb():
     rows = sb_get("mlb_predictions",
-                  "result_entered=eq.true&actual_home_runs=not.is.null&select=*")
+                  "result_entered=eq.true&actual_home_runs=not.is.null&game_type=eq.R&select=*")
     if len(rows) < 10:
-        return {"error": "Not enough MLB data to train (need 10+ completed games)", "n": len(rows)}
+        return {"error": "Not enough MLB regular season data to train (need 10+ completed games). Spring training games (game_type=S) are excluded.", "n": len(rows)}
 
     df = pd.DataFrame(rows)
     X  = mlb_build_features(df)
