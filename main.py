@@ -40,10 +40,55 @@ CORS(app)  # Allow requests from your React app
 
 # ── Supabase config ───────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://lxaaqtqvlwjvyuedyauo.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+
+# Try multiple possible environment variable names
+SUPABASE_KEY = (
+    os.environ.get("SUPABASE_ANON_KEY") or 
+    os.environ.get("SUPABASE_KEY") or 
+    os.environ.get("SUPABASE_SERVICE_KEY") or 
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or 
+    ""
+)
+
+print(f"Supabase URL set: {'Yes' if SUPABASE_URL else 'No'}")
+print(f"Supabase Key set: {'Yes' if SUPABASE_KEY else 'No'}")
 
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
+
+@app.route("/debug/supabase")
+def debug_supabase():
+    """Test Supabase connection and data availability"""
+    results = {}
+    
+    # Test MLB predictions table
+    try:
+        mlb_rows = sb_get("mlb_predictions", "select=count")
+        results["mlb_predictions"] = {
+            "accessible": True,
+            "data": mlb_rows[:5] if mlb_rows else "No rows"
+        }
+    except Exception as e:
+        results["mlb_predictions"] = {"accessible": False, "error": str(e)}
+    
+    # Test MLB historical table
+    try:
+        hist_rows = sb_get("mlb_historical", "select=count&limit=1")
+        results["mlb_historical"] = {
+            "accessible": True,
+            "data": hist_rows[:5] if hist_rows else "No rows"
+        }
+    except Exception as e:
+        results["mlb_historical"] = {"accessible": False, "error": str(e)}
+    
+    # Check environment variables (redacted)
+    results["env"] = {
+        "SUPABASE_URL": "Set" if os.environ.get("SUPABASE_URL") else "Missing",
+        "SUPABASE_ANON_KEY": "Set" if os.environ.get("SUPABASE_ANON_KEY") else "Missing"
+    }
+    
+    return jsonify(results)
+
 
 # ── Supabase helper ───────────────────────────────────────────────────────────
 def sb_get(table, params=""):
@@ -52,8 +97,20 @@ def sb_get(table, params=""):
         "Authorization": f"Bearer {SUPABASE_KEY}",
     }
     url = f"{SUPABASE_URL}/rest/v1/{table}?{params}"
-    r = requests.get(url, headers=headers, timeout=15)
-    return r.json() if r.ok else []
+    print(f"Fetching from Supabase: {url}")  # Debug print
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        print(f"Response status: {r.status_code}")  # Debug print
+        if r.ok:
+            data = r.json()
+            print(f"Got {len(data) if isinstance(data, list) else 'non-list'} rows")  # Debug print
+            return data
+        else:
+            print(f"Error response: {r.text[:200]}")  # Debug print first 200 chars
+            return []
+    except Exception as e:
+        print(f"Exception in sb_get: {str(e)}")
+        return []
 
 # ── Model cache ───────────────────────────────────────────────────────────────
 _models = {}
@@ -141,95 +198,209 @@ def _get_mlb_k():
 
 def mlb_build_features(df):
     """
-    Extract feature matrix from mlb_predictions rows that have actuals.
-
-    Priority: use raw game inputs (wOBA, FIP, park factor) when available —
-    these are structurally independent of the heuristic and give the ML layer
-    genuine signal. Falls back to heuristic outputs only if raw fields are absent.
+    Build feature matrix. Works on both mlb_predictions and mlb_historical rows.
+    Uses raw game inputs (wOBA, FIP, park factor) when available — these are
+    the real predictive signal. Heuristic outputs (pred_runs) used as fallback only.
     """
     df = df.copy()
 
-    # ── Derived heuristic features (always available) ──────────────────────
-    df["run_diff_pred"] = df["pred_home_runs"] - df["pred_away_runs"]
-    df["total_pred"]    = df["pred_home_runs"] + df["pred_away_runs"]
-    df["home_fav"]      = (df["model_ml_home"] < 0).astype(int)
-    df["ou_gap"]        = df["total_pred"] - df["ou_total"]
-    df["win_pct_home"]  = df["win_pct_home"].fillna(0.5)
-
-    base_features = [
-        "pred_home_runs", "pred_away_runs",
-        "win_pct_home", "ou_total",
-        "run_diff_pred", "total_pred",
-        "home_fav", "ou_gap",
-    ]
-
-    # ── Raw game inputs (richer signal when present) ────────────────────────
-    # These columns may or may not be in the Supabase table yet.
-    # When present, they allow the ML layer to learn weights independently
-    # of the heuristic rather than just correcting its output.
-    raw_features = []
+    # ── Raw inputs (present in mlb_historical, optionally in mlb_predictions) ──
     raw_cols = {
-        "home_woba":      0.314,   # league-average defaults
-        "away_woba":      0.314,
-        "home_fip":       4.25,
-        "away_fip":       4.25,
+        "home_woba":        0.314,
+        "away_woba":        0.314,
+        "home_sp_fip":      4.25,   # starter FIP (historical table)
+        "away_sp_fip":      4.25,
+        "home_fip":         4.25,   # fallback if sp_fip missing
+        "away_fip":         4.25,
         "home_bullpen_era": 4.10,
         "away_bullpen_era": 4.10,
-        "park_factor":    1.00,
-        "temp_f":         70.0,
-        "wind_out_flag":  0.0,
+        "park_factor":      1.00,
+        "temp_f":           70.0,
+        "wind_mph":         5.0,
+        "wind_out_flag":    0.0,
+        "home_rest_days":   4.0,
+        "away_rest_days":   4.0,
+        "home_travel":      0.0,
+        "away_travel":      0.0,
     }
     for col, default in raw_cols.items():
         if col in df.columns:
-            df[col] = df[col].fillna(default)
-            raw_features.append(col)
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
+        else:
+            df[col] = default
 
-    feature_cols = base_features + raw_features
+    # Use home_sp_fip preferentially, fall back to home_fip
+    df["home_starter_fip"] = df["home_sp_fip"].where(df["home_sp_fip"] != 4.25, df["home_fip"])
+    df["away_starter_fip"] = df["away_sp_fip"].where(df["away_sp_fip"] != 4.25, df["away_fip"])
+
+    # ── Derived features from raw inputs ──
+    df["woba_diff"]       = df["home_woba"] - df["away_woba"]
+    df["fip_diff"]        = df["home_starter_fip"] - df["away_starter_fip"]  # negative = home ace advantage
+    df["bullpen_era_diff"] = df["home_bullpen_era"] - df["away_bullpen_era"]
+    df["rest_diff"]       = df["home_rest_days"] - df["away_rest_days"]
+    df["travel_diff"]     = df["home_travel"] - df["away_travel"]  # negative = home advantage
+    df["is_warm"]         = (df["temp_f"] > 75).astype(int)
+    df["is_cold"]         = (df["temp_f"] < 45).astype(int)
+    df["wind_out"]        = df["wind_out_flag"].astype(int)
+
+    # ── Heuristic outputs (only from mlb_predictions rows, 0 for historical) ──
+    for col, default in [("pred_home_runs", 0.0), ("pred_away_runs", 0.0),
+                         ("win_pct_home", 0.5), ("ou_total", 9.0),
+                         ("model_ml_home", 0)]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
+        else:
+            df[col] = default
+
+    df["run_diff_pred"]  = df["pred_home_runs"] - df["pred_away_runs"]
+    df["total_pred"]     = df["pred_home_runs"] + df["pred_away_runs"]
+    df["home_fav"]       = (df["model_ml_home"] < 0).astype(int)
+    df["ou_gap"]         = df["total_pred"] - df["ou_total"]
+    df["has_heuristic"]  = (df["total_pred"] > 0).astype(int)  # flag: 0 for historical rows
+
+    feature_cols = [
+        # Raw inputs — primary signal
+        "home_woba", "away_woba", "woba_diff",
+        "home_starter_fip", "away_starter_fip", "fip_diff",
+        "home_bullpen_era", "away_bullpen_era", "bullpen_era_diff",
+        "park_factor",
+        "temp_f", "wind_mph", "wind_out",
+        "is_warm", "is_cold",
+        "rest_diff", "travel_diff",
+        # Heuristic outputs — secondary signal (0 for historical rows)
+        "pred_home_runs", "pred_away_runs",
+        "run_diff_pred", "total_pred", 
+        "win_pct_home", "home_fav", "ou_gap",
+        "has_heuristic",
+    ]
+
     return df[feature_cols].fillna(0)
 
+
+def _mlb_merge_historical(current_df):
+    """
+    Fetch mlb_historical (2015-present) and combine with current season predictions.
+    Historical rows use real game features directly — no data leakage.
+    Applies season_weight for recency weighting.
+    Excludes outlier seasons (COVID 2020, etc.).
+    """
+    hist_rows = sb_get(
+        "mlb_historical",
+        "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*"
+    )
+    if not hist_rows:
+        print("  WARNING: mlb_historical returned no rows — training on current season only")
+        return current_df, None
+
+    hist_df = pd.DataFrame(hist_rows)
+
+    # Ensure numeric types on key columns
+    numeric_cols = ["actual_home_runs", "actual_away_runs", "home_win",
+                    "home_woba", "away_woba", "home_sp_fip", "away_sp_fip",
+                    "home_fip", "away_fip", "home_bullpen_era", "away_bullpen_era",
+                    "park_factor", "temp_f", "wind_mph", "wind_out_flag",
+                    "home_rest_days", "away_rest_days", "home_travel", "away_travel",
+                    "season_weight"]
+    for col in numeric_cols:
+        if col in hist_df.columns:
+            hist_df[col] = pd.to_numeric(hist_df[col], errors="coerce")
+
+    # Historical rows have no heuristic predictions — zero them out explicitly
+    # so has_heuristic=0 correctly flags them in the feature matrix
+    hist_df["pred_home_runs"] = 0.0
+    hist_df["pred_away_runs"] = 0.0
+    hist_df["win_pct_home"]   = hist_df["home_win"].fillna(0.5)
+    hist_df["ou_total"]       = 0.0
+    hist_df["model_ml_home"]  = 0
+
+    # Combine
+    combined = pd.concat([hist_df, current_df], ignore_index=True)
+
+    # Season weights for sample_weight in model fitting
+    if "season_weight" in combined.columns:
+        weights = combined["season_weight"].fillna(1.0).astype(float)
+    else:
+        weights = pd.Series(1.0, index=combined.index)
+
+    # Print debug info
+    n_hist = len(hist_df)
+    n_curr = len(current_df)
+    print(f"  Training corpus: {n_hist} historical + {n_curr} current = {n_hist + n_curr} total")
+    if 'season' in hist_df.columns:
+        seasons = sorted(hist_df['season'].dropna().astype(int).unique().tolist())
+        print(f"  Historical seasons: {seasons}")
+
+    return combined, weights.values
+
+
 def train_mlb():
+    # Current season predictions with results (may be empty early in season)
     rows = sb_get("mlb_predictions",
                   "result_entered=eq.true&actual_home_runs=not.is.null&game_type=eq.R&select=*")
-    if len(rows) < 10:
+    current_df = pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    # Merge with historical corpus — this is the primary training data
+    df, sample_weights = _mlb_merge_historical(current_df)
+
+    if len(df) < 10:
         return {
             "error": "Not enough MLB regular season data to train (need 10+). "
                      "Spring training games (game_type=S) are excluded.",
-            "n": len(rows),
+            "n_current": len(current_df),
+            "n_historical": len(df) - len(current_df) if df is not None else 0,
         }
 
-    df = pd.DataFrame(rows)
-    X  = mlb_build_features(df)
+    X = mlb_build_features(df)
     y_margin = df["actual_home_runs"].astype(float) - df["actual_away_runs"].astype(float)
-    y_win    = (y_margin > 0).astype(int)
+    y_win = (y_margin > 0).astype(int)
 
-    scaler   = StandardScaler()
+    # Use sample weights if available (recency weighting)
+    fit_weights = sample_weights if sample_weights is not None else np.ones(len(df))
+
+    scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # Margin regressor: Ridge with cross-validated alpha
-    reg = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=min(5, len(df)))
-    reg.fit(X_scaled, y_margin)
-    reg_cv = cross_val_score(reg, X_scaled, y_margin,
-                              cv=min(5, len(df)), scoring="neg_mean_absolute_error")
+    # Choose model based on data volume
+    n = len(df)
+    if n >= 500:
+        reg = GradientBoostingRegressor(
+            n_estimators=300, max_depth=4,
+            learning_rate=0.04, subsample=0.8,
+            min_samples_leaf=20, random_state=42,
+        )
+        reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
+        reg_cv = cross_val_score(reg, X_scaled, y_margin,
+                                  cv=min(5, n), scoring="neg_mean_absolute_error")
+        explainer = shap.TreeExplainer(reg)
+        model_type = "GradientBoosting"
+    else:
+        reg = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=min(5, n))
+        reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
+        reg_cv = cross_val_score(reg, X_scaled, y_margin,
+                                  cv=min(5, n), scoring="neg_mean_absolute_error")
+        explainer = shap.LinearExplainer(reg, X_scaled, feature_perturbation="interventional")
+        model_type = "Ridge"
 
     # Win probability classifier: calibrated logistic
     clf = CalibratedClassifierCV(
-        LogisticRegression(max_iter=1000), cv=min(5, len(df))
+        LogisticRegression(max_iter=1000, class_weight='balanced'), 
+        cv=min(5, n)
     )
-    clf.fit(X_scaled, y_win)
-
-    # SHAP explainer (linear — fast, exact for Ridge)
-    explainer = shap.LinearExplainer(reg, X_scaled, feature_perturbation="interventional")
+    clf.fit(X_scaled, y_win, sample_weight=fit_weights)
 
     bundle = {
-        "scaler":       scaler,
-        "reg":          reg,
-        "clf":          clf,
-        "explainer":    explainer,
+        "scaler": scaler,
+        "reg": reg,
+        "clf": clf,
+        "explainer": explainer,
         "feature_cols": list(X.columns),
-        "n_train":      len(df),
-        "mae_cv":       float(-reg_cv.mean()),
-        "trained_at":   datetime.utcnow().isoformat(),
-        "alpha":        float(reg.alpha_),
+        "n_train": n,
+        "n_historical": len(df) - len(current_df),
+        "n_current": len(current_df),
+        "mae_cv": float(-reg_cv.mean()),
+        "trained_at": datetime.utcnow().isoformat(),
+        "model_type": model_type,
+        "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
     }
     save_model("mlb", bundle)
 
@@ -237,69 +408,88 @@ def train_mlb():
     disp = calibrate_mlb_dispersion()
 
     return {
-        "status":      "trained",
-        "n_train":     len(df),
-        "mae_cv":      round(float(-reg_cv.mean()), 3),
-        "alpha":       float(reg.alpha_),
-        "features":    list(X.columns),
-        "dispersion":  disp,
+        "status": "trained",
+        "model_type": model_type,
+        "n_train": n,
+        "n_historical": len(df) - len(current_df),
+        "n_current": len(current_df),
+        "mae_cv": round(float(-reg_cv.mean()), 3),
+        "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
+        "features": list(X.columns),
+        "dispersion": disp,
+        "upgrade_note": f"Using {'GradientBoosting (non-linear)' if model_type == 'GradientBoosting' else 'Ridge (linear) — will auto-upgrade to GBM at 500+ training rows'}",
     }
+
 
 def predict_mlb(game: dict):
     bundle = load_model("mlb")
     if not bundle:
         return {"error": "MLB model not trained — call /train/mlb first"}
 
-    ph = game.get("pred_home_runs", 4.5)
-    pa = game.get("pred_away_runs", 4.5)
+    # Get heuristic predictions (may be 0 for historical games)
+    ph = float(game.get("pred_home_runs", 0))
+    pa = float(game.get("pred_away_runs", 0))
 
     row_data = {
+        # Heuristic outputs
         "pred_home_runs": ph,
         "pred_away_runs": pa,
-        "win_pct_home":   game.get("win_pct_home", 0.5),
-        "ou_total":       game.get("ou_total", 9.0),
-        "run_diff_pred":  ph - pa,
-        "total_pred":     ph + pa,
-        "home_fav":       1 if game.get("model_ml_home", 0) < 0 else 0,
-        "ou_gap":         (ph + pa) - game.get("ou_total", 9.0),
+        "win_pct_home": float(game.get("win_pct_home", 0.5)),
+        "ou_total": float(game.get("ou_total", 9.0)),
+        "model_ml_home": float(game.get("model_ml_home", 0)),
+        # These will be derived in mlb_build_features
+        "run_diff_pred": ph - pa,
+        "total_pred": ph + pa,
+        "home_fav": 1 if game.get("model_ml_home", 0) < 0 else 0,
+        "ou_gap": (ph + pa) - float(game.get("ou_total", 9.0)),
     }
 
     # Include raw features if model was trained with them
     raw_defaults = {
         "home_woba": 0.314, "away_woba": 0.314,
-        "home_fip": 4.25,   "away_fip": 4.25,
+        "home_sp_fip": 4.25, "away_sp_fip": 4.25,
+        "home_fip": 4.25, "away_fip": 4.25,
         "home_bullpen_era": 4.10, "away_bullpen_era": 4.10,
-        "park_factor": 1.00, "temp_f": 70.0, "wind_out_flag": 0.0,
+        "park_factor": 1.00, "temp_f": 70.0, 
+        "wind_mph": 5.0, "wind_out_flag": 0.0,
+        "home_rest_days": 4.0, "away_rest_days": 4.0,
+        "home_travel": 0.0, "away_travel": 0.0,
     }
     for col, default in raw_defaults.items():
         if col in bundle["feature_cols"]:
-            row_data[col] = game.get(col, default)
+            row_data[col] = float(game.get(col, default))
 
-    row    = pd.DataFrame([row_data])
-    X_s    = bundle["scaler"].transform(row[bundle["feature_cols"]])
-    margin   = float(bundle["reg"].predict(X_s)[0])
+    row = pd.DataFrame([row_data])
+    X_s = bundle["scaler"].transform(row[bundle["feature_cols"]])
+    margin = float(bundle["reg"].predict(X_s)[0])
     win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
 
     # SHAP explanation
-    shap_vals = bundle["explainer"].shap_values(X_s)[0]
-    shap_out  = [
+    shap_vals = bundle["explainer"].shap_values(X_s)
+    if isinstance(shap_vals, list):
+        shap_vals = shap_vals[0]
+    shap_out = [
         {"feature": f, "shap": round(float(v), 4), "value": round(float(row[f].iloc[0]), 3)}
-        for f, v in zip(bundle["feature_cols"], shap_vals)
+        for f, v in zip(bundle["feature_cols"], shap_vals[0] if len(shap_vals.shape) > 1 else shap_vals)
     ]
     shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
 
     return {
-        "sport":              "MLB",
-        "ml_margin":          round(margin, 2),
-        "ml_win_prob_home":   round(win_prob, 4),
-        "ml_win_prob_away":   round(1 - win_prob, 4),
-        "shap":               shap_out,
+        "sport": "MLB",
+        "ml_margin": round(margin, 2),
+        "ml_win_prob_home": round(win_prob, 4),
+        "ml_win_prob_away": round(1 - win_prob, 4),
+        "shap": shap_out[:10],  # Top 10 SHAP values
         "model_meta": {
-            "n_train":    bundle["n_train"],
-            "mae_cv":     bundle["mae_cv"],
+            "n_train": bundle["n_train"],
+            "n_historical": bundle.get("n_historical", 0),
+            "n_current": bundle.get("n_current", 0),
+            "mae_cv": bundle["mae_cv"],
             "trained_at": bundle["trained_at"],
+            "model_type": bundle["model_type"],
         },
     }
+
 
 # ═══════════════════════════════════════════════════════════════
 # NBA MODEL
