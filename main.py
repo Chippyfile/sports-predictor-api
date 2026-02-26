@@ -429,37 +429,65 @@ def predict_mlb(game: dict):
     # Get heuristic predictions (may be 0 for historical games)
     ph = float(game.get("pred_home_runs", 0))
     pa = float(game.get("pred_away_runs", 0))
+    
+    # Get raw inputs if provided
+    home_woba = float(game.get("home_woba", 0.314))
+    away_woba = float(game.get("away_woba", 0.314))
+    home_sp_fip = float(game.get("home_sp_fip", game.get("home_fip", 4.25)))
+    away_sp_fip = float(game.get("away_sp_fip", game.get("away_fip", 4.25)))
+    home_fip = float(game.get("home_fip", 4.25))
+    away_fip = float(game.get("away_fip", 4.25))
+    home_bullpen = float(game.get("home_bullpen_era", 4.10))
+    away_bullpen = float(game.get("away_bullpen_era", 4.10))
+    park_factor = float(game.get("park_factor", 1.00))
+    temp_f = float(game.get("temp_f", 70.0))
+    wind_mph = float(game.get("wind_mph", 5.0))
+    wind_out_flag = float(game.get("wind_out_flag", 0.0))
+    home_rest = float(game.get("home_rest_days", 4.0))
+    away_rest = float(game.get("away_rest_days", 4.0))
+    home_travel = float(game.get("home_travel", 0.0))
+    away_travel = float(game.get("away_travel", 0.0))
 
+    # Calculate derived features
     row_data = {
+        # Raw inputs
+        "home_woba": home_woba,
+        "away_woba": away_woba,
+        "woba_diff": home_woba - away_woba,
+        
+        "home_starter_fip": home_sp_fip,
+        "away_starter_fip": away_sp_fip,
+        "fip_diff": home_sp_fip - away_sp_fip,
+        
+        "home_bullpen_era": home_bullpen,
+        "away_bullpen_era": away_bullpen,
+        "bullpen_era_diff": home_bullpen - away_bullpen,
+        
+        "park_factor": park_factor,
+        "temp_f": temp_f,
+        "wind_mph": wind_mph,
+        "wind_out": int(wind_out_flag),
+        "is_warm": 1 if temp_f > 75 else 0,
+        "is_cold": 1 if temp_f < 45 else 0,
+        
+        "rest_diff": home_rest - away_rest,
+        "travel_diff": home_travel - away_travel,
+        
         # Heuristic outputs
         "pred_home_runs": ph,
         "pred_away_runs": pa,
-        "win_pct_home": float(game.get("win_pct_home", 0.5)),
-        "ou_total": float(game.get("ou_total", 9.0)),
-        "model_ml_home": float(game.get("model_ml_home", 0)),
-        # These will be derived in mlb_build_features
         "run_diff_pred": ph - pa,
         "total_pred": ph + pa,
+        "win_pct_home": float(game.get("win_pct_home", 0.5)),
         "home_fav": 1 if game.get("model_ml_home", 0) < 0 else 0,
         "ou_gap": (ph + pa) - float(game.get("ou_total", 9.0)),
+        "has_heuristic": 1 if ph > 0 or pa > 0 else 0,
     }
 
-    # Include raw features if model was trained with them
-    raw_defaults = {
-        "home_woba": 0.314, "away_woba": 0.314,
-        "home_sp_fip": 4.25, "away_sp_fip": 4.25,
-        "home_fip": 4.25, "away_fip": 4.25,
-        "home_bullpen_era": 4.10, "away_bullpen_era": 4.10,
-        "park_factor": 1.00, "temp_f": 70.0, 
-        "wind_mph": 5.0, "wind_out_flag": 0.0,
-        "home_rest_days": 4.0, "away_rest_days": 4.0,
-        "home_travel": 0.0, "away_travel": 0.0,
-    }
-    for col, default in raw_defaults.items():
-        if col in bundle["feature_cols"]:
-            row_data[col] = float(game.get(col, default))
-
-    row = pd.DataFrame([row_data])
+    # Create DataFrame with only the features the model expects
+    row = pd.DataFrame([{k: row_data[k] for k in bundle["feature_cols"]}])
+    
+    # Scale and predict
     X_s = bundle["scaler"].transform(row[bundle["feature_cols"]])
     margin = float(bundle["reg"].predict(X_s)[0])
     win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
@@ -468,10 +496,20 @@ def predict_mlb(game: dict):
     shap_vals = bundle["explainer"].shap_values(X_s)
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[0]
-    shap_out = [
-        {"feature": f, "shap": round(float(v), 4), "value": round(float(row[f].iloc[0]), 3)}
-        for f, v in zip(bundle["feature_cols"], shap_vals[0] if len(shap_vals.shape) > 1 else shap_vals)
-    ]
+    
+    shap_out = []
+    if len(shap_vals.shape) > 1:
+        shap_values_row = shap_vals[0]
+    else:
+        shap_values_row = shap_vals
+        
+    for f, v in zip(bundle["feature_cols"], shap_values_row):
+        shap_out.append({
+            "feature": f,
+            "shap": round(float(v), 4),
+            "value": round(float(row[f].iloc[0]), 3)
+        })
+    
     shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
 
     return {
@@ -489,6 +527,8 @@ def predict_mlb(game: dict):
             "model_type": bundle["model_type"],
         },
     }
+
+
 
 
 # ═══════════════════════════════════════════════════════════════
