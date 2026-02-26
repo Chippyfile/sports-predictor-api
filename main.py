@@ -96,17 +96,21 @@ def sb_get(table, params=""):
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
     }
+    # Add range header to get all rows
+    headers["Range"] = "0-999999"  # This tells Supabase to return up to 1M rows
+    
     url = f"{SUPABASE_URL}/rest/v1/{table}?{params}"
-    print(f"Fetching from Supabase: {url}")  # Debug print
+    print(f"Fetching from Supabase: {url}")
     try:
-        r = requests.get(url, headers=headers, timeout=15)
-        print(f"Response status: {r.status_code}")  # Debug print
+        r = requests.get(url, headers=headers, timeout=30)  # Increased timeout
+        print(f"Response status: {r.status_code}")
+        print(f"Content-Range header: {r.headers.get('content-range', 'Not present')}")
         if r.ok:
             data = r.json()
-            print(f"Got {len(data) if isinstance(data, list) else 'non-list'} rows")  # Debug print
+            print(f"Got {len(data) if isinstance(data, list) else 'non-list'} rows")
             return data
         else:
-            print(f"Error response: {r.text[:200]}")  # Debug print first 200 chars
+            print(f"Error response: {r.text[:200]}")
             return []
     except Exception as e:
         print(f"Exception in sb_get: {str(e)}")
@@ -286,7 +290,7 @@ def _mlb_merge_historical(current_df):
     """
     hist_rows = sb_get(
         "mlb_historical",
-        "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*"
+        "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=100000"
     )
     if not hist_rows:
         print("  WARNING: mlb_historical returned no rows — training on current season only")
