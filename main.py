@@ -96,25 +96,44 @@ def sb_get(table, params=""):
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
     }
-    # Add range header to get all rows
-    headers["Range"] = "0-999999"  # This tells Supabase to return up to 1M rows
     
-    url = f"{SUPABASE_URL}/rest/v1/{table}?{params}"
-    print(f"Fetching from Supabase: {url}")
-    try:
-        r = requests.get(url, headers=headers, timeout=30)  # Increased timeout
-        print(f"Response status: {r.status_code}")
-        print(f"Content-Range header: {r.headers.get('content-range', 'Not present')}")
-        if r.ok:
+    all_data = []
+    offset = 0
+    limit = 1000  # Supabase default max per request
+    
+    while True:
+        # Add range headers for pagination
+        headers["Range"] = f"{offset}-{offset + limit - 1}"
+        
+        url = f"{SUPABASE_URL}/rest/v1/{table}?{params}"
+        print(f"Fetching from Supabase: {url} (rows {offset}-{offset + limit - 1})")
+        
+        try:
+            r = requests.get(url, headers=headers, timeout=30)
+            if not r.ok:
+                print(f"Error response: {r.text[:200]}")
+                break
+                
             data = r.json()
-            print(f"Got {len(data) if isinstance(data, list) else 'non-list'} rows")
-            return data
-        else:
-            print(f"Error response: {r.text[:200]}")
-            return []
-    except Exception as e:
-        print(f"Exception in sb_get: {str(e)}")
-        return []
+            if not data:  # No more data
+                break
+                
+            all_data.extend(data)
+            print(f"Got {len(data)} rows, total so far: {len(all_data)}")
+            
+            # Check if we got less than the limit (end of data)
+            if len(data) < limit:
+                break
+                
+            offset += limit
+            
+        except Exception as e:
+            print(f"Exception in sb_get: {str(e)}")
+            break
+    
+    print(f"Total rows fetched: {len(all_data)}")
+    return all_data
+
 
 # ── Model cache ───────────────────────────────────────────────────────────────
 _models = {}
