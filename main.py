@@ -241,6 +241,26 @@ class StackedClassifier:
         return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
 # ═══════════════════════════════════════════════════════════════
+# MLB SEASON CONSTANTS (FanGraphs Guts! — used by both ML features and heuristic)
+# ═══════════════════════════════════════════════════════════════
+SEASON_CONSTANTS = {
+    2015: {"lg_woba": 0.313, "woba_scale": 1.24, "lg_rpg": 4.25, "lg_fip": 3.97, "pa_pg": 38.0},
+    2016: {"lg_woba": 0.318, "woba_scale": 1.21, "lg_rpg": 4.48, "lg_fip": 4.19, "pa_pg": 38.0},
+    2017: {"lg_woba": 0.321, "woba_scale": 1.21, "lg_rpg": 4.65, "lg_fip": 4.36, "pa_pg": 38.1},
+    2018: {"lg_woba": 0.315, "woba_scale": 1.23, "lg_rpg": 4.45, "lg_fip": 4.15, "pa_pg": 37.9},
+    2019: {"lg_woba": 0.320, "woba_scale": 1.17, "lg_rpg": 4.83, "lg_fip": 4.51, "pa_pg": 38.2},
+    2021: {"lg_woba": 0.313, "woba_scale": 1.22, "lg_rpg": 4.53, "lg_fip": 4.26, "pa_pg": 37.9},
+    2022: {"lg_woba": 0.310, "woba_scale": 1.24, "lg_rpg": 4.28, "lg_fip": 4.01, "pa_pg": 37.6},
+    2023: {"lg_woba": 0.318, "woba_scale": 1.21, "lg_rpg": 4.62, "lg_fip": 4.33, "pa_pg": 37.8},
+    2024: {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8},
+    2025: {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8},
+}
+DEFAULT_CONSTANTS = {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8}
+
+FIP_COEFF = 0.55
+HFA_RUNS = 0.16   # ~0.32 run total home advantage, split between offense/pitching
+
+# ═══════════════════════════════════════════════════════════════
 # MLB MODEL
 # ═══════════════════════════════════════════════════════════════
 
@@ -249,6 +269,12 @@ def mlb_build_features(df):
     Build feature matrix. Works on both mlb_predictions and mlb_historical rows.
     Uses raw game inputs (wOBA, FIP, park factor) when available — these are
     the real predictive signal. Heuristic outputs (pred_runs) used as fallback only.
+
+    v3 FIXES:
+      - Added K/9 and BB/9 as ML features (were only in heuristic, major signal loss)
+      - Use sp_fip_known flag instead of fragile != 4.25 comparison for SP FIP fallback
+      - Added has_sp_fip flag so model learns to weight starter FIP vs team FIP
+      - Added league run environment feature (lg_rpg) so model knows offensive era context
     """
     df = df.copy()
 
@@ -270,10 +296,15 @@ def mlb_build_features(df):
         "away_rest_days":   4.0,
         "home_travel":      0.0,
         "away_travel":      0.0,
-        # Step 13: SP innings pitched + defensive OAA
-        "home_sp_ip":       5.5,    # starter avg IP (league avg ~5.5 in 2024)
+        # K/9 and BB/9 — FIX: these were only in heuristic, not ML features
+        "home_k9":          8.5,
+        "away_k9":          8.5,
+        "home_bb9":         3.2,
+        "away_bb9":         3.2,
+        # SP innings pitched + defensive OAA
+        "home_sp_ip":       5.5,
         "away_sp_ip":       5.5,
-        "home_def_oaa":     0.0,    # team defensive Outs Above Average (Statcast)
+        "home_def_oaa":     0.0,
         "away_def_oaa":     0.0,
     }
     for col, default in raw_cols.items():
@@ -282,28 +313,50 @@ def mlb_build_features(df):
         else:
             df[col] = default
 
-    # Use home_sp_fip preferentially, fall back to home_fip
-    df["home_starter_fip"] = df["home_sp_fip"].where(df["home_sp_fip"] != 4.25, df["home_fip"])
-    df["away_starter_fip"] = df["away_sp_fip"].where(df["away_sp_fip"] != 4.25, df["away_fip"])
+    # ── SP FIP fallback: use sp_fip_known flag when available (more robust than != 4.25) ──
+    if "home_sp_fip_known" in df.columns:
+        home_sp_known = pd.to_numeric(df["home_sp_fip_known"], errors="coerce").fillna(0).astype(bool)
+        away_sp_known = pd.to_numeric(df["away_sp_fip_known"], errors="coerce").fillna(0).astype(bool)
+        df["home_starter_fip"] = np.where(home_sp_known, df["home_sp_fip"], df["home_fip"])
+        df["away_starter_fip"] = np.where(away_sp_known, df["away_sp_fip"], df["away_fip"])
+        df["has_sp_fip"] = (home_sp_known & away_sp_known).astype(int)
+    else:
+        df["home_starter_fip"] = df["home_sp_fip"].where(df["home_sp_fip"] != 4.25, df["home_fip"])
+        df["away_starter_fip"] = df["away_sp_fip"].where(df["away_sp_fip"] != 4.25, df["away_fip"])
+        df["has_sp_fip"] = ((df["home_sp_fip"] != 4.25) & (df["away_sp_fip"] != 4.25)).astype(int)
 
     # ── Derived features from raw inputs ──
-    df["woba_diff"]       = df["home_woba"] - df["away_woba"]
-    df["fip_diff"]        = df["home_starter_fip"] - df["away_starter_fip"]  # negative = home ace advantage
+    df["woba_diff"]        = df["home_woba"] - df["away_woba"]
+    df["fip_diff"]         = df["home_starter_fip"] - df["away_starter_fip"]
     df["bullpen_era_diff"] = df["home_bullpen_era"] - df["away_bullpen_era"]
-    df["rest_diff"]       = df["home_rest_days"] - df["away_rest_days"]
-    df["travel_diff"]     = df["home_travel"] - df["away_travel"]  # negative = home advantage
-    df["is_warm"]         = (df["temp_f"] > 75).astype(int)
-    df["is_cold"]         = (df["temp_f"] < 45).astype(int)
-    df["wind_out"]        = df["wind_out_flag"].astype(int)
+    df["rest_diff"]        = df["home_rest_days"] - df["away_rest_days"]
+    df["travel_diff"]      = df["home_travel"] - df["away_travel"]
+    df["is_warm"]          = (df["temp_f"] > 75).astype(int)
+    df["is_cold"]          = (df["temp_f"] < 45).astype(int)
+    df["wind_out"]         = df["wind_out_flag"].astype(int)
 
-    # Step 13: SP innings & bullpen exposure + defensive OAA
-    df["sp_ip_diff"]      = df["home_sp_ip"] - df["away_sp_ip"]
-    # Bullpen exposure: low SP IP = more bullpen innings needed.
-    # Interaction with bullpen ERA: bad bullpen + short starter = compounding problem.
+    # K/9 and BB/9 derived features — FIX: strong predictors missing from ML
+    df["k9_diff"]    = df["home_k9"] - df["away_k9"]
+    df["bb9_diff"]   = df["home_bb9"] - df["away_bb9"]
+    df["k_bb_home"]  = df["home_k9"] - df["home_bb9"]
+    df["k_bb_away"]  = df["away_k9"] - df["away_bb9"]
+    df["k_bb_diff"]  = df["k_bb_home"] - df["k_bb_away"]
+
+    # SP innings & bullpen exposure + defensive OAA
+    df["sp_ip_diff"]       = df["home_sp_ip"] - df["away_sp_ip"]
     df["home_bp_exposure"] = np.maximum(0, 9.0 - df["home_sp_ip"]) * (df["home_bullpen_era"] / 4.10)
     df["away_bp_exposure"] = np.maximum(0, 9.0 - df["away_sp_ip"]) * (df["away_bullpen_era"] / 4.10)
     df["bp_exposure_diff"] = df["home_bp_exposure"] - df["away_bp_exposure"]
     df["def_oaa_diff"]     = df["home_def_oaa"] - df["away_def_oaa"]
+
+    # ── League run environment context ──
+    if "season" in df.columns:
+        df["lg_rpg"] = df["season"].map(
+            lambda s: SEASON_CONSTANTS.get(int(s), DEFAULT_CONSTANTS)["lg_rpg"]
+            if pd.notna(s) else DEFAULT_CONSTANTS["lg_rpg"]
+        )
+    else:
+        df["lg_rpg"] = DEFAULT_CONSTANTS["lg_rpg"]
 
     # ── Heuristic outputs (only from mlb_predictions rows, 0 for historical) ──
     for col, default in [("pred_home_runs", 0.0), ("pred_away_runs", 0.0),
@@ -318,24 +371,31 @@ def mlb_build_features(df):
     df["total_pred"]     = df["pred_home_runs"] + df["pred_away_runs"]
     df["home_fav"]       = (df["model_ml_home"] < 0).astype(int)
     df["ou_gap"]         = df["total_pred"] - df["ou_total"]
-    df["has_heuristic"]  = (df["total_pred"] > 0).astype(int)  # flag: 0 for historical rows
+    df["has_heuristic"]  = (df["total_pred"] > 0).astype(int)
 
     feature_cols = [
         # Raw inputs — primary signal
         "home_woba", "away_woba", "woba_diff",
         "home_starter_fip", "away_starter_fip", "fip_diff",
+        "has_sp_fip",
         "home_bullpen_era", "away_bullpen_era", "bullpen_era_diff",
         "park_factor",
         "temp_f", "wind_mph", "wind_out",
         "is_warm", "is_cold",
         "rest_diff", "travel_diff",
-        # Step 13: SP workload & defensive quality
+        # K/9 and BB/9 features
+        "home_k9", "away_k9", "k9_diff",
+        "home_bb9", "away_bb9", "bb9_diff",
+        "k_bb_home", "k_bb_away", "k_bb_diff",
+        # SP workload & defensive quality
         "home_sp_ip", "away_sp_ip", "sp_ip_diff",
         "home_bp_exposure", "away_bp_exposure", "bp_exposure_diff",
         "home_def_oaa", "away_def_oaa", "def_oaa_diff",
+        # League era context
+        "lg_rpg",
         # Heuristic outputs — secondary signal (0 for historical rows)
         "pred_home_runs", "pred_away_runs",
-        "run_diff_pred", "total_pred", 
+        "run_diff_pred", "total_pred",
         "win_pct_home", "home_fav", "ou_gap",
         "has_heuristic",
     ]
@@ -588,11 +648,24 @@ def predict_mlb(game: dict):
     home_travel = float(game.get("home_travel", 0.0))
     away_travel = float(game.get("away_travel", 0.0))
 
-    # Step 13: SP innings pitched + defensive OAA
+    # K/9 and BB/9 — FIX: now included as ML features
+    home_k9 = float(game.get("home_k9", 8.5))
+    away_k9 = float(game.get("away_k9", 8.5))
+    home_bb9 = float(game.get("home_bb9", 3.2))
+    away_bb9 = float(game.get("away_bb9", 3.2))
+
+    # SP innings pitched + defensive OAA
     home_sp_ip = float(game.get("home_sp_ip", 5.5))
     away_sp_ip = float(game.get("away_sp_ip", 5.5))
     home_def_oaa = float(game.get("home_def_oaa", 0.0))
     away_def_oaa = float(game.get("away_def_oaa", 0.0))
+
+    # SP FIP known flag
+    has_sp_fip = 1 if (home_sp_fip != 4.25 and away_sp_fip != 4.25) else 0
+
+    # Use starter FIP when known, fall back to team FIP
+    home_starter_fip = home_sp_fip if home_sp_fip != 4.25 else home_fip
+    away_starter_fip = away_sp_fip if away_sp_fip != 4.25 else away_fip
 
     # Calculate derived features
     home_bp_exposure = max(0, 9.0 - home_sp_ip) * (home_bullpen / 4.10)
@@ -604,9 +677,10 @@ def predict_mlb(game: dict):
         "away_woba": away_woba,
         "woba_diff": home_woba - away_woba,
         
-        "home_starter_fip": home_sp_fip,
-        "away_starter_fip": away_sp_fip,
-        "fip_diff": home_sp_fip - away_sp_fip,
+        "home_starter_fip": home_starter_fip,
+        "away_starter_fip": away_starter_fip,
+        "fip_diff": home_starter_fip - away_starter_fip,
+        "has_sp_fip": has_sp_fip,
         
         "home_bullpen_era": home_bullpen,
         "away_bullpen_era": away_bullpen,
@@ -622,7 +696,18 @@ def predict_mlb(game: dict):
         "rest_diff": home_rest - away_rest,
         "travel_diff": home_travel - away_travel,
 
-        # Step 13: SP workload & defensive quality
+        # K/9 and BB/9 features
+        "home_k9": home_k9,
+        "away_k9": away_k9,
+        "k9_diff": home_k9 - away_k9,
+        "home_bb9": home_bb9,
+        "away_bb9": away_bb9,
+        "bb9_diff": home_bb9 - away_bb9,
+        "k_bb_home": home_k9 - home_bb9,
+        "k_bb_away": away_k9 - away_bb9,
+        "k_bb_diff": (home_k9 - home_bb9) - (away_k9 - away_bb9),
+
+        # SP workload & defensive quality
         "home_sp_ip": home_sp_ip,
         "away_sp_ip": away_sp_ip,
         "sp_ip_diff": home_sp_ip - away_sp_ip,
@@ -632,7 +717,9 @@ def predict_mlb(game: dict):
         "home_def_oaa": home_def_oaa,
         "away_def_oaa": away_def_oaa,
         "def_oaa_diff": home_def_oaa - away_def_oaa,
-        
+
+        # League run environment context
+        "lg_rpg": DEFAULT_CONSTANTS["lg_rpg"],
         # Heuristic outputs
         "pred_home_runs": ph,
         "pred_away_runs": pa,
@@ -1455,24 +1542,8 @@ def route_model_info(sport):
 #   home_bb9, away_bb9, park_factor, home_rest_days, away_rest_days,
 #   home_travel, away_travel
 # Does NOT use: home_sp_fip (null), home_bullpen_era (missing), temp_f (null)
+# SEASON_CONSTANTS, DEFAULT_CONSTANTS, FIP_COEFF, HFA_RUNS defined above
 # ══════════════════════════════════════════════════════════════════
-
-SEASON_CONSTANTS = {
-    2015: {"lg_woba": 0.313, "woba_scale": 1.24, "lg_rpg": 4.25, "lg_fip": 3.97, "pa_pg": 38.0},
-    2016: {"lg_woba": 0.318, "woba_scale": 1.21, "lg_rpg": 4.48, "lg_fip": 4.19, "pa_pg": 38.0},
-    2017: {"lg_woba": 0.321, "woba_scale": 1.21, "lg_rpg": 4.65, "lg_fip": 4.36, "pa_pg": 38.1},
-    2018: {"lg_woba": 0.315, "woba_scale": 1.23, "lg_rpg": 4.45, "lg_fip": 4.15, "pa_pg": 37.9},
-    2019: {"lg_woba": 0.320, "woba_scale": 1.17, "lg_rpg": 4.83, "lg_fip": 4.51, "pa_pg": 38.2},
-    2021: {"lg_woba": 0.313, "woba_scale": 1.22, "lg_rpg": 4.53, "lg_fip": 4.26, "pa_pg": 37.9},
-    2022: {"lg_woba": 0.310, "woba_scale": 1.24, "lg_rpg": 4.28, "lg_fip": 4.01, "pa_pg": 37.6},
-    2023: {"lg_woba": 0.318, "woba_scale": 1.21, "lg_rpg": 4.62, "lg_fip": 4.33, "pa_pg": 37.8},
-    2024: {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8},
-    2025: {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8},
-}
-DEFAULT_CONSTANTS = {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8}
-
-FIP_COEFF = 0.55
-HFA_RUNS = 0.16   # ~0.32 run total home advantage, split between offense/pitching
 
 
 def heuristic_predict_row(row):
@@ -1652,7 +1723,8 @@ def route_backtest_mlb():
                      "home_bb9", "away_bb9",
                      "park_factor", "temp_f", "wind_mph", "wind_out_flag",
                      "home_rest_days", "away_rest_days", "home_travel", "away_travel",
-                     "season_weight", "season"]:
+                     "season_weight", "season",
+                     "home_sp_fip_known", "away_sp_fip_known"]:
             if col in all_df.columns:
                 all_df[col] = pd.to_numeric(all_df[col], errors="coerce")
 
@@ -1710,18 +1782,43 @@ def route_backtest_mlb():
             rf_reg.fit(X_train_s, y_train_margin, sample_weight=weights)
             ridge.fit(X_train_s, y_train_margin, sample_weight=weights)
 
-            meta_X = np.column_stack([gbm.predict(X_train_s), rf_reg.predict(X_train_s), ridge.predict(X_train_s)])
+            # FIX: Use OOF predictions for meta-learner (avoids in-sample leakage)
+            from sklearn.model_selection import cross_val_predict as cvp
+            cv_folds_bt = min(3, len(train_df))
+            oof_gbm_m = cvp(GradientBoostingRegressor(n_estimators=150, max_depth=4, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42), X_train_s, y_train_margin, cv=cv_folds_bt)
+            oof_rf_m = cvp(RandomForestRegressor(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1), X_train_s, y_train_margin, cv=cv_folds_bt)
+            oof_ridge_m = cvp(RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds_bt), X_train_s, y_train_margin, cv=cv_folds_bt)
+
+            meta_X = np.column_stack([oof_gbm_m, oof_rf_m, oof_ridge_m])
             meta_reg = Ridge(alpha=1.0)
             meta_reg.fit(meta_X, y_train_margin)
 
+            # FIX: Full 3-model stacked classifier matching train_mlb()
             gbm_clf = GradientBoostingClassifier(n_estimators=100, max_depth=3, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
+            rf_clf = RandomForestClassifier(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1)
             lr_clf = LogisticRegression(max_iter=1000)
             gbm_clf.fit(X_train_s, y_train_win, sample_weight=weights)
+            rf_clf.fit(X_train_s, y_train_win, sample_weight=weights)
             lr_clf.fit(X_train_s, y_train_win, sample_weight=weights)
+
+            # OOF probabilities for classifier meta-learner
+            oof_gbm_p = cvp(GradientBoostingClassifier(n_estimators=100, max_depth=3, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42), X_train_s, y_train_win, cv=cv_folds_bt, method="predict_proba")[:, 1]
+            oof_rf_p = cvp(RandomForestClassifier(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1), X_train_s, y_train_win, cv=cv_folds_bt, method="predict_proba")[:, 1]
+            oof_lr_p = cvp(LogisticRegression(max_iter=1000), X_train_s, y_train_win, cv=cv_folds_bt, method="predict_proba")[:, 1]
+
+            meta_clf_X = np.column_stack([oof_gbm_p, oof_rf_p, oof_lr_p])
+            meta_lr = LogisticRegression(max_iter=1000)
+            meta_lr.fit(meta_clf_X, y_train_win)
 
             test_meta = np.column_stack([gbm.predict(X_test_s), rf_reg.predict(X_test_s), ridge.predict(X_test_s)])
             pred_margin = meta_reg.predict(test_meta)
-            pred_wp = 0.6 * gbm_clf.predict_proba(X_test_s)[:, 1] + 0.4 * lr_clf.predict_proba(X_test_s)[:, 1]
+            # FIX: Use stacked meta-classifier instead of hardcoded 0.6/0.4 blend
+            test_clf_meta = np.column_stack([
+                gbm_clf.predict_proba(X_test_s)[:, 1],
+                rf_clf.predict_proba(X_test_s)[:, 1],
+                lr_clf.predict_proba(X_test_s)[:, 1],
+            ])
+            pred_wp = meta_lr.predict_proba(test_clf_meta)[:, 1]
             pred_pick = (pred_wp >= 0.5).astype(int)
 
             accuracy = float(np.mean(pred_pick == y_test_win))
