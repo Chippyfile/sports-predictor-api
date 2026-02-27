@@ -1477,8 +1477,19 @@ HFA_RUNS = 0.16   # ~0.32 run total home advantage, split between offense/pitchi
 
 def heuristic_predict_row(row):
     """
-    Replay the mlb.js heuristic in Python using AVAILABLE historical columns.
+    Replay the mlb.js v15 heuristic in Python using AVAILABLE historical columns.
     Produces differentiated pred_home_runs / pred_away_runs per game.
+
+    F-03 FIX: Team FIP/K9/BB9 in mlb_historical are end-of-season aggregates, not
+    pre-game values. This creates a forward-looking data leak. We apply a 50%
+    regression-to-mean discount on all pitching stats to approximate mid-season
+    knowledge level. wOBA has the same issue but is less correlated with single-game
+    outcomes, so the leak is smaller.
+
+    Also aligned with JS engine fixes:
+      F-01: Pythagenpat uses league-RPG exponent (not per-matchup)
+      F-02: FIP applied as marginal (vs league FIP, discounted)
+      F-04: Updated wOBA fallback (not used here — historical has direct wOBA)
     """
     season = int(row.get("season", 2024))
     sc = SEASON_CONSTANTS.get(season, DEFAULT_CONSTANTS)
@@ -1486,7 +1497,7 @@ def heuristic_predict_row(row):
     # Available columns
     home_woba = row.get("home_woba")
     away_woba = row.get("away_woba")
-    home_fip  = row.get("home_fip")    # team FIP (not starter)
+    home_fip  = row.get("home_fip")    # team FIP (not starter) — END OF SEASON
     away_fip  = row.get("away_fip")
     home_k9   = row.get("home_k9")
     away_k9   = row.get("away_k9")
@@ -1519,25 +1530,34 @@ def heuristic_predict_row(row):
     lg_fip = sc["lg_fip"]
     pa_pg = sc["pa_pg"]
 
+    # F-03: Regress pitching stats 50% toward league mean to limit forward-looking leak.
+    # End-of-season FIP contains information from games that haven't happened yet at
+    # prediction time. 50% regression approximates mid-season knowledge.
+    LEAK_DISCOUNT = 0.50
+    home_fip_adj = lg_fip + (home_fip - lg_fip) * LEAK_DISCOUNT
+    away_fip_adj = lg_fip + (away_fip - lg_fip) * LEAK_DISCOUNT
+    home_k9_adj  = 8.5 + (home_k9 - 8.5) * LEAK_DISCOUNT
+    away_k9_adj  = 8.5 + (away_k9 - 8.5) * LEAK_DISCOUNT
+    home_bb9_adj = 3.2 + (home_bb9 - 3.2) * LEAK_DISCOUNT
+    away_bb9_adj = 3.2 + (away_bb9 - 3.2) * LEAK_DISCOUNT
+
     # ── wOBA → Runs (FanGraphs method) ──
     hr = lg_rpg + ((home_woba - lg_woba) / woba_scale) * pa_pg
     ar = lg_rpg + ((away_woba - lg_woba) / woba_scale) * pa_pg
 
-    # ── Team FIP impact (opponent pitching suppresses/inflates runs) ──
-    # home_fip = home team's pitching → affects AWAY runs
-    # away_fip = away team's pitching → affects HOME runs
-    ar += (home_fip - lg_fip) * FIP_COEFF   # good home pitching lowers away runs
-    hr += (away_fip - lg_fip) * FIP_COEFF   # good away pitching lowers home runs
+    # ── Team FIP impact (F-02 aligned: marginal, discounted) ──
+    # Using discounted FIP (leak-adjusted) and 0.65 coefficient (reduced from 1.0
+    # to avoid double-counting with wOBA-based run estimate)
+    ar += (home_fip_adj - lg_fip) * FIP_COEFF * 0.65
+    hr += (away_fip_adj - lg_fip) * FIP_COEFF * 0.65
 
-    # ── K/9 and BB/9 adjustments (strikeout pitchers suppress, walks inflate) ──
+    # ── K/9 and BB/9 adjustments (using leak-adjusted values) ──
     lg_k9 = 8.5
     lg_bb9 = 3.2
-    # Home pitching K/BB effect on away runs
-    ar -= (home_k9 - lg_k9) * 0.04   # more Ks = fewer runs
-    ar += (home_bb9 - lg_bb9) * 0.06  # more BBs = more runs
-    # Away pitching K/BB effect on home runs
-    hr -= (away_k9 - lg_k9) * 0.04
-    hr += (away_bb9 - lg_bb9) * 0.06
+    ar -= (home_k9_adj - lg_k9) * 0.04
+    ar += (home_bb9_adj - lg_bb9) * 0.06
+    hr -= (away_k9_adj - lg_k9) * 0.04
+    hr += (away_bb9_adj - lg_bb9) * 0.06
 
     # ── Park factor ──
     pf = max(0.86, min(1.28, pf))
@@ -1560,9 +1580,9 @@ def heuristic_predict_row(row):
     hr = max(2.0, min(9.0, hr))
     ar = max(2.0, min(9.0, ar))
 
-    # ── Pythagenpat ──
-    rpg = hr + ar
-    exp = max(1.60, min(2.10, rpg ** 0.287))
+    # ── Pythagenpat (F-01 aligned: fixed league-RPG exponent) ──
+    league_rpg = 2 * lg_rpg  # league-wide total RPG
+    exp = max(1.60, min(2.10, league_rpg ** 0.287))
     win_pct = (hr ** exp) / (hr ** exp + ar ** exp)
     win_pct = max(0.15, min(0.85, win_pct))
 
