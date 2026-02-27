@@ -1467,3 +1467,31 @@ def debug_train_mlb():
             "type": type(e).__name__,
             "traceback": traceback.format_exc()
         }), 500
+
+@app.route("/debug/train-mlb-lite", methods=["POST"])
+def debug_train_mlb_lite():
+    import traceback
+    try:
+        # Temporarily limit historical data
+        original_sb_get = globals().get('sb_get')
+        rows = sb_get("mlb_predictions",
+                      "result_entered=eq.true&actual_home_runs=not.is.null&game_type=eq.R&select=*")
+        current_df = __import__('pandas').DataFrame(rows) if rows else __import__('pandas').DataFrame()
+        
+        # Get historical but limit to 2000 rows
+        hist_rows = sb_get("mlb_historical",
+                          "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=2000")
+        
+        return jsonify({
+            "status": "data_check",
+            "current_rows": len(current_df),
+            "historical_rows": len(hist_rows) if hist_rows else 0,
+            "hist_columns": list(hist_rows[0].keys()) if hist_rows else [],
+            "sample_row": hist_rows[0] if hist_rows else None,
+        })
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }), 500
