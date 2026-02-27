@@ -25,10 +25,10 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ── ML imports ────────────────────────────────────────────────────────────────
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestClassifier
-from sklearn.linear_model import RidgeCV, LogisticRegression
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier
+from sklearn.linear_model import RidgeCV, LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score, cross_val_predict
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import mean_absolute_error, accuracy_score, brier_score_loss
 import shap
@@ -245,6 +245,11 @@ def mlb_build_features(df):
         "away_rest_days":   4.0,
         "home_travel":      0.0,
         "away_travel":      0.0,
+        # Step 13: SP innings pitched + defensive OAA
+        "home_sp_ip":       5.5,    # starter avg IP (league avg ~5.5 in 2024)
+        "away_sp_ip":       5.5,
+        "home_def_oaa":     0.0,    # team defensive Outs Above Average (Statcast)
+        "away_def_oaa":     0.0,
     }
     for col, default in raw_cols.items():
         if col in df.columns:
@@ -265,6 +270,15 @@ def mlb_build_features(df):
     df["is_warm"]         = (df["temp_f"] > 75).astype(int)
     df["is_cold"]         = (df["temp_f"] < 45).astype(int)
     df["wind_out"]        = df["wind_out_flag"].astype(int)
+
+    # Step 13: SP innings & bullpen exposure + defensive OAA
+    df["sp_ip_diff"]      = df["home_sp_ip"] - df["away_sp_ip"]
+    # Bullpen exposure: low SP IP = more bullpen innings needed.
+    # Interaction with bullpen ERA: bad bullpen + short starter = compounding problem.
+    df["home_bp_exposure"] = np.maximum(0, 9.0 - df["home_sp_ip"]) * (df["home_bullpen_era"] / 4.10)
+    df["away_bp_exposure"] = np.maximum(0, 9.0 - df["away_sp_ip"]) * (df["away_bullpen_era"] / 4.10)
+    df["bp_exposure_diff"] = df["home_bp_exposure"] - df["away_bp_exposure"]
+    df["def_oaa_diff"]     = df["home_def_oaa"] - df["away_def_oaa"]
 
     # ── Heuristic outputs (only from mlb_predictions rows, 0 for historical) ──
     for col, default in [("pred_home_runs", 0.0), ("pred_away_runs", 0.0),
@@ -290,6 +304,10 @@ def mlb_build_features(df):
         "temp_f", "wind_mph", "wind_out",
         "is_warm", "is_cold",
         "rest_diff", "travel_diff",
+        # Step 13: SP workload & defensive quality
+        "home_sp_ip", "away_sp_ip", "sp_ip_diff",
+        "home_bp_exposure", "away_bp_exposure", "bp_exposure_diff",
+        "home_def_oaa", "away_def_oaa", "def_oaa_diff",
         # Heuristic outputs — secondary signal (0 for historical rows)
         "pred_home_runs", "pred_away_runs",
         "run_diff_pred", "total_pred", 
@@ -329,10 +347,15 @@ def _mlb_merge_historical(current_df):
             hist_df[col] = pd.to_numeric(hist_df[col], errors="coerce")
 
     # Historical rows have no heuristic predictions — zero them out explicitly
-    # so has_heuristic=0 correctly flags them in the feature matrix
+    # so has_heuristic=0 correctly flags them in the feature matrix.
+    #
+    # CRITICAL FIX (Finding #10): win_pct_home was previously set to home_win
+    # (1.0 if home won, 0.0 if lost) — this leaked the target variable directly
+    # into the feature matrix. Historical rows had no pre-game prediction, so
+    # the correct neutral value is 0.5 (no information).
     hist_df["pred_home_runs"] = 0.0
     hist_df["pred_away_runs"] = 0.0
-    hist_df["win_pct_home"]   = hist_df["home_win"].fillna(0.5)
+    hist_df["win_pct_home"]   = 0.5   # was: hist_df["home_win"].fillna(0.5) — DATA LEAK
     hist_df["ou_total"]       = 0.0
     hist_df["model_ml_home"]  = 0
 
@@ -385,31 +408,124 @@ def train_mlb():
 
     # Choose model based on data volume
     n = len(df)
-    if n >= 500:
-        reg = GradientBoostingRegressor(
+    cv_folds = min(5, n)
+
+    if n >= 200:
+        # ── STACKING ENSEMBLE (Finding #15) ──────────────────────────────
+        # Level 0: three diverse base learners for margin regression
+        # Level 1: Ridge meta-learner trained on out-of-fold predictions
+        # Diversity: GBM (boosted trees) + RF (bagged trees) + Ridge (linear)
+        # This captures non-linear interactions (GBM/RF) while Ridge stabilizes.
+
+        gbm = GradientBoostingRegressor(
             n_estimators=300, max_depth=4,
             learning_rate=0.04, subsample=0.8,
             min_samples_leaf=20, random_state=42,
         )
-        reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
-        reg_cv = cross_val_score(reg, X_scaled, y_margin,
-                                  cv=min(5, n), scoring="neg_mean_absolute_error")
-        explainer = shap.TreeExplainer(reg)
-        model_type = "GradientBoosting"
+        rf_reg = RandomForestRegressor(
+            n_estimators=200, max_depth=6,
+            min_samples_leaf=15, max_features=0.7,
+            random_state=42, n_jobs=-1,
+        )
+        ridge = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
+
+        # Generate out-of-fold predictions for stacking
+        print("  Training stacking ensemble (GBM + RF + Ridge)...")
+        oof_gbm = cross_val_predict(gbm, X_scaled, y_margin, cv=cv_folds)
+        oof_rf  = cross_val_predict(rf_reg, X_scaled, y_margin, cv=cv_folds)
+        oof_ridge = cross_val_predict(ridge, X_scaled, y_margin, cv=cv_folds)
+
+        # Fit all base learners on full data
+        gbm.fit(X_scaled, y_margin, sample_weight=fit_weights)
+        rf_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
+        ridge.fit(X_scaled, y_margin, sample_weight=fit_weights)
+
+        # Level 1: meta-learner on stacked OOF predictions
+        meta_X = np.column_stack([oof_gbm, oof_rf, oof_ridge])
+        meta_reg = Ridge(alpha=1.0)
+        meta_reg.fit(meta_X, y_margin)
+
+        # Wrap into a single object that has .predict() for compatibility
+        class StackedRegressor:
+            """Drop-in replacement: bundle['reg'].predict(X) still works."""
+            def __init__(self, base_learners, meta, scaler_ref):
+                self.base_learners = base_learners  # [gbm, rf, ridge]
+                self.meta = meta
+            def predict(self, X):
+                base_preds = np.column_stack([m.predict(X) for m in self.base_learners])
+                return self.meta.predict(base_preds)
+
+        reg = StackedRegressor([gbm, rf_reg, ridge], meta_reg, scaler)
+        reg_cv = cross_val_score(gbm, X_scaled, y_margin,
+                                  cv=cv_folds, scoring="neg_mean_absolute_error")
+
+        # SHAP: use GBM component (most interpretable tree-based learner)
+        explainer = shap.TreeExplainer(gbm)
+        model_type = "StackedEnsemble(GBM+RF+Ridge)"
+
+        # ── Stacked classifier for win probability ───────────────────────
+        gbm_clf = GradientBoostingClassifier(
+            n_estimators=200, max_depth=3,
+            learning_rate=0.05, subsample=0.8,
+            min_samples_leaf=20, random_state=42,
+        )
+        rf_clf = RandomForestClassifier(
+            n_estimators=200, max_depth=6,
+            min_samples_leaf=15, max_features=0.7,
+            random_state=42, n_jobs=-1,
+        )
+        lr_clf = LogisticRegression(max_iter=1000)
+
+        # OOF probabilities for classifier stacking
+        oof_gbm_p = cross_val_predict(gbm_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+        oof_rf_p  = cross_val_predict(rf_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+        oof_lr_p  = cross_val_predict(lr_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+
+        # Fit base classifiers on full data
+        gbm_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+        rf_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+        lr_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+
+        # Meta-classifier on stacked OOF probabilities
+        meta_clf_X = np.column_stack([oof_gbm_p, oof_rf_p, oof_lr_p])
+        meta_lr = LogisticRegression(max_iter=1000)
+        meta_lr.fit(meta_clf_X, y_win)
+
+        class StackedClassifier:
+            """Drop-in replacement: bundle['clf'].predict_proba(X) still works."""
+            def __init__(self, base_clfs, meta):
+                self.base_clfs = base_clfs
+                self.meta = meta
+                self.classes_ = np.array([0, 1])
+            def predict_proba(self, X):
+                base_probs = np.column_stack([c.predict_proba(X)[:, 1] for c in self.base_clfs])
+                return self.meta.predict_proba(base_probs)
+            def predict(self, X):
+                return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+        # Calibrate the stacked classifier (prefit: sklearn can't clone custom classes)
+        clf = CalibratedClassifierCV(
+            StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr),
+            cv="prefit", method="isotonic"
+        )
+        clf.fit(X_scaled, y_win)
+
+        print(f"  Stacking meta weights (reg): {meta_reg.coef_.round(3)}")
+
     else:
-        reg = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=min(5, n))
+        reg = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
         reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
         reg_cv = cross_val_score(reg, X_scaled, y_margin,
-                                  cv=min(5, n), scoring="neg_mean_absolute_error")
+                                  cv=cv_folds, scoring="neg_mean_absolute_error")
         explainer = shap.LinearExplainer(reg, X_scaled, feature_perturbation="interventional")
         model_type = "Ridge"
 
-    # Win probability classifier: calibrated logistic
-    clf = CalibratedClassifierCV(
-        LogisticRegression(max_iter=1000, class_weight='balanced'), 
-        cv=min(5, n)
-    )
-    clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+        # Simple classifier for small data
+        clf = CalibratedClassifierCV(
+            LogisticRegression(max_iter=1000),
+            cv=cv_folds
+        )
+        clf.fit(X_scaled, y_win, sample_weight=fit_weights)
 
     bundle = {
         "scaler": scaler,
@@ -440,7 +556,7 @@ def train_mlb():
         "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
         "features": list(X.columns),
         "dispersion": disp,
-        "upgrade_note": f"Using {'GradientBoosting (non-linear)' if model_type == 'GradientBoosting' else 'Ridge (linear) — will auto-upgrade to GBM at 500+ training rows'}",
+        "upgrade_note": f"Using {'StackedEnsemble (GBM+RF+Ridge)' if 'Stacked' in model_type else 'Ridge (linear) — will auto-upgrade to stacking ensemble at 200+ training rows'}",
     }
 
 
@@ -471,7 +587,16 @@ def predict_mlb(game: dict):
     home_travel = float(game.get("home_travel", 0.0))
     away_travel = float(game.get("away_travel", 0.0))
 
+    # Step 13: SP innings pitched + defensive OAA
+    home_sp_ip = float(game.get("home_sp_ip", 5.5))
+    away_sp_ip = float(game.get("away_sp_ip", 5.5))
+    home_def_oaa = float(game.get("home_def_oaa", 0.0))
+    away_def_oaa = float(game.get("away_def_oaa", 0.0))
+
     # Calculate derived features
+    home_bp_exposure = max(0, 9.0 - home_sp_ip) * (home_bullpen / 4.10)
+    away_bp_exposure = max(0, 9.0 - away_sp_ip) * (away_bullpen / 4.10)
+
     row_data = {
         # Raw inputs
         "home_woba": home_woba,
@@ -495,6 +620,17 @@ def predict_mlb(game: dict):
         
         "rest_diff": home_rest - away_rest,
         "travel_diff": home_travel - away_travel,
+
+        # Step 13: SP workload & defensive quality
+        "home_sp_ip": home_sp_ip,
+        "away_sp_ip": away_sp_ip,
+        "sp_ip_diff": home_sp_ip - away_sp_ip,
+        "home_bp_exposure": home_bp_exposure,
+        "away_bp_exposure": away_bp_exposure,
+        "bp_exposure_diff": home_bp_exposure - away_bp_exposure,
+        "home_def_oaa": home_def_oaa,
+        "away_def_oaa": away_def_oaa,
+        "def_oaa_diff": home_def_oaa - away_def_oaa,
         
         # Heuristic outputs
         "pred_home_runs": ph,
@@ -1002,7 +1138,7 @@ def _negbin_draw_numpy(rng, mu, k, size):
     lam = rng.gamma(shape=k, scale=mu / k, size=size)
     return rng.poisson(lam).astype(float)
 
-def monte_carlo(sport, home_mean, away_mean, n_sims=10_000, ou_line=None):
+def monte_carlo(sport, home_mean, away_mean, n_sims=10_000, ou_line=None, game_id=None):
     """
     Run score simulations and return outcome distribution.
 
@@ -1014,8 +1150,17 @@ def monte_carlo(sport, home_mean, away_mean, n_sims=10_000, ou_line=None):
     Others:
       - Normal distribution (unchanged, appropriate for high-scoring sports)
       - Returns spread cover %, over/under % at posted total
+
+    FIX (Finding #17): Seed is now derived from game_id so each game gets
+    unique random draws. Fixed seed=42 caused identical simulations for
+    any two games with the same run means, wasting 10k draws of signal.
     """
-    rng = np.random.default_rng(42)
+    if game_id is not None:
+        seed = hash(str(game_id)) % (2**32)
+    else:
+        # No game_id provided — use time-based seed for uniqueness
+        seed = int(datetime.utcnow().timestamp() * 1000) % (2**32)
+    rng = np.random.default_rng(seed)
 
     if sport == "MLB":
         k_home, k_away = _get_mlb_k()
@@ -1032,10 +1177,12 @@ def monte_carlo(sport, home_mean, away_mean, n_sims=10_000, ou_line=None):
         away_mean_adj = np.maximum(away_mean * env_factor, 0.5)
 
         # ── Negative Binomial draws via Gamma-Poisson mixture ────────────
-        home_scores = _negbin_draw_numpy(rng, home_mean_adj.mean(), k_home, n_sims)
-        away_scores = _negbin_draw_numpy(rng, away_mean_adj.mean(), k_away, n_sims)
-
-        # Re-draw using per-sim adjusted means for proper correlation
+        # FIX (Finding #15): Removed duplicate scalar-mean draw that was
+        # immediately overwritten. That dead code wasted ~40k RNG calls,
+        # shifting all subsequent draws to different sequence positions.
+        # Only the per-sim correlated draw below is correct — it uses each
+        # simulation's individually adjusted mean from the shared env_factor,
+        # preserving the home/away run correlation within each simulated game.
         home_lam = rng.gamma(shape=k_home, scale=home_mean_adj / k_home, size=n_sims)
         away_lam = rng.gamma(shape=k_away, scale=away_mean_adj / k_away, size=n_sims)
         home_scores = rng.poisson(home_lam).astype(float)
@@ -1259,7 +1406,8 @@ def route_monte_carlo():
     ou_line   = body.get("ou_line", None)  # NEW: pass the posted O/U line
     if ou_line is not None:
         ou_line = float(ou_line)
-    return jsonify(monte_carlo(sport, home_mean, away_mean, n_sims, ou_line))
+    game_id   = body.get("game_id", None)
+    return jsonify(monte_carlo(sport, home_mean, away_mean, n_sims, ou_line, game_id))
 
 # ── Accuracy reports ───────────────────────────────────────────
 SPORT_TABLES = {
