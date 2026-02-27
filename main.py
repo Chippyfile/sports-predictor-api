@@ -1449,30 +1449,140 @@ def route_model_info(sport):
     return jsonify(info)
 
 # ══════════════════════════════════════════════════════════════════
+# PYTHON-SIDE HEURISTIC REPLAY (mirrors mlb.js logic)
+# Used to backfill pred_home_runs / pred_away_runs for historical games
+# so the ML model gets the full feature set during backtesting.
+# ══════════════════════════════════════════════════════════════════
+
+# Season-specific league constants (FanGraphs Guts!)
+SEASON_CONSTANTS = {
+    2015: {"lg_woba": 0.313, "woba_scale": 1.24, "lg_rpg": 4.25, "lg_fip": 3.97, "pa_pg": 38.0},
+    2016: {"lg_woba": 0.318, "woba_scale": 1.21, "lg_rpg": 4.48, "lg_fip": 4.19, "pa_pg": 38.0},
+    2017: {"lg_woba": 0.321, "woba_scale": 1.21, "lg_rpg": 4.65, "lg_fip": 4.36, "pa_pg": 38.1},
+    2018: {"lg_woba": 0.315, "woba_scale": 1.23, "lg_rpg": 4.45, "lg_fip": 4.15, "pa_pg": 37.9},
+    2019: {"lg_woba": 0.320, "woba_scale": 1.17, "lg_rpg": 4.83, "lg_fip": 4.51, "pa_pg": 38.2},
+    2021: {"lg_woba": 0.313, "woba_scale": 1.22, "lg_rpg": 4.53, "lg_fip": 4.26, "pa_pg": 37.9},
+    2022: {"lg_woba": 0.310, "woba_scale": 1.24, "lg_rpg": 4.28, "lg_fip": 4.01, "pa_pg": 37.6},
+    2023: {"lg_woba": 0.318, "woba_scale": 1.21, "lg_rpg": 4.62, "lg_fip": 4.33, "pa_pg": 37.8},
+    2024: {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8},
+    2025: {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8},
+}
+DEFAULT_CONSTANTS = {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8}
+
+FIP_COEFF = 0.55
+HFA_BASE = 0.035
+
+
+def heuristic_predict_row(row):
+    """
+    Replay the mlb.js heuristic engine in Python for a single historical game row.
+    Uses pre-game features (wOBA, FIP, park factor, etc.) to produce predicted runs.
+    No actual outcome data is used — safe from data leakage.
+    """
+    season = int(row.get("season", 2024))
+    sc = SEASON_CONSTANTS.get(season, DEFAULT_CONSTANTS)
+
+    home_woba = float(row.get("home_woba") or sc["lg_woba"])
+    away_woba = float(row.get("away_woba") or sc["lg_woba"])
+    home_sp_fip = float(row.get("home_sp_fip") or row.get("home_fip") or sc["lg_fip"])
+    away_sp_fip = float(row.get("away_sp_fip") or row.get("away_fip") or sc["lg_fip"])
+    home_bp_era = float(row.get("home_bullpen_era") or 4.10)
+    away_bp_era = float(row.get("away_bullpen_era") or 4.10)
+    park_factor = float(row.get("park_factor") or 1.0)
+    temp_f = float(row.get("temp_f") or 70.0)
+    wind_mph = float(row.get("wind_mph") or 5.0)
+    wind_out = int(row.get("wind_out_flag") or 0)
+
+    lg_woba = sc["lg_woba"]
+    woba_scale = sc["woba_scale"]
+    lg_rpg = sc["lg_rpg"]
+    lg_fip = sc["lg_fip"]
+    pa_pg = sc["pa_pg"]
+
+    # wOBA → Runs (FanGraphs method)
+    hr = lg_rpg + ((home_woba - lg_woba) / woba_scale) * pa_pg
+    ar = lg_rpg + ((away_woba - lg_woba) / woba_scale) * pa_pg
+
+    # FIP impact
+    ar += (home_sp_fip - lg_fip) * FIP_COEFF
+    hr += (away_sp_fip - lg_fip) * FIP_COEFF
+
+    # Bullpen quality (symmetric)
+    lg_bp_era = 4.10
+    home_bp_q = (lg_bp_era - (home_bp_era * 0.45 + home_bp_era * 0.55)) / lg_bp_era
+    away_bp_q = (lg_bp_era - (away_bp_era * 0.45 + away_bp_era * 0.55)) / lg_bp_era
+    ar -= home_bp_q * 0.40
+    hr -= away_bp_q * 0.40
+
+    # Park + weather
+    eff_pf = park_factor
+    eff_pf += ((temp_f - 70) / 10) * 0.0028
+    if wind_out and wind_mph > 8:
+        eff_pf += (wind_mph - 8) * 0.0028
+    eff_pf = max(0.86, min(1.28, eff_pf))
+
+    hr *= eff_pf
+    ar *= eff_pf
+
+    hr = max(1.8, min(9.5, hr))
+    ar = max(1.8, min(9.5, ar))
+
+    # Pythagenpat
+    rpg = hr + ar
+    exp = max(1.60, min(2.10, rpg ** 0.287))
+    pyth = (hr ** exp) / (hr ** exp + ar ** exp)
+    win_pct = max(0.13, min(0.87, pyth + HFA_BASE))
+
+    model_ml = int(-round((win_pct / (1 - win_pct)) * 100) if win_pct >= 0.5
+                    else round(((1 - win_pct) / win_pct) * 100))
+
+    return {
+        "pred_home_runs": round(hr, 3),
+        "pred_away_runs": round(ar, 3),
+        "win_pct_home": round(win_pct, 4),
+        "ou_total": round(hr + ar, 1),
+        "model_ml_home": model_ml,
+    }
+
+
+def backfill_heuristic(df):
+    """Apply heuristic_predict_row to every row in df, filling pred columns."""
+    preds = df.apply(lambda r: pd.Series(heuristic_predict_row(r)), axis=1)
+    df["pred_home_runs"] = preds["pred_home_runs"].astype(float)
+    df["pred_away_runs"] = preds["pred_away_runs"].astype(float)
+    df["win_pct_home"]   = preds["win_pct_home"].astype(float)
+    df["ou_total"]       = preds["ou_total"].astype(float)
+    df["model_ml_home"]  = preds["model_ml_home"].astype(int)
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════
 # MLB BACKTESTING
 # ══════════════════════════════════════════════════════════════════
 
 @app.route("/backtest/mlb", methods=["POST"])
 def route_backtest_mlb():
     """
-    Walk-forward backtest: train on past seasons, predict next season.
+    Walk-forward backtest with heuristic backfill.
     Body params (all optional):
-      - test_seasons: list of seasons to test (default: [2019,2021,2022,2023,2024,2025])
-      - min_train_seasons: minimum seasons for training (default: 3)
+      - test_seasons: list (default: [2019,2021,2022,2023,2024,2025])
+      - use_heuristic: bool (default: true) — backfill heuristic predictions
+      - min_train_seasons: int (default: 3)
     """
     import traceback
     try:
         body = request.get_json() or {}
         test_seasons = body.get("test_seasons", [2019, 2021, 2022, 2023, 2024, 2025])
+        use_heuristic = body.get("use_heuristic", True)
         min_train = body.get("min_train_seasons", 3)
-        
+
         all_rows = sb_get(
             "mlb_historical",
             "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.asc&limit=100000"
         )
         if not all_rows or len(all_rows) < 100:
-            return jsonify({"error": "Not enough historical data for backtesting"})
-        
+            return jsonify({"error": "Not enough historical data"})
+
         all_df = pd.DataFrame(all_rows)
         for col in ["actual_home_runs", "actual_away_runs", "home_win",
                      "home_woba", "away_woba", "home_sp_fip", "away_sp_fip",
@@ -1482,70 +1592,95 @@ def route_backtest_mlb():
                      "season_weight", "season"]:
             if col in all_df.columns:
                 all_df[col] = pd.to_numeric(all_df[col], errors="coerce")
-        
-        all_df["pred_home_runs"] = 0.0
-        all_df["pred_away_runs"] = 0.0
-        all_df["win_pct_home"]   = 0.5
-        all_df["ou_total"]       = 0.0
-        all_df["model_ml_home"]  = 0
-        
+
+        if use_heuristic:
+            print("  Backfilling heuristic predictions for all historical rows...")
+            all_df = backfill_heuristic(all_df)
+        else:
+            all_df["pred_home_runs"] = 0.0
+            all_df["pred_away_runs"] = 0.0
+            all_df["win_pct_home"]   = 0.5
+            all_df["ou_total"]       = 0.0
+            all_df["model_ml_home"]  = 0
+
         available_seasons = sorted(all_df["season"].dropna().astype(int).unique().tolist())
         results_by_season = []
         all_predictions = []
-        
+
         for test_season in test_seasons:
             if test_season not in available_seasons:
                 continue
-            
+
             train_df = all_df[all_df["season"] < test_season].copy()
             test_df  = all_df[all_df["season"] == test_season].copy()
-            
+
             train_seasons = sorted(train_df["season"].dropna().astype(int).unique().tolist())
             if len(train_seasons) < min_train or len(test_df) < 10:
                 continue
-            
+
             X_train = mlb_build_features(train_df)
             y_train_margin = (train_df["actual_home_runs"] - train_df["actual_away_runs"]).values
             y_train_win = train_df["home_win"].astype(int).values
-            
+
             X_test = mlb_build_features(test_df)
             y_test_margin = (test_df["actual_home_runs"] - test_df["actual_away_runs"]).values
             y_test_win = test_df["home_win"].astype(int).values
             y_test_hr = test_df["actual_home_runs"].values
             y_test_ar = test_df["actual_away_runs"].values
-            
+
             weights = train_df["season_weight"].fillna(1.0).astype(float).values if "season_weight" in train_df.columns else np.ones(len(train_df))
-            
+
             scaler = StandardScaler()
             X_train_s = scaler.fit_transform(X_train)
             X_test_s  = scaler.transform(X_test)
-            
+
             gbm = GradientBoostingRegressor(n_estimators=150, max_depth=4, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
             rf_reg = RandomForestRegressor(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1)
             ridge = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=3)
-            
+
             gbm.fit(X_train_s, y_train_margin, sample_weight=weights)
             rf_reg.fit(X_train_s, y_train_margin, sample_weight=weights)
             ridge.fit(X_train_s, y_train_margin, sample_weight=weights)
-            
+
             meta_X = np.column_stack([gbm.predict(X_train_s), rf_reg.predict(X_train_s), ridge.predict(X_train_s)])
             meta_reg = Ridge(alpha=1.0)
             meta_reg.fit(meta_X, y_train_margin)
-            
+
             gbm_clf = GradientBoostingClassifier(n_estimators=100, max_depth=3, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
             lr_clf = LogisticRegression(max_iter=1000)
             gbm_clf.fit(X_train_s, y_train_win, sample_weight=weights)
             lr_clf.fit(X_train_s, y_train_win, sample_weight=weights)
-            
+
             test_meta = np.column_stack([gbm.predict(X_test_s), rf_reg.predict(X_test_s), ridge.predict(X_test_s)])
             pred_margin = meta_reg.predict(test_meta)
             pred_wp = 0.6 * gbm_clf.predict_proba(X_test_s)[:, 1] + 0.4 * lr_clf.predict_proba(X_test_s)[:, 1]
             pred_pick = (pred_wp >= 0.5).astype(int)
-            
+
             accuracy = float(np.mean(pred_pick == y_test_win))
-            mae = float(mean_absolute_error(y_test_margin, pred_margin))
+            mae_margin = float(mean_absolute_error(y_test_margin, pred_margin))
             brier = float(brier_score_loss(y_test_win, pred_wp))
-            
+
+            # Run-level MAE: convert margin prediction to individual runs
+            lg_avg = float(y_test_hr.mean() + y_test_ar.mean()) / 2
+            pred_hr = lg_avg + pred_margin / 2
+            pred_ar = lg_avg - pred_margin / 2
+            mae_home_runs = float(mean_absolute_error(y_test_hr, pred_hr))
+            mae_away_runs = float(mean_absolute_error(y_test_ar, pred_ar))
+            mae_total = float(mean_absolute_error(y_test_hr + y_test_ar, pred_hr + pred_ar))
+
+            # Also measure heuristic-only accuracy for comparison
+            if use_heuristic:
+                heur_wp = test_df["win_pct_home"].values
+                heur_pick = (heur_wp >= 0.5).astype(int)
+                heur_acc = float(np.mean(heur_pick == y_test_win))
+                heur_brier = float(brier_score_loss(y_test_win, np.clip(heur_wp, 0.01, 0.99)))
+                heur_pred_hr = test_df["pred_home_runs"].values
+                heur_pred_ar = test_df["pred_away_runs"].values
+                heur_mae_margin = float(mean_absolute_error(y_test_margin, heur_pred_hr - heur_pred_ar))
+                heur_mae_total = float(mean_absolute_error(y_test_hr + y_test_ar, heur_pred_hr + heur_pred_ar))
+            else:
+                heur_acc = heur_brier = heur_mae_margin = heur_mae_total = None
+
             cal_bins = []
             for lo, hi in [(0.0, 0.35), (0.35, 0.45), (0.45, 0.55), (0.55, 0.65), (0.65, 1.01)]:
                 mask = (pred_wp >= lo) & (pred_wp < hi)
@@ -1554,7 +1689,7 @@ def route_backtest_mlb():
                     cal_bins.append({"range": f"{lo:.0%}-{hi:.0%}", "n": n_bin,
                         "predicted": round(float(pred_wp[mask].mean()), 3),
                         "actual": round(float(y_test_win[mask].mean()), 3)})
-            
+
             conf_results = []
             for t in [0.52, 0.55, 0.58, 0.60, 0.65]:
                 strong = (pred_wp >= t) | (pred_wp <= (1 - t))
@@ -1562,39 +1697,56 @@ def route_backtest_mlb():
                 if ns > 0:
                     conf_results.append({"min_confidence": f"{t:.0%}", "n_games": ns,
                         "accuracy": round(float(np.mean(pred_pick[strong] == y_test_win[strong])), 4)})
-            
-            results_by_season.append({
+
+            season_result = {
                 "season": int(test_season), "n_train": len(train_df), "n_test": len(test_df),
-                "train_seasons": train_seasons, "accuracy": round(accuracy, 4),
-                "brier_score": round(brier, 4), "mae_margin": round(mae, 3),
+                "train_seasons": train_seasons,
+                "ml_accuracy": round(accuracy, 4),
+                "ml_brier": round(brier, 4),
+                "ml_mae_margin": round(mae_margin, 3),
+                "ml_mae_home_runs": round(mae_home_runs, 3),
+                "ml_mae_away_runs": round(mae_away_runs, 3),
+                "ml_mae_total": round(mae_total, 3),
+                "heuristic_accuracy": round(heur_acc, 4) if heur_acc is not None else None,
+                "heuristic_brier": round(heur_brier, 4) if heur_brier is not None else None,
+                "heuristic_mae_margin": round(heur_mae_margin, 3) if heur_mae_margin is not None else None,
+                "heuristic_mae_total": round(heur_mae_total, 3) if heur_mae_total is not None else None,
                 "home_win_rate": round(float(y_test_win.mean()), 3),
                 "calibration": cal_bins, "confidence_tiers": conf_results,
-            })
-            
+            }
+            results_by_season.append(season_result)
+
             for i in range(len(test_df)):
                 all_predictions.append({
                     "season": int(test_season),
                     "home_team": str(test_df.iloc[i].get("home_team", "")),
                     "away_team": str(test_df.iloc[i].get("away_team", "")),
                     "pred_win_prob": round(float(pred_wp[i]), 4),
+                    "heur_win_prob": round(float(test_df.iloc[i].get("win_pct_home", 0.5)), 4) if use_heuristic else None,
+                    "pred_margin": round(float(pred_margin[i]), 2),
+                    "actual_margin": int(y_test_margin[i]),
                     "actual_home_win": int(y_test_win[i]),
                     "correct": int(pred_pick[i] == y_test_win[i]),
                 })
-        
+
         if results_by_season:
             total = sum(r["n_test"] for r in results_by_season)
             agg = {
                 "total_games_tested": total,
                 "seasons_tested": len(results_by_season),
-                "overall_accuracy": round(sum(r["accuracy"] * r["n_test"] for r in results_by_season) / total, 4),
-                "overall_brier": round(sum(r["brier_score"] * r["n_test"] for r in results_by_season) / total, 4),
-                "overall_mae_margin": round(sum(r["mae_margin"] * r["n_test"] for r in results_by_season) / total, 3),
+                "heuristic_backfill": use_heuristic,
+                "ml_overall_accuracy": round(sum(r["ml_accuracy"] * r["n_test"] for r in results_by_season) / total, 4),
+                "ml_overall_brier": round(sum(r["ml_brier"] * r["n_test"] for r in results_by_season) / total, 4),
+                "ml_overall_mae_margin": round(sum(r["ml_mae_margin"] * r["n_test"] for r in results_by_season) / total, 3),
                 "baseline_home_always": round(sum(r["home_win_rate"] * r["n_test"] for r in results_by_season) / total, 4),
-                "baseline_note": "Always picking home team wins ~53.5%",
             }
+            if use_heuristic:
+                agg["heur_overall_accuracy"] = round(sum(r["heuristic_accuracy"] * r["n_test"] for r in results_by_season if r["heuristic_accuracy"]) / total, 4)
+                agg["heur_overall_brier"] = round(sum(r["heuristic_brier"] * r["n_test"] for r in results_by_season if r["heuristic_brier"]) / total, 4)
+                agg["heur_overall_mae_margin"] = round(sum(r["heuristic_mae_margin"] * r["n_test"] for r in results_by_season if r["heuristic_mae_margin"]) / total, 3)
         else:
             agg = {"error": "No seasons tested"}
-        
+
         return jsonify({
             "status": "backtest_complete", "aggregate": agg,
             "by_season": results_by_season, "n_predictions": len(all_predictions),
@@ -1606,20 +1758,21 @@ def route_backtest_mlb():
 
 @app.route("/backtest/mlb/current-model", methods=["POST"])
 def route_backtest_current_model():
-    """Test the CURRENT production model against a specific season. Body: { "season": 2024 }"""
+    """Test the CURRENT production model against a season. Body: { "season": 2024, "use_heuristic": true }"""
     import traceback
     try:
         body = request.get_json() or {}
         test_season = int(body.get("season", 2024))
-        
+        use_heuristic = body.get("use_heuristic", True)
+
         bundle = load_model("mlb")
         if not bundle:
             return jsonify({"error": "MLB model not trained"})
-        
+
         test_rows = sb_get("mlb_historical", f"season=eq.{test_season}&is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*")
         if not test_rows or len(test_rows) < 10:
             return jsonify({"error": f"Not enough data for season {test_season}"})
-        
+
         test_df = pd.DataFrame(test_rows)
         for col in ["actual_home_runs","actual_away_runs","home_win","home_woba","away_woba",
                      "home_sp_fip","away_sp_fip","home_fip","away_fip","home_bullpen_era",
@@ -1627,26 +1780,37 @@ def route_backtest_current_model():
                      "home_rest_days","away_rest_days","home_travel","away_travel"]:
             if col in test_df.columns:
                 test_df[col] = pd.to_numeric(test_df[col], errors="coerce")
-        
-        test_df["pred_home_runs"] = 0.0
-        test_df["pred_away_runs"] = 0.0
-        test_df["win_pct_home"]   = 0.5
-        test_df["ou_total"]       = 0.0
-        test_df["model_ml_home"]  = 0
-        
+
+        if use_heuristic:
+            test_df = backfill_heuristic(test_df)
+        else:
+            test_df["pred_home_runs"] = 0.0
+            test_df["pred_away_runs"] = 0.0
+            test_df["win_pct_home"]   = 0.5
+            test_df["ou_total"]       = 0.0
+            test_df["model_ml_home"]  = 0
+
         X_test = mlb_build_features(test_df)
         y_margin = (test_df["actual_home_runs"] - test_df["actual_away_runs"]).values
         y_win = test_df["home_win"].astype(int).values
-        
+
         X_s = bundle["scaler"].transform(X_test[bundle["feature_cols"]])
         pred_margin = bundle["reg"].predict(X_s)
         pred_wp = bundle["clf"].predict_proba(X_s)[:, 1]
         pred_pick = (pred_wp >= 0.5).astype(int)
-        
+
         accuracy = round(float(np.mean(pred_pick == y_win)), 4)
         mae = round(float(mean_absolute_error(y_margin, pred_margin)), 3)
         brier = round(float(brier_score_loss(y_win, pred_wp)), 4)
-        
+
+        # Heuristic-only comparison
+        heur_acc = heur_mae = None
+        if use_heuristic:
+            heur_wp = test_df["win_pct_home"].values
+            heur_pick = (heur_wp >= 0.5).astype(int)
+            heur_acc = round(float(np.mean(heur_pick == y_win)), 4)
+            heur_mae = round(float(mean_absolute_error(y_margin, test_df["pred_home_runs"].values - test_df["pred_away_runs"].values)), 3)
+
         monthly = {}
         if "game_date" in test_df.columns:
             for i in range(len(test_df)):
@@ -1656,17 +1820,20 @@ def route_backtest_current_model():
                 monthly[m]["n"] += 1
                 monthly[m]["correct"] += int(pred_pick[i] == y_win[i])
                 monthly[m]["errs"].append(abs(float(pred_margin[i] - y_margin[i])))
-        
+
         monthly_results = [{"month": m, "n": v["n"], "accuracy": round(v["correct"]/v["n"], 4),
                            "mae": round(float(np.mean(v["errs"])), 3)} for m, v in sorted(monthly.items())]
-        
+
         return jsonify({
             "status": "current_model_backtest", "test_season": test_season,
+            "heuristic_backfill": use_heuristic,
             "n_test": len(test_df), "model_trained_on": bundle.get("n_train", 0),
-            "accuracy": accuracy, "brier_score": brier, "mae_margin": mae,
+            "ml_accuracy": accuracy, "ml_brier": brier, "ml_mae_margin": mae,
+            "heuristic_accuracy": heur_acc,
+            "heuristic_mae_margin": heur_mae,
             "home_win_rate": round(float(y_win.mean()), 3),
             "monthly": monthly_results,
-            "note": "In-sample test (model saw this data during training). Use /backtest/mlb for unbiased walk-forward results.",
+            "note": "In-sample test. Use /backtest/mlb for unbiased walk-forward.",
         })
     except Exception as e:
         return jsonify({"error": str(e), "type": type(e).__name__, "traceback": traceback.format_exc()}), 500
