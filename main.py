@@ -1774,33 +1774,28 @@ def route_backtest_mlb():
             X_train_s = scaler.fit_transform(X_train)
             X_test_s  = scaler.transform(X_test)
 
-            gbm = GradientBoostingRegressor(n_estimators=150, max_depth=4, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
-            rf_reg = RandomForestRegressor(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1)
+            # Lighter models for Railway backtest speed (proxy timeout ~120s)
+            gbm = GradientBoostingRegressor(n_estimators=80, max_depth=3, learning_rate=0.08, subsample=0.8, min_samples_leaf=25, random_state=42)
+            rf_reg = RandomForestRegressor(n_estimators=60, max_depth=5, min_samples_leaf=20, max_features=0.7, random_state=42, n_jobs=1)
             ridge = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=3)
 
             gbm.fit(X_train_s, y_train_margin, sample_weight=weights)
             rf_reg.fit(X_train_s, y_train_margin, sample_weight=weights)
             ridge.fit(X_train_s, y_train_margin, sample_weight=weights)
 
-            # In-sample meta fit (OOF too heavy for Railway memory limits)
             meta_X = np.column_stack([gbm.predict(X_train_s), rf_reg.predict(X_train_s), ridge.predict(X_train_s)])
             meta_reg = Ridge(alpha=1.0)
             meta_reg.fit(meta_X, y_train_margin)
 
-            # Full 3-model stacked classifier matching train_mlb() architecture
-            gbm_clf = GradientBoostingClassifier(n_estimators=100, max_depth=3, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
-            rf_clf = RandomForestClassifier(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1)
+            # Lighter classifier: GBM + LR only (RF classifier adds time, minimal backtest accuracy delta)
+            gbm_clf = GradientBoostingClassifier(n_estimators=80, max_depth=3, learning_rate=0.08, subsample=0.8, min_samples_leaf=25, random_state=42)
             lr_clf = LogisticRegression(max_iter=1000)
             gbm_clf.fit(X_train_s, y_train_win, sample_weight=weights)
-            rf_clf.fit(X_train_s, y_train_win, sample_weight=weights)
             lr_clf.fit(X_train_s, y_train_win, sample_weight=weights)
 
             test_meta = np.column_stack([gbm.predict(X_test_s), rf_reg.predict(X_test_s), ridge.predict(X_test_s)])
             pred_margin = meta_reg.predict(test_meta)
-            # 3-model weighted blend (matches train_mlb stacking architecture)
-            pred_wp = (0.45 * gbm_clf.predict_proba(X_test_s)[:, 1] +
-                       0.30 * rf_clf.predict_proba(X_test_s)[:, 1] +
-                       0.25 * lr_clf.predict_proba(X_test_s)[:, 1])
+            pred_wp = 0.6 * gbm_clf.predict_proba(X_test_s)[:, 1] + 0.4 * lr_clf.predict_proba(X_test_s)[:, 1]
             pred_pick = (pred_wp >= 0.5).astype(int)
 
             accuracy = float(np.mean(pred_pick == y_test_win))
@@ -1898,7 +1893,7 @@ def route_backtest_mlb():
         return jsonify({
             "status": "backtest_complete", "aggregate": agg,
             "by_season": results_by_season, "n_predictions": len(all_predictions),
-            "sample_predictions": all_predictions[:100],
+            "sample_predictions": all_predictions[:20],
         })
     except Exception as e:
         return jsonify({"error": str(e), "type": type(e).__name__, "traceback": traceback.format_exc()}), 500
