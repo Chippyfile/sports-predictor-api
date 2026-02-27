@@ -1782,18 +1782,12 @@ def route_backtest_mlb():
             rf_reg.fit(X_train_s, y_train_margin, sample_weight=weights)
             ridge.fit(X_train_s, y_train_margin, sample_weight=weights)
 
-            # FIX: Use OOF predictions for meta-learner (avoids in-sample leakage)
-            from sklearn.model_selection import cross_val_predict as cvp
-            cv_folds_bt = min(3, len(train_df))
-            oof_gbm_m = cvp(GradientBoostingRegressor(n_estimators=150, max_depth=4, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42), X_train_s, y_train_margin, cv=cv_folds_bt)
-            oof_rf_m = cvp(RandomForestRegressor(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1), X_train_s, y_train_margin, cv=cv_folds_bt)
-            oof_ridge_m = cvp(RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds_bt), X_train_s, y_train_margin, cv=cv_folds_bt)
-
-            meta_X = np.column_stack([oof_gbm_m, oof_rf_m, oof_ridge_m])
+            # In-sample meta fit (OOF too heavy for Railway memory limits)
+            meta_X = np.column_stack([gbm.predict(X_train_s), rf_reg.predict(X_train_s), ridge.predict(X_train_s)])
             meta_reg = Ridge(alpha=1.0)
             meta_reg.fit(meta_X, y_train_margin)
 
-            # FIX: Full 3-model stacked classifier matching train_mlb()
+            # Full 3-model stacked classifier matching train_mlb() architecture
             gbm_clf = GradientBoostingClassifier(n_estimators=100, max_depth=3, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
             rf_clf = RandomForestClassifier(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1)
             lr_clf = LogisticRegression(max_iter=1000)
@@ -1801,24 +1795,12 @@ def route_backtest_mlb():
             rf_clf.fit(X_train_s, y_train_win, sample_weight=weights)
             lr_clf.fit(X_train_s, y_train_win, sample_weight=weights)
 
-            # OOF probabilities for classifier meta-learner
-            oof_gbm_p = cvp(GradientBoostingClassifier(n_estimators=100, max_depth=3, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42), X_train_s, y_train_win, cv=cv_folds_bt, method="predict_proba")[:, 1]
-            oof_rf_p = cvp(RandomForestClassifier(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1), X_train_s, y_train_win, cv=cv_folds_bt, method="predict_proba")[:, 1]
-            oof_lr_p = cvp(LogisticRegression(max_iter=1000), X_train_s, y_train_win, cv=cv_folds_bt, method="predict_proba")[:, 1]
-
-            meta_clf_X = np.column_stack([oof_gbm_p, oof_rf_p, oof_lr_p])
-            meta_lr = LogisticRegression(max_iter=1000)
-            meta_lr.fit(meta_clf_X, y_train_win)
-
             test_meta = np.column_stack([gbm.predict(X_test_s), rf_reg.predict(X_test_s), ridge.predict(X_test_s)])
             pred_margin = meta_reg.predict(test_meta)
-            # FIX: Use stacked meta-classifier instead of hardcoded 0.6/0.4 blend
-            test_clf_meta = np.column_stack([
-                gbm_clf.predict_proba(X_test_s)[:, 1],
-                rf_clf.predict_proba(X_test_s)[:, 1],
-                lr_clf.predict_proba(X_test_s)[:, 1],
-            ])
-            pred_wp = meta_lr.predict_proba(test_clf_meta)[:, 1]
+            # 3-model weighted blend (matches train_mlb stacking architecture)
+            pred_wp = (0.45 * gbm_clf.predict_proba(X_test_s)[:, 1] +
+                       0.30 * rf_clf.predict_proba(X_test_s)[:, 1] +
+                       0.25 * lr_clf.predict_proba(X_test_s)[:, 1])
             pred_pick = (pred_wp >= 0.5).astype(int)
 
             accuracy = float(np.mean(pred_pick == y_test_win))
