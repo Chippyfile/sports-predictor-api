@@ -1470,7 +1470,7 @@ def route_calibrate_mlb():
 # ── Predict endpoints ──────────────────────────────────────────
 @app.route("/predict/<sport>", methods=["POST"])
 def route_predict(sport):
-    game = request.get_json() or {}
+    game = request.get_json(force=True, silent=True) or {}
     fns  = {
         "mlb":   predict_mlb,
         "nba":   predict_nba,
@@ -1486,7 +1486,7 @@ def route_predict(sport):
 # ── Monte Carlo ────────────────────────────────────────────────
 @app.route("/monte-carlo", methods=["POST"])
 def route_monte_carlo():
-    body      = request.get_json() or {}
+    body      = request.get_json(force=True, silent=True) or {}
     sport     = body.get("sport", "NBA").upper()
     home_mean = float(body.get("home_mean", 110))
     away_mean = float(body.get("away_mean", 110))
@@ -1704,7 +1704,7 @@ def route_backtest_mlb():
     """
     import traceback
     try:
-        body = request.get_json() or {}
+        body = request.get_json(force=True, silent=True) or {}
         test_seasons = body.get("test_seasons", [2019, 2021, 2022, 2023, 2024, 2025])
         use_heuristic = body.get("use_heuristic", True)
         min_train = body.get("min_train_seasons", 3)
@@ -1909,7 +1909,7 @@ def route_backtest_current_model():
     """Test the CURRENT production model against a season. Body: { "season": 2024, "use_heuristic": true }"""
     import traceback
     try:
-        body = request.get_json() or {}
+        body = request.get_json(force=True, silent=True) or {}
         test_season = int(body.get("season", 2024))
         use_heuristic = body.get("use_heuristic", True)
 
