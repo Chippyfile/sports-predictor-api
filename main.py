@@ -352,7 +352,7 @@ def _mlb_merge_historical(current_df):
     """
     hist_rows = sb_get(
         "mlb_historical",
-        "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=18000"
+        "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=100000"
     )
     if not hist_rows:
         print("  WARNING: mlb_historical returned no rows — training on current season only")
