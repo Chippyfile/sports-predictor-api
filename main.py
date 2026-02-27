@@ -1448,6 +1448,230 @@ def route_model_info(sport):
         info["dispersion"] = load_model("mlb_dispersion")
     return jsonify(info)
 
+# ══════════════════════════════════════════════════════════════════
+# MLB BACKTESTING
+# ══════════════════════════════════════════════════════════════════
+
+@app.route("/backtest/mlb", methods=["POST"])
+def route_backtest_mlb():
+    """
+    Walk-forward backtest: train on past seasons, predict next season.
+    Body params (all optional):
+      - test_seasons: list of seasons to test (default: [2019,2021,2022,2023,2024,2025])
+      - min_train_seasons: minimum seasons for training (default: 3)
+    """
+    import traceback
+    try:
+        body = request.get_json() or {}
+        test_seasons = body.get("test_seasons", [2019, 2021, 2022, 2023, 2024, 2025])
+        min_train = body.get("min_train_seasons", 3)
+        
+        all_rows = sb_get(
+            "mlb_historical",
+            "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.asc&limit=100000"
+        )
+        if not all_rows or len(all_rows) < 100:
+            return jsonify({"error": "Not enough historical data for backtesting"})
+        
+        all_df = pd.DataFrame(all_rows)
+        for col in ["actual_home_runs", "actual_away_runs", "home_win",
+                     "home_woba", "away_woba", "home_sp_fip", "away_sp_fip",
+                     "home_fip", "away_fip", "home_bullpen_era", "away_bullpen_era",
+                     "park_factor", "temp_f", "wind_mph", "wind_out_flag",
+                     "home_rest_days", "away_rest_days", "home_travel", "away_travel",
+                     "season_weight", "season"]:
+            if col in all_df.columns:
+                all_df[col] = pd.to_numeric(all_df[col], errors="coerce")
+        
+        all_df["pred_home_runs"] = 0.0
+        all_df["pred_away_runs"] = 0.0
+        all_df["win_pct_home"]   = 0.5
+        all_df["ou_total"]       = 0.0
+        all_df["model_ml_home"]  = 0
+        
+        available_seasons = sorted(all_df["season"].dropna().astype(int).unique().tolist())
+        results_by_season = []
+        all_predictions = []
+        
+        for test_season in test_seasons:
+            if test_season not in available_seasons:
+                continue
+            
+            train_df = all_df[all_df["season"] < test_season].copy()
+            test_df  = all_df[all_df["season"] == test_season].copy()
+            
+            train_seasons = sorted(train_df["season"].dropna().astype(int).unique().tolist())
+            if len(train_seasons) < min_train or len(test_df) < 10:
+                continue
+            
+            X_train = mlb_build_features(train_df)
+            y_train_margin = (train_df["actual_home_runs"] - train_df["actual_away_runs"]).values
+            y_train_win = train_df["home_win"].astype(int).values
+            
+            X_test = mlb_build_features(test_df)
+            y_test_margin = (test_df["actual_home_runs"] - test_df["actual_away_runs"]).values
+            y_test_win = test_df["home_win"].astype(int).values
+            y_test_hr = test_df["actual_home_runs"].values
+            y_test_ar = test_df["actual_away_runs"].values
+            
+            weights = train_df["season_weight"].fillna(1.0).astype(float).values if "season_weight" in train_df.columns else np.ones(len(train_df))
+            
+            scaler = StandardScaler()
+            X_train_s = scaler.fit_transform(X_train)
+            X_test_s  = scaler.transform(X_test)
+            
+            gbm = GradientBoostingRegressor(n_estimators=150, max_depth=4, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
+            rf_reg = RandomForestRegressor(n_estimators=100, max_depth=6, min_samples_leaf=15, max_features=0.7, random_state=42, n_jobs=1)
+            ridge = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=3)
+            
+            gbm.fit(X_train_s, y_train_margin, sample_weight=weights)
+            rf_reg.fit(X_train_s, y_train_margin, sample_weight=weights)
+            ridge.fit(X_train_s, y_train_margin, sample_weight=weights)
+            
+            meta_X = np.column_stack([gbm.predict(X_train_s), rf_reg.predict(X_train_s), ridge.predict(X_train_s)])
+            meta_reg = Ridge(alpha=1.0)
+            meta_reg.fit(meta_X, y_train_margin)
+            
+            gbm_clf = GradientBoostingClassifier(n_estimators=100, max_depth=3, learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
+            lr_clf = LogisticRegression(max_iter=1000)
+            gbm_clf.fit(X_train_s, y_train_win, sample_weight=weights)
+            lr_clf.fit(X_train_s, y_train_win, sample_weight=weights)
+            
+            test_meta = np.column_stack([gbm.predict(X_test_s), rf_reg.predict(X_test_s), ridge.predict(X_test_s)])
+            pred_margin = meta_reg.predict(test_meta)
+            pred_wp = 0.6 * gbm_clf.predict_proba(X_test_s)[:, 1] + 0.4 * lr_clf.predict_proba(X_test_s)[:, 1]
+            pred_pick = (pred_wp >= 0.5).astype(int)
+            
+            accuracy = float(np.mean(pred_pick == y_test_win))
+            mae = float(mean_absolute_error(y_test_margin, pred_margin))
+            brier = float(brier_score_loss(y_test_win, pred_wp))
+            
+            cal_bins = []
+            for lo, hi in [(0.0, 0.35), (0.35, 0.45), (0.45, 0.55), (0.55, 0.65), (0.65, 1.01)]:
+                mask = (pred_wp >= lo) & (pred_wp < hi)
+                n_bin = int(mask.sum())
+                if n_bin > 0:
+                    cal_bins.append({"range": f"{lo:.0%}-{hi:.0%}", "n": n_bin,
+                        "predicted": round(float(pred_wp[mask].mean()), 3),
+                        "actual": round(float(y_test_win[mask].mean()), 3)})
+            
+            conf_results = []
+            for t in [0.52, 0.55, 0.58, 0.60, 0.65]:
+                strong = (pred_wp >= t) | (pred_wp <= (1 - t))
+                ns = int(strong.sum())
+                if ns > 0:
+                    conf_results.append({"min_confidence": f"{t:.0%}", "n_games": ns,
+                        "accuracy": round(float(np.mean(pred_pick[strong] == y_test_win[strong])), 4)})
+            
+            results_by_season.append({
+                "season": int(test_season), "n_train": len(train_df), "n_test": len(test_df),
+                "train_seasons": train_seasons, "accuracy": round(accuracy, 4),
+                "brier_score": round(brier, 4), "mae_margin": round(mae, 3),
+                "home_win_rate": round(float(y_test_win.mean()), 3),
+                "calibration": cal_bins, "confidence_tiers": conf_results,
+            })
+            
+            for i in range(len(test_df)):
+                all_predictions.append({
+                    "season": int(test_season),
+                    "home_team": str(test_df.iloc[i].get("home_team", "")),
+                    "away_team": str(test_df.iloc[i].get("away_team", "")),
+                    "pred_win_prob": round(float(pred_wp[i]), 4),
+                    "actual_home_win": int(y_test_win[i]),
+                    "correct": int(pred_pick[i] == y_test_win[i]),
+                })
+        
+        if results_by_season:
+            total = sum(r["n_test"] for r in results_by_season)
+            agg = {
+                "total_games_tested": total,
+                "seasons_tested": len(results_by_season),
+                "overall_accuracy": round(sum(r["accuracy"] * r["n_test"] for r in results_by_season) / total, 4),
+                "overall_brier": round(sum(r["brier_score"] * r["n_test"] for r in results_by_season) / total, 4),
+                "overall_mae_margin": round(sum(r["mae_margin"] * r["n_test"] for r in results_by_season) / total, 3),
+                "baseline_home_always": round(sum(r["home_win_rate"] * r["n_test"] for r in results_by_season) / total, 4),
+                "baseline_note": "Always picking home team wins ~53.5%",
+            }
+        else:
+            agg = {"error": "No seasons tested"}
+        
+        return jsonify({
+            "status": "backtest_complete", "aggregate": agg,
+            "by_season": results_by_season, "n_predictions": len(all_predictions),
+            "sample_predictions": all_predictions[:100],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "type": type(e).__name__, "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/backtest/mlb/current-model", methods=["POST"])
+def route_backtest_current_model():
+    """Test the CURRENT production model against a specific season. Body: { "season": 2024 }"""
+    import traceback
+    try:
+        body = request.get_json() or {}
+        test_season = int(body.get("season", 2024))
+        
+        bundle = load_model("mlb")
+        if not bundle:
+            return jsonify({"error": "MLB model not trained"})
+        
+        test_rows = sb_get("mlb_historical", f"season=eq.{test_season}&is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*")
+        if not test_rows or len(test_rows) < 10:
+            return jsonify({"error": f"Not enough data for season {test_season}"})
+        
+        test_df = pd.DataFrame(test_rows)
+        for col in ["actual_home_runs","actual_away_runs","home_win","home_woba","away_woba",
+                     "home_sp_fip","away_sp_fip","home_fip","away_fip","home_bullpen_era",
+                     "away_bullpen_era","park_factor","temp_f","wind_mph","wind_out_flag",
+                     "home_rest_days","away_rest_days","home_travel","away_travel"]:
+            if col in test_df.columns:
+                test_df[col] = pd.to_numeric(test_df[col], errors="coerce")
+        
+        test_df["pred_home_runs"] = 0.0
+        test_df["pred_away_runs"] = 0.0
+        test_df["win_pct_home"]   = 0.5
+        test_df["ou_total"]       = 0.0
+        test_df["model_ml_home"]  = 0
+        
+        X_test = mlb_build_features(test_df)
+        y_margin = (test_df["actual_home_runs"] - test_df["actual_away_runs"]).values
+        y_win = test_df["home_win"].astype(int).values
+        
+        X_s = bundle["scaler"].transform(X_test[bundle["feature_cols"]])
+        pred_margin = bundle["reg"].predict(X_s)
+        pred_wp = bundle["clf"].predict_proba(X_s)[:, 1]
+        pred_pick = (pred_wp >= 0.5).astype(int)
+        
+        accuracy = round(float(np.mean(pred_pick == y_win)), 4)
+        mae = round(float(mean_absolute_error(y_margin, pred_margin)), 3)
+        brier = round(float(brier_score_loss(y_win, pred_wp)), 4)
+        
+        monthly = {}
+        if "game_date" in test_df.columns:
+            for i in range(len(test_df)):
+                m = str(test_df.iloc[i].get("game_date", ""))[:7]
+                if not m: continue
+                if m not in monthly: monthly[m] = {"n": 0, "correct": 0, "errs": []}
+                monthly[m]["n"] += 1
+                monthly[m]["correct"] += int(pred_pick[i] == y_win[i])
+                monthly[m]["errs"].append(abs(float(pred_margin[i] - y_margin[i])))
+        
+        monthly_results = [{"month": m, "n": v["n"], "accuracy": round(v["correct"]/v["n"], 4),
+                           "mae": round(float(np.mean(v["errs"])), 3)} for m, v in sorted(monthly.items())]
+        
+        return jsonify({
+            "status": "current_model_backtest", "test_season": test_season,
+            "n_test": len(test_df), "model_trained_on": bundle.get("n_train", 0),
+            "accuracy": accuracy, "brier_score": brier, "mae_margin": mae,
+            "home_win_rate": round(float(y_win.mean()), 3),
+            "monthly": monthly_results,
+            "note": "In-sample test (model saw this data during training). Use /backtest/mlb for unbiased walk-forward results.",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "type": type(e).__name__, "traceback": traceback.format_exc()}), 500
+
+
 # ── Startup ────────────────────────────────────────────────────
 @app.before_request
 def _once():
