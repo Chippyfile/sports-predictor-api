@@ -1495,3 +1495,47 @@ def debug_train_mlb_lite():
             "type": type(e).__name__,
             "traceback": traceback.format_exc()
         }), 500
+
+@app.route("/debug/train-mlb-small", methods=["POST"])
+def debug_train_mlb_small():
+    import traceback
+    try:
+        # Override _mlb_merge_historical to limit data
+        original_merge = _mlb_merge_historical
+        def limited_merge(current_df):
+            hist_rows = sb_get("mlb_historical",
+                "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=3000")
+            if not hist_rows:
+                return current_df, None
+            import pandas as pd
+            hist_df = pd.DataFrame(hist_rows)
+            numeric_cols = ["actual_home_runs","actual_away_runs","home_win",
+                "home_woba","away_woba","home_sp_fip","away_sp_fip",
+                "home_fip","away_fip","home_bullpen_era","away_bullpen_era",
+                "park_factor","temp_f","wind_mph","wind_out_flag",
+                "home_rest_days","away_rest_days","home_travel","away_travel",
+                "season_weight"]
+            for col in numeric_cols:
+                if col in hist_df.columns:
+                    hist_df[col] = pd.to_numeric(hist_df[col], errors="coerce")
+            hist_df["pred_home_runs"] = 0.0
+            hist_df["pred_away_runs"] = 0.0
+            hist_df["win_pct_home"] = 0.5
+            hist_df["ou_total"] = 0.0
+            hist_df["model_ml_home"] = 0
+            combined = pd.concat([hist_df, current_df], ignore_index=True)
+            weights = combined["season_weight"].fillna(1.0).astype(float) if "season_weight" in combined.columns else pd.Series(1.0, index=combined.index)
+            return combined, weights.values
+
+        # Monkey-patch and train
+        import main as m
+        m._mlb_merge_historical = limited_merge
+        result = train_mlb()
+        m._mlb_merge_historical = original_merge
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }), 500
