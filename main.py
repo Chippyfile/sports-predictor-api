@@ -352,7 +352,7 @@ def _mlb_merge_historical(current_df):
     """
     hist_rows = sb_get(
         "mlb_historical",
-        "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=8000"
+        "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=5000"
     )
     if not hist_rows:
         print("  WARNING: mlb_historical returned no rows — training on current season only")
@@ -433,24 +433,22 @@ def train_mlb():
 
     # Choose model based on data volume
     n = len(df)
-    cv_folds = min(5, n)
+    cv_folds = min(3, n)  # 3-fold CV (was 5) — faster, still robust at 5k+ rows
 
     if n >= 200:
-        # ── STACKING ENSEMBLE (Finding #15) ──────────────────────────────
-        # Level 0: three diverse base learners for margin regression
-        # Level 1: Ridge meta-learner trained on out-of-fold predictions
-        # Diversity: GBM (boosted trees) + RF (bagged trees) + Ridge (linear)
-        # This captures non-linear interactions (GBM/RF) while Ridge stabilizes.
+        # ── STACKING ENSEMBLE ──────────────────────────────────────────
+        # Reduced complexity for Railway deployment constraints.
+        # 3-fold CV, fewer estimators — minimal accuracy loss vs 5-fold/300 trees.
 
         gbm = GradientBoostingRegressor(
-            n_estimators=300, max_depth=4,
-            learning_rate=0.04, subsample=0.8,
+            n_estimators=150, max_depth=4,
+            learning_rate=0.06, subsample=0.8,
             min_samples_leaf=20, random_state=42,
         )
         rf_reg = RandomForestRegressor(
-            n_estimators=200, max_depth=6,
+            n_estimators=100, max_depth=6,
             min_samples_leaf=15, max_features=0.7,
-            random_state=42, n_jobs=-1,
+            random_state=42, n_jobs=1,
         )
         ridge = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
 
@@ -481,14 +479,14 @@ def train_mlb():
 
         # ── Stacked classifier for win probability ───────────────────────
         gbm_clf = GradientBoostingClassifier(
-            n_estimators=200, max_depth=3,
-            learning_rate=0.05, subsample=0.8,
+            n_estimators=100, max_depth=3,
+            learning_rate=0.06, subsample=0.8,
             min_samples_leaf=20, random_state=42,
         )
         rf_clf = RandomForestClassifier(
-            n_estimators=200, max_depth=6,
+            n_estimators=100, max_depth=6,
             min_samples_leaf=15, max_features=0.7,
-            random_state=42, n_jobs=-1,
+            random_state=42, n_jobs=1,
         )
         lr_clf = LogisticRegression(max_iter=1000)
 
