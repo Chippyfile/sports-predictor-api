@@ -216,6 +216,31 @@ def _get_mlb_k():
     return MLB_NEGBIN_K_DEFAULT, MLB_NEGBIN_K_DEFAULT
 
 # ═══════════════════════════════════════════════════════════════
+# STACKING ENSEMBLE WRAPPERS (module-level for pickle/joblib compatibility)
+# ═══════════════════════════════════════════════════════════════
+
+class StackedRegressor:
+    """Drop-in replacement: bundle['reg'].predict(X) still works."""
+    def __init__(self, base_learners, meta, scaler_ref=None):
+        self.base_learners = base_learners  # [gbm, rf, ridge]
+        self.meta = meta
+    def predict(self, X):
+        base_preds = np.column_stack([m.predict(X) for m in self.base_learners])
+        return self.meta.predict(base_preds)
+
+class StackedClassifier:
+    """Drop-in replacement: bundle['clf'].predict_proba(X) still works."""
+    def __init__(self, base_clfs, meta):
+        self.base_clfs = base_clfs
+        self.meta = meta
+        self.classes_ = np.array([0, 1])
+    def predict_proba(self, X):
+        base_probs = np.column_stack([c.predict_proba(X)[:, 1] for c in self.base_clfs])
+        return self.meta.predict_proba(base_probs)
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+# ═══════════════════════════════════════════════════════════════
 # MLB MODEL
 # ═══════════════════════════════════════════════════════════════
 
@@ -327,7 +352,7 @@ def _mlb_merge_historical(current_df):
     """
     hist_rows = sb_get(
         "mlb_historical",
-        "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=100000"
+        "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=8000"
     )
     if not hist_rows:
         print("  WARNING: mlb_historical returned no rows — training on current season only")
@@ -445,16 +470,7 @@ def train_mlb():
         meta_reg = Ridge(alpha=1.0)
         meta_reg.fit(meta_X, y_margin)
 
-        # Wrap into a single object that has .predict() for compatibility
-        class StackedRegressor:
-            """Drop-in replacement: bundle['reg'].predict(X) still works."""
-            def __init__(self, base_learners, meta, scaler_ref):
-                self.base_learners = base_learners  # [gbm, rf, ridge]
-                self.meta = meta
-            def predict(self, X):
-                base_preds = np.column_stack([m.predict(X) for m in self.base_learners])
-                return self.meta.predict(base_preds)
-
+        # Use module-level StackedRegressor for pickle compatibility
         reg = StackedRegressor([gbm, rf_reg, ridge], meta_reg, scaler)
         reg_cv = cross_val_score(gbm, X_scaled, y_margin,
                                   cv=cv_folds, scoring="neg_mean_absolute_error")
@@ -491,18 +507,7 @@ def train_mlb():
         meta_lr = LogisticRegression(max_iter=1000)
         meta_lr.fit(meta_clf_X, y_win)
 
-        class StackedClassifier:
-            """Drop-in replacement: bundle['clf'].predict_proba(X) still works."""
-            def __init__(self, base_clfs, meta):
-                self.base_clfs = base_clfs
-                self.meta = meta
-                self.classes_ = np.array([0, 1])
-            def predict_proba(self, X):
-                base_probs = np.column_stack([c.predict_proba(X)[:, 1] for c in self.base_clfs])
-                return self.meta.predict_proba(base_probs)
-            def predict(self, X):
-                return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
-
+        # Use module-level StackedClassifier for pickle compatibility
         # The stacked meta-learner (LogisticRegression) already produces well-calibrated
         # probabilities via Platt scaling. No additional CalibratedClassifierCV needed.
         # (cv="prefit" was removed in sklearn 1.4+)
@@ -1460,78 +1465,6 @@ def debug_train_mlb():
     import traceback
     try:
         result = train_mlb()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "type": type(e).__name__,
-            "traceback": traceback.format_exc()
-        }), 500
-
-@app.route("/debug/train-mlb-lite", methods=["POST"])
-def debug_train_mlb_lite():
-    import traceback
-    try:
-        # Temporarily limit historical data
-        original_sb_get = globals().get('sb_get')
-        rows = sb_get("mlb_predictions",
-                      "result_entered=eq.true&actual_home_runs=not.is.null&game_type=eq.R&select=*")
-        current_df = __import__('pandas').DataFrame(rows) if rows else __import__('pandas').DataFrame()
-        
-        # Get historical but limit to 2000 rows
-        hist_rows = sb_get("mlb_historical",
-                          "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=2000")
-        
-        return jsonify({
-            "status": "data_check",
-            "current_rows": len(current_df),
-            "historical_rows": len(hist_rows) if hist_rows else 0,
-            "hist_columns": list(hist_rows[0].keys()) if hist_rows else [],
-            "sample_row": hist_rows[0] if hist_rows else None,
-        })
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "type": type(e).__name__,
-            "traceback": traceback.format_exc()
-        }), 500
-
-@app.route("/debug/train-mlb-small", methods=["POST"])
-def debug_train_mlb_small():
-    import traceback
-    try:
-        # Override _mlb_merge_historical to limit data
-        original_merge = _mlb_merge_historical
-        def limited_merge(current_df):
-            hist_rows = sb_get("mlb_historical",
-                "is_outlier_season=eq.0&actual_home_runs=not.is.null&select=*&order=season.desc&limit=3000")
-            if not hist_rows:
-                return current_df, None
-            import pandas as pd
-            hist_df = pd.DataFrame(hist_rows)
-            numeric_cols = ["actual_home_runs","actual_away_runs","home_win",
-                "home_woba","away_woba","home_sp_fip","away_sp_fip",
-                "home_fip","away_fip","home_bullpen_era","away_bullpen_era",
-                "park_factor","temp_f","wind_mph","wind_out_flag",
-                "home_rest_days","away_rest_days","home_travel","away_travel",
-                "season_weight"]
-            for col in numeric_cols:
-                if col in hist_df.columns:
-                    hist_df[col] = pd.to_numeric(hist_df[col], errors="coerce")
-            hist_df["pred_home_runs"] = 0.0
-            hist_df["pred_away_runs"] = 0.0
-            hist_df["win_pct_home"] = 0.5
-            hist_df["ou_total"] = 0.0
-            hist_df["model_ml_home"] = 0
-            combined = pd.concat([hist_df, current_df], ignore_index=True)
-            weights = combined["season_weight"].fillna(1.0).astype(float) if "season_weight" in combined.columns else pd.Series(1.0, index=combined.index)
-            return combined, weights.values
-
-        # Monkey-patch and train
-        import main as m
-        m._mlb_merge_historical = limited_merge
-        result = train_mlb()
-        m._mlb_merge_historical = original_merge
         return jsonify(result)
     except Exception as e:
         return jsonify({
