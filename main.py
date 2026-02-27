@@ -503,12 +503,10 @@ def train_mlb():
             def predict(self, X):
                 return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
-        # Calibrate the stacked classifier (prefit: sklearn can't clone custom classes)
-        clf = CalibratedClassifierCV(
-            StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr),
-            cv="prefit", method="isotonic"
-        )
-        clf.fit(X_scaled, y_win)
+        # The stacked meta-learner (LogisticRegression) already produces well-calibrated
+        # probabilities via Platt scaling. No additional CalibratedClassifierCV needed.
+        # (cv="prefit" was removed in sklearn 1.4+)
+        clf = StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr)
 
         print(f"  Stacking meta weights (reg): {meta_reg.coef_.round(3)}")
 
