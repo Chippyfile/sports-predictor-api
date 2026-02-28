@@ -885,6 +885,8 @@ def predict_nba(game: dict):
 
 def ncaa_build_features(df):
     df = df.copy()
+
+    # ── Heuristic-derived features (existing) ──
     df["adj_em_diff"]     = df["home_adj_em"].fillna(0) - df["away_adj_em"].fillna(0)
     df["score_diff_pred"] = df["pred_home_score"].fillna(0) - df["pred_away_score"].fillna(0)
     df["total_pred"]      = df["pred_home_score"].fillna(0) + df["pred_away_score"].fillna(0)
@@ -894,13 +896,74 @@ def ncaa_build_features(df):
     df["ou_gap"]          = df["total_pred"] - df["market_ou_total"].fillna(df["ou_total"].fillna(145))
     df["win_pct_home"]    = df["win_pct_home"].fillna(0.5)
 
+    # ── Raw team stats (Finding 13 — break ML circularity) ──
+    raw_cols = {
+        "home_ppg": 75.0, "away_ppg": 75.0,
+        "home_opp_ppg": 72.0, "away_opp_ppg": 72.0,
+        "home_fgpct": 0.455, "away_fgpct": 0.455,
+        "home_threepct": 0.340, "away_threepct": 0.340,
+        "home_ftpct": 0.720, "away_ftpct": 0.720,
+        "home_assists": 14.0, "away_assists": 14.0,
+        "home_turnovers": 12.0, "away_turnovers": 12.0,
+        "home_tempo": 68.0, "away_tempo": 68.0,
+        "home_orb_pct": 0.28, "away_orb_pct": 0.28,
+        "home_fta_rate": 0.34, "away_fta_rate": 0.34,
+        "home_ato_ratio": 1.2, "away_ato_ratio": 1.2,
+        "home_opp_fgpct": 0.430, "away_opp_fgpct": 0.430,
+        "home_opp_threepct": 0.330, "away_opp_threepct": 0.330,
+        "home_steals": 7.0, "away_steals": 7.0,
+        "home_blocks": 3.5, "away_blocks": 3.5,
+        "home_wins": 10, "away_wins": 10,
+        "home_losses": 5, "away_losses": 5,
+        "home_form": 0.0, "away_form": 0.0,
+        "home_sos": 0.500, "away_sos": 0.500,
+        "home_rank": 200, "away_rank": 200,
+    }
+    for col, default in raw_cols.items():
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
+        else:
+            df[col] = default
+
+    # ── Derived differential features ──
+    df["ppg_diff"]       = df["home_ppg"] - df["away_ppg"]
+    df["opp_ppg_diff"]   = df["home_opp_ppg"] - df["away_opp_ppg"]
+    df["fgpct_diff"]     = df["home_fgpct"] - df["away_fgpct"]
+    df["threepct_diff"]  = df["home_threepct"] - df["away_threepct"]
+    df["tempo_avg"]      = (df["home_tempo"] + df["away_tempo"]) / 2
+    df["orb_pct_diff"]   = df["home_orb_pct"] - df["away_orb_pct"]
+    df["fta_rate_diff"]  = df["home_fta_rate"] - df["away_fta_rate"]
+    df["ato_diff"]       = df["home_ato_ratio"] - df["away_ato_ratio"]
+    df["def_fgpct_diff"] = df["home_opp_fgpct"] - df["away_opp_fgpct"]
+    df["steals_diff"]    = df["home_steals"] - df["away_steals"]
+    df["blocks_diff"]    = df["home_blocks"] - df["away_blocks"]
+    df["sos_diff"]       = df["home_sos"] - df["away_sos"]
+    df["form_diff"]      = df["home_form"] - df["away_form"]
+    df["rank_diff"]      = df["away_rank"] - df["home_rank"]  # positive = home ranked higher
+    df["win_pct_diff"]   = (df["home_wins"] / (df["home_wins"] + df["home_losses"]).clip(1)) - \
+                           (df["away_wins"] / (df["away_wins"] + df["away_losses"]).clip(1))
+    df["is_ranked_game"] = ((df["home_rank"] <= 25) | (df["away_rank"] <= 25)).astype(int)
+    df["is_top_matchup"] = ((df["home_rank"] <= 25) & (df["away_rank"] <= 25)).astype(int)
+
     feature_cols = [
+        # Heuristic outputs
         "pred_home_score", "pred_away_score",
         "home_adj_em", "away_adj_em",
         "adj_em_diff", "score_diff_pred",
         "total_pred", "home_fav",
         "win_pct_home", "neutral",
         "ou_gap", "spread_vs_market",
+        # Raw stats — differentials (primary ML signal)
+        "ppg_diff", "opp_ppg_diff", "fgpct_diff", "threepct_diff",
+        "orb_pct_diff", "fta_rate_diff", "ato_diff",
+        "def_fgpct_diff", "steals_diff", "blocks_diff",
+        "sos_diff", "form_diff", "rank_diff", "win_pct_diff",
+        # Context features
+        "tempo_avg", "is_ranked_game", "is_top_matchup",
+        # Raw stats — absolute values for non-linear patterns
+        "home_fgpct", "away_fgpct", "home_threepct", "away_threepct",
+        "home_orb_pct", "away_orb_pct", "home_ato_ratio", "away_ato_ratio",
+        "home_opp_fgpct", "away_opp_fgpct",
     ]
     return df[feature_cols].fillna(0)
 
@@ -917,27 +980,91 @@ def train_ncaa():
 
     scaler   = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    n = len(df)
+    cv_folds = min(5, n)
 
-    reg = GradientBoostingRegressor(n_estimators=150, max_depth=3,
-                                     learning_rate=0.08, random_state=42)
-    reg.fit(X_scaled, y_margin)
-    reg_cv = cross_val_score(reg, X_scaled, y_margin,
-                              cv=min(5, len(df)), scoring="neg_mean_absolute_error")
+    if n >= 200:
+        # ── STACKING ENSEMBLE (Finding 14) ─────────────────────────
+        gbm = GradientBoostingRegressor(
+            n_estimators=150, max_depth=4,
+            learning_rate=0.06, subsample=0.8,
+            min_samples_leaf=20, random_state=42,
+        )
+        rf_reg = RandomForestRegressor(
+            n_estimators=100, max_depth=6,
+            min_samples_leaf=15, max_features=0.7,
+            random_state=42, n_jobs=1,
+        )
+        ridge = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
 
-    clf = CalibratedClassifierCV(
-        LogisticRegression(max_iter=1000), cv=min(5, len(df))
-    )
-    clf.fit(X_scaled, y_win)
-    explainer = shap.TreeExplainer(reg)
+        print("  NCAAB: Training stacking ensemble (GBM + RF + Ridge)...")
+        oof_gbm = cross_val_predict(gbm, X_scaled, y_margin, cv=cv_folds)
+        oof_rf  = cross_val_predict(rf_reg, X_scaled, y_margin, cv=cv_folds)
+        oof_ridge = cross_val_predict(ridge, X_scaled, y_margin, cv=cv_folds)
+
+        gbm.fit(X_scaled, y_margin)
+        rf_reg.fit(X_scaled, y_margin)
+        ridge.fit(X_scaled, y_margin)
+
+        meta_X = np.column_stack([oof_gbm, oof_rf, oof_ridge])
+        meta_reg = Ridge(alpha=1.0)
+        meta_reg.fit(meta_X, y_margin)
+
+        reg = StackedRegressor([gbm, rf_reg, ridge], meta_reg, scaler)
+        reg_cv = cross_val_score(gbm, X_scaled, y_margin,
+                                  cv=cv_folds, scoring="neg_mean_absolute_error")
+        explainer = shap.TreeExplainer(gbm)
+        model_type = "StackedEnsemble(GBM+RF+Ridge)"
+
+        # Stacked classifier
+        gbm_clf = GradientBoostingClassifier(
+            n_estimators=100, max_depth=3,
+            learning_rate=0.06, subsample=0.8,
+            min_samples_leaf=20, random_state=42,
+        )
+        rf_clf = RandomForestClassifier(
+            n_estimators=100, max_depth=6,
+            min_samples_leaf=15, max_features=0.7,
+            random_state=42, n_jobs=1,
+        )
+        lr_clf = LogisticRegression(max_iter=1000)
+
+        oof_gbm_p = cross_val_predict(gbm_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+        oof_rf_p  = cross_val_predict(rf_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+        oof_lr_p  = cross_val_predict(lr_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+
+        gbm_clf.fit(X_scaled, y_win)
+        rf_clf.fit(X_scaled, y_win)
+        lr_clf.fit(X_scaled, y_win)
+
+        meta_clf_X = np.column_stack([oof_gbm_p, oof_rf_p, oof_lr_p])
+        meta_lr = LogisticRegression(max_iter=1000)
+        meta_lr.fit(meta_clf_X, y_win)
+        clf = StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr)
+
+        print(f"  NCAAB stacking meta weights: {meta_reg.coef_.round(3)}")
+    else:
+        # Simple models for small data
+        reg = GradientBoostingRegressor(n_estimators=150, max_depth=3,
+                                         learning_rate=0.08, random_state=42)
+        reg.fit(X_scaled, y_margin)
+        reg_cv = cross_val_score(reg, X_scaled, y_margin,
+                                  cv=min(5, len(df)), scoring="neg_mean_absolute_error")
+        clf = CalibratedClassifierCV(
+            LogisticRegression(max_iter=1000), cv=min(5, len(df))
+        )
+        clf.fit(X_scaled, y_win)
+        explainer = shap.TreeExplainer(reg)
+        model_type = "GBM"
 
     bundle = {
         "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
         "feature_cols": list(X.columns), "n_train": len(df),
-        "mae_cv": float(-reg_cv.mean()),
+        "mae_cv": float(-reg_cv.mean()), "model_type": model_type,
         "trained_at": datetime.utcnow().isoformat(),
     }
     save_model("ncaa", bundle)
-    return {"status": "trained", "n_train": len(df),
+    return {"status": "trained", "n_train": len(df), "model_type": model_type,
             "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns)}
 
 def predict_ncaa(game: dict):
@@ -950,26 +1077,56 @@ def predict_ncaa(game: dict):
     he = game.get("home_adj_em", 0)
     ae = game.get("away_adj_em", 0)
 
-    row = pd.DataFrame([{
-        "pred_home_score":  ph, "pred_away_score":  pa,
-        "home_adj_em":      he, "away_adj_em":      ae,
-        "adj_em_diff":      he - ae,
-        "score_diff_pred":  ph - pa, "total_pred": ph + pa,
-        "home_fav":         1 if game.get("model_ml_home", 0) < 0 else 0,
-        "win_pct_home":     game.get("win_pct_home", 0.5),
-        "neutral":          int(game.get("neutral_site", False)),
-        "ou_gap":           (ph + pa) - game.get("market_ou_total", game.get("ou_total", 145)),
-        "spread_vs_market": game.get("spread_home", 0) - game.get("market_spread_home", 0),
-    }])
+    # Build a single-row DataFrame with all features the model expects
+    row_data = {
+        "pred_home_score": ph, "pred_away_score": pa,
+        "home_adj_em": he, "away_adj_em": ae,
+        "model_ml_home": game.get("model_ml_home", 0),
+        "neutral_site": game.get("neutral_site", False),
+        "spread_home": game.get("spread_home", 0),
+        "market_spread_home": game.get("market_spread_home", 0),
+        "market_ou_total": game.get("market_ou_total", game.get("ou_total", 145)),
+        "ou_total": game.get("ou_total", 145),
+        "win_pct_home": game.get("win_pct_home", 0.5),
+        # Raw stats (will use defaults from ncaa_build_features if missing)
+        "home_ppg": game.get("home_ppg", 75), "away_ppg": game.get("away_ppg", 75),
+        "home_opp_ppg": game.get("home_opp_ppg", 72), "away_opp_ppg": game.get("away_opp_ppg", 72),
+        "home_fgpct": game.get("home_fgpct", 0.455), "away_fgpct": game.get("away_fgpct", 0.455),
+        "home_threepct": game.get("home_threepct", 0.340), "away_threepct": game.get("away_threepct", 0.340),
+        "home_ftpct": game.get("home_ftpct", 0.720), "away_ftpct": game.get("away_ftpct", 0.720),
+        "home_assists": game.get("home_assists", 14), "away_assists": game.get("away_assists", 14),
+        "home_turnovers": game.get("home_turnovers", 12), "away_turnovers": game.get("away_turnovers", 12),
+        "home_tempo": game.get("home_tempo", 68), "away_tempo": game.get("away_tempo", 68),
+        "home_orb_pct": game.get("home_orb_pct", 0.28), "away_orb_pct": game.get("away_orb_pct", 0.28),
+        "home_fta_rate": game.get("home_fta_rate", 0.34), "away_fta_rate": game.get("away_fta_rate", 0.34),
+        "home_ato_ratio": game.get("home_ato_ratio", 1.2), "away_ato_ratio": game.get("away_ato_ratio", 1.2),
+        "home_opp_fgpct": game.get("home_opp_fgpct", 0.430), "away_opp_fgpct": game.get("away_opp_fgpct", 0.430),
+        "home_opp_threepct": game.get("home_opp_threepct", 0.330), "away_opp_threepct": game.get("away_opp_threepct", 0.330),
+        "home_steals": game.get("home_steals", 7), "away_steals": game.get("away_steals", 7),
+        "home_blocks": game.get("home_blocks", 3.5), "away_blocks": game.get("away_blocks", 3.5),
+        "home_wins": game.get("home_wins", 10), "away_wins": game.get("away_wins", 10),
+        "home_losses": game.get("home_losses", 5), "away_losses": game.get("away_losses", 5),
+        "home_form": game.get("home_form", 0), "away_form": game.get("away_form", 0),
+        "home_sos": game.get("home_sos", 0.500), "away_sos": game.get("away_sos", 0.500),
+        "home_rank": game.get("home_rank", 200), "away_rank": game.get("away_rank", 200),
+    }
+    row = pd.DataFrame([row_data])
+    X_built = ncaa_build_features(row)
 
-    X_s      = bundle["scaler"].transform(row[bundle["feature_cols"]])
+    # Ensure feature alignment with trained model
+    for col in bundle["feature_cols"]:
+        if col not in X_built.columns:
+            X_built[col] = 0
+    X_built = X_built[bundle["feature_cols"]]
+
+    X_s      = bundle["scaler"].transform(X_built)
     margin   = float(bundle["reg"].predict(X_s)[0])
     win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
     shap_vals = bundle["explainer"].shap_values(X_s)
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[0]
     shap_out = [
-        {"feature": f, "shap": round(float(v), 4), "value": round(float(row[f].iloc[0]), 3)}
+        {"feature": f, "shap": round(float(v), 4), "value": round(float(X_built[f].iloc[0]), 3)}
         for f, v in zip(bundle["feature_cols"], shap_vals[0])
     ]
     shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
@@ -981,6 +1138,7 @@ def predict_ncaa(game: dict):
         "ml_win_prob_away": round(1 - win_prob, 4),
         "shap": shap_out,
         "model_meta": {"n_train": bundle["n_train"], "mae_cv": bundle["mae_cv"],
+                       "model_type": bundle.get("model_type", "unknown"),
                        "trained_at": bundle["trained_at"]},
     }
 
@@ -1282,10 +1440,25 @@ def monte_carlo(sport, home_mean, away_mean, n_sims=10_000, ou_line=None, game_i
         )
 
     else:
-        std = {"NBA": 11.0, "NCAAB": 9.0, "NFL": 10.5, "NCAAF": 14.0}.get(sport, 10.0)
-        home_scores = rng.normal(home_mean, std, n_sims)
-        away_scores = rng.normal(away_mean, std, n_sims)
-        distribution_note = f"Normal(σ={std})"
+        base_std = {"NBA": 11.0, "NCAAB": 9.0, "NFL": 10.5, "NCAAF": 14.0}.get(sport, 10.0)
+
+        # Finding 20: Dynamic σ based on expected game tempo
+        avg_total = home_mean + away_mean
+        tempo_norm = {"NBA": 220, "NCAAB": 140, "NFL": 44, "NCAAF": 52}.get(sport, 140)
+        tempo_factor = avg_total / tempo_norm if tempo_norm > 0 else 1.0
+        std = base_std * max(0.75, min(1.25, tempo_factor))
+
+        # Finding 21: Shared pace/environment correlation for basketball
+        if sport in ("NBA", "NCAAB"):
+            sigma_pace = 0.08  # ~±8% shared pace variance
+            pace_factor = rng.lognormal(mean=0.0, sigma=sigma_pace, size=n_sims)
+            home_scores = rng.normal(home_mean * pace_factor, std, n_sims)
+            away_scores = rng.normal(away_mean * pace_factor, std, n_sims)
+            distribution_note = f"Normal(σ={std:.1f}) with pace correlation (σ_pace={sigma_pace})"
+        else:
+            home_scores = rng.normal(home_mean, std, n_sims)
+            away_scores = rng.normal(away_mean, std, n_sims)
+            distribution_note = f"Normal(σ={std:.1f})"
 
     margins = home_scores - away_scores
     totals  = home_scores + away_scores
@@ -1414,6 +1587,8 @@ def index():
             "POST /calibrate/mlb      (fit NegBin dispersion from historical data)",
             "POST /predict/<sport>",
             "POST /monte-carlo         (body: sport, home_mean, away_mean, n_sims, ou_line)",
+            "POST /backtest/mlb        (walk-forward MLB backtest)",
+            "POST /backtest/ncaa       (walk-forward NCAAB backtest)",
             "GET  /accuracy/<sport>",
             "GET  /accuracy/all",
             "GET  /model-info/<sport>",
@@ -1975,6 +2150,158 @@ def route_backtest_current_model():
             "home_win_rate": round(float(y_win.mean()), 3),
             "monthly": monthly_results,
             "note": "In-sample test. Use /backtest/mlb for unbiased walk-forward.",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "type": type(e).__name__, "traceback": traceback.format_exc()}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# NCAA BACKTEST (Finding 27)
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/backtest/ncaa", methods=["POST"])
+def route_backtest_ncaa():
+    """
+    Walk-forward backtest for NCAAB predictions.
+    Trains on games before each month, tests on that month.
+    Body: { "min_train": 200 }
+    """
+    import traceback
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        min_train = int(body.get("min_train", 200))
+
+        rows = sb_get("ncaa_predictions",
+                      "result_entered=eq.true&actual_home_score=not.is.null&select=*&order=game_date.asc")
+        if not rows or len(rows) < min_train + 50:
+            return jsonify({"error": f"Need {min_train + 50}+ graded games, have {len(rows) if rows else 0}"})
+
+        df = pd.DataFrame(rows)
+        for col in ["actual_home_score", "actual_away_score", "pred_home_score", "pred_away_score",
+                     "home_adj_em", "away_adj_em", "win_pct_home", "spread_home",
+                     "market_spread_home", "market_ou_total", "ou_total", "model_ml_home"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df["game_date"] = pd.to_datetime(df["game_date"])
+        df["month"] = df["game_date"].dt.to_period("M")
+        y_margin = (df["actual_home_score"] - df["actual_away_score"]).values
+        y_win = (y_margin > 0).astype(int).values
+
+        months = sorted(df["month"].unique())
+        results_by_month = []
+        all_predictions = []
+
+        for i, test_month in enumerate(months):
+            train_mask = df["month"] < test_month
+            test_mask = df["month"] == test_month
+            train_df = df[train_mask]
+            test_df = df[test_mask]
+
+            if len(train_df) < min_train or len(test_df) < 5:
+                continue
+
+            X_train = ncaa_build_features(train_df)
+            X_test = ncaa_build_features(test_df)
+            y_train_margin = y_margin[train_mask.values]
+            y_test_margin = y_margin[test_mask.values]
+            y_train_win = y_win[train_mask.values]
+            y_test_win = y_win[test_mask.values]
+
+            scaler = StandardScaler()
+            X_tr = scaler.fit_transform(X_train)
+            X_te = scaler.transform(X_test)
+
+            cv_folds = min(3, len(train_df))
+
+            reg = GradientBoostingRegressor(
+                n_estimators=100, max_depth=3,
+                learning_rate=0.08, subsample=0.8,
+                min_samples_leaf=15, random_state=42,
+            )
+            reg.fit(X_tr, y_train_margin)
+
+            clf = CalibratedClassifierCV(
+                LogisticRegression(max_iter=1000), cv=cv_folds
+            )
+            clf.fit(X_tr, y_train_win)
+
+            pred_margin = reg.predict(X_te)
+            pred_wp = clf.predict_proba(X_te)[:, 1]
+            pred_pick = (pred_wp >= 0.5).astype(int)
+
+            accuracy = float(np.mean(pred_pick == y_test_win))
+            mae_margin = float(mean_absolute_error(y_test_margin, pred_margin))
+            brier = float(brier_score_loss(y_test_win, pred_wp))
+
+            # Heuristic baseline (the v15 formula predictions stored in win_pct_home)
+            heur_wp = test_df["win_pct_home"].fillna(0.5).values
+            heur_pick = (heur_wp >= 0.5).astype(int)
+            heur_acc = float(np.mean(heur_pick == y_test_win))
+            heur_brier = float(brier_score_loss(y_test_win, heur_wp))
+
+            results_by_month.append({
+                "month": str(test_month),
+                "n_train": len(train_df),
+                "n_test": len(test_df),
+                "ml_accuracy": round(accuracy, 4),
+                "ml_brier": round(brier, 4),
+                "ml_mae_margin": round(mae_margin, 3),
+                "heuristic_accuracy": round(heur_acc, 4),
+                "heuristic_brier": round(heur_brier, 4),
+                "home_win_rate": round(float(y_test_win.mean()), 3),
+            })
+
+            for j in range(len(test_df)):
+                all_predictions.append({
+                    "month": str(test_month),
+                    "pred_win_prob": round(float(pred_wp[j]), 4),
+                    "heur_win_prob": round(float(heur_wp[j]), 4),
+                    "pred_margin": round(float(pred_margin[j]), 2),
+                    "actual_margin": int(y_test_margin[j]),
+                    "actual_home_win": int(y_test_win[j]),
+                    "ml_correct": int(pred_pick[j] == y_test_win[j]),
+                    "heur_correct": int(heur_pick[j] == y_test_win[j]),
+                })
+
+        if not results_by_month:
+            return jsonify({"error": f"No months with >= {min_train} training games"})
+
+        total = sum(r["n_test"] for r in results_by_month)
+        agg = {
+            "total_games_tested": total,
+            "months_tested": len(results_by_month),
+            "ml_overall_accuracy": round(sum(r["ml_accuracy"] * r["n_test"] for r in results_by_month) / total, 4),
+            "ml_overall_brier": round(sum(r["ml_brier"] * r["n_test"] for r in results_by_month) / total, 4),
+            "ml_overall_mae_margin": round(sum(r["ml_mae_margin"] * r["n_test"] for r in results_by_month) / total, 3),
+            "heur_overall_accuracy": round(sum(r["heuristic_accuracy"] * r["n_test"] for r in results_by_month) / total, 4),
+            "heur_overall_brier": round(sum(r["heuristic_brier"] * r["n_test"] for r in results_by_month) / total, 4),
+            "baseline_home_always": round(sum(r["home_win_rate"] * r["n_test"] for r in results_by_month) / total, 4),
+        }
+
+        # Confidence tier analysis
+        conf_results = []
+        all_preds_arr = np.array([(p["pred_win_prob"], p["actual_home_win"]) for p in all_predictions])
+        if len(all_preds_arr) > 0:
+            for t in [0.52, 0.55, 0.58, 0.60, 0.65, 0.70]:
+                strong = (all_preds_arr[:, 0] >= t) | (all_preds_arr[:, 0] <= (1 - t))
+                ns = int(strong.sum())
+                if ns > 0:
+                    pred_side = (all_preds_arr[strong, 0] >= 0.5).astype(int)
+                    actual = all_preds_arr[strong, 1].astype(int)
+                    conf_results.append({
+                        "min_confidence": f"{t:.0%}",
+                        "n_games": ns,
+                        "accuracy": round(float(np.mean(pred_side == actual)), 4),
+                    })
+
+        return jsonify({
+            "status": "backtest_complete",
+            "aggregate": agg,
+            "by_month": results_by_month,
+            "confidence_tiers": conf_results,
+            "n_predictions": len(all_predictions),
+            "sample_predictions": all_predictions[:20],
         })
     except Exception as e:
         return jsonify({"error": str(e), "type": type(e).__name__, "traceback": traceback.format_exc()}), 500
