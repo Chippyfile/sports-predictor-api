@@ -26,8 +26,9 @@ warnings.filterwarnings("ignore")
 
 # ── ML imports ────────────────────────────────────────────────────────────────
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier
-from sklearn.linear_model import RidgeCV, LogisticRegression, Ridge
+from sklearn.linear_model import RidgeCV, LogisticRegression, Ridge, ElasticNetCV
 from sklearn.preprocessing import StandardScaler
+from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import cross_val_score, cross_val_predict
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import mean_absolute_error, accuracy_score, brier_score_loss
@@ -880,8 +881,30 @@ def predict_nba(game: dict):
     }
 
 # ═══════════════════════════════════════════════════════════════
-# NCAAB MODEL (v16 — Audit fixes F3, F4, F11, F17, F18, F19, F23, F24)
+# NCAAB MODEL (v17 — Re-audit fixes R1-R10)
+#   R1: Home bias correction via neutral_em_diff + bias subtraction
+#   R2: Heuristic signal re-introduced as capped feature
+#   R3: Conference game flag + season phase features
+#   R4: Isotonic calibration on classifier probabilities
+#   R5: Rest days wiring (column detection)
+#   R6: Post-training bias correction stored in bundle
+#   R7: ElasticNet replaces Ridge for diversity; meta weights logged
+#   R8: SOS-weighted interaction features
 # ═══════════════════════════════════════════════════════════════
+
+# Conference HCA lookup (same as heuristic, used to decompose adj_em_diff)
+_NCAA_CONF_HCA = {
+    "Big 12": 3.8, "Southeastern Conference": 3.7, "SEC": 3.7,
+    "Big Ten": 3.6, "Big Ten Conference": 3.6,
+    "Atlantic Coast Conference": 3.4, "ACC": 3.4,
+    "Big East": 3.3, "Big East Conference": 3.3,
+    "Pac-12": 3.0, "Pac-12 Conference": 3.0,
+    "Mountain West Conference": 3.2, "Mountain West": 3.2,
+    "American Athletic Conference": 3.0, "AAC": 3.0,
+    "West Coast Conference": 2.8, "WCC": 2.8,
+    "Atlantic 10 Conference": 2.7, "A-10": 2.7,
+    "Missouri Valley Conference": 2.9, "MVC": 2.9,
+}
 
 def ncaa_build_features(df):
     df = df.copy()
@@ -908,7 +931,6 @@ def ncaa_build_features(df):
         "home_form": 0.0, "away_form": 0.0,
         "home_sos": 0.500, "away_sos": 0.500,
         "home_rank": 200, "away_rank": 200,
-        # F23: Rest days (if available in data)
         "home_rest_days": 3, "away_rest_days": 3,
     }
     for col, default in raw_cols.items():
@@ -917,14 +939,28 @@ def ncaa_build_features(df):
         else:
             df[col] = default
 
-    # ── F4 FIX: Heuristic-derived features kept SEPARATE from raw ──
-    # Only include adj_em_diff and neutral as minimal heuristic context;
-    # REMOVED: pred_home_score, pred_away_score, score_diff_pred, total_pred,
-    #          home_fav, win_pct_home (F3), spread_vs_market, ou_gap
-    df["adj_em_diff"]     = df["home_adj_em"].fillna(0) - df["away_adj_em"].fillna(0)
+    # ── R1 FIX: Decompose adj_em_diff into neutral component + HCA component ──
+    # The raw adj_em_diff contains HCA baked in (from home PPG). Separate them
+    # so the ML can learn their independent weights instead of double-counting.
+    raw_em_diff = df["home_adj_em"].fillna(0) - df["away_adj_em"].fillna(0)
+    # Estimate HCA component: conference-based HCA / tempo * 100 gives per-100-poss effect
+    hca_component = df.apply(
+        lambda r: 0 if r.get("neutral_site", False) else _NCAA_CONF_HCA.get(
+            r.get("home_conference", ""), 3.0
+        ) * 0.5, axis=1  # HCA split across both teams, so ~0.5 on each side
+    ) if "home_conference" in df.columns else pd.Series(1.5, index=df.index)
+    df["neutral_em_diff"] = raw_em_diff - hca_component  # R1: HCA-stripped efficiency gap
+    df["hca_pts"]         = hca_component                  # R1: separate HCA signal
     df["neutral"]         = df["neutral_site"].fillna(False).astype(int)
 
-    # ── F17 FIX: Differential features ONLY (removed redundant absolute stats) ──
+    # ── R2 FIX: Re-introduce heuristic win probability (capped) ──
+    # Capped to [0.15, 0.85] to prevent ML from passing through verbatim
+    if "win_pct_home" in df.columns:
+        df["heur_win_prob_capped"] = df["win_pct_home"].fillna(0.5).clip(0.15, 0.85)
+    else:
+        df["heur_win_prob_capped"] = 0.5
+
+    # ── Differential features ──
     df["ppg_diff"]       = df["home_ppg"] - df["away_ppg"]
     df["opp_ppg_diff"]   = df["home_opp_ppg"] - df["away_opp_ppg"]
     df["fgpct_diff"]     = df["home_fgpct"] - df["away_fgpct"]
@@ -938,38 +974,68 @@ def ncaa_build_features(df):
     df["blocks_diff"]    = df["home_blocks"] - df["away_blocks"]
     df["sos_diff"]       = df["home_sos"] - df["away_sos"]
     df["form_diff"]      = df["home_form"] - df["away_form"]
-    df["rank_diff"]      = df["away_rank"] - df["home_rank"]  # positive = home ranked higher
+    df["rank_diff"]      = df["away_rank"] - df["home_rank"]
     df["win_pct_diff"]   = (df["home_wins"] / (df["home_wins"] + df["home_losses"]).clip(1)) - \
                            (df["away_wins"] / (df["away_wins"] + df["away_losses"]).clip(1))
 
-    # F11: Turnover margin differential — one of strongest NCAAB predictors
+    # F11: Turnover margin differential
     df["to_margin_diff"]    = df["away_turnovers"] - df["home_turnovers"]
     df["steals_to_ratio_h"] = df["home_steals"] / df["home_turnovers"].clip(0.5)
     df["steals_to_ratio_a"] = df["away_steals"] / df["away_turnovers"].clip(0.5)
     df["steals_to_diff"]    = df["steals_to_ratio_h"] - df["steals_to_ratio_a"]
 
-    # F24: Conference game flag and ranking context
+    # Ranking context
     df["is_ranked_game"] = ((df["home_rank"] <= 25) | (df["away_rank"] <= 25)).astype(int)
     df["is_top_matchup"] = ((df["home_rank"] <= 25) & (df["away_rank"] <= 25)).astype(int)
 
-    # F23: Rest days differential (if available)
-    df["rest_diff"] = df["home_rest_days"] - df["away_rest_days"]
+    # R5: Rest days (will be non-default only after ncaaSync wiring)
+    df["rest_diff"]  = df["home_rest_days"] - df["away_rest_days"]
     df["either_b2b"] = ((df["home_rest_days"] <= 1) | (df["away_rest_days"] <= 1)).astype(int)
 
+    # ── R3 FIX: Conference game flag + season phase ──
+    if "home_conference" in df.columns and "away_conference" in df.columns:
+        df["is_conf_game"] = (df["home_conference"].fillna("") == df["away_conference"].fillna("")).astype(int)
+        # Filter out cases where both are empty string (missing data)
+        df.loc[(df["home_conference"].fillna("") == "") | (df["away_conference"].fillna("") == ""), "is_conf_game"] = 0
+    else:
+        df["is_conf_game"] = 0
+
+    if "game_date" in df.columns:
+        gd = pd.to_datetime(df["game_date"], errors="coerce")
+        # Season runs Nov 1 → early April (~155 days). Map to 0.0→1.0
+        # Day of year: Nov 1 ≈ 305, April 7 ≈ 97 (next year)
+        day_of_year = gd.dt.dayofyear.fillna(60)
+        # Normalize: Nov=0.0, Dec=0.2, Jan=0.4, Feb=0.6, Mar=0.8, Apr=1.0
+        df["season_phase"] = day_of_year.apply(
+            lambda d: (d - 305) / 155 if d >= 305 else (d + 60) / 155
+        ).clip(0.0, 1.0)
+    else:
+        df["season_phase"] = 0.5
+
+    # ── R8 FIX: SOS-weighted interaction features ──
+    df["ppg_x_sos"]     = df["ppg_diff"] * df["sos_diff"]
+    df["em_x_conf"]     = df["neutral_em_diff"] * df["is_conf_game"]
+
     feature_cols = [
-        # Minimal heuristic context (F4: limited to avoid circularity)
-        "adj_em_diff", "neutral",
-        # Raw stats — differentials ONLY (F17: removed absolute stats)
+        # R1: Decomposed efficiency + HCA
+        "neutral_em_diff", "hca_pts", "neutral",
+        # R2: Heuristic signal (capped)
+        "heur_win_prob_capped",
+        # Raw stats — differentials
         "ppg_diff", "opp_ppg_diff", "fgpct_diff", "threepct_diff",
         "orb_pct_diff", "fta_rate_diff", "ato_diff",
         "def_fgpct_diff", "steals_diff", "blocks_diff",
         "sos_diff", "form_diff", "rank_diff", "win_pct_diff",
-        # F11: Turnover quality features
+        # Turnover quality
         "to_margin_diff", "steals_to_diff",
-        # Context features
+        # Context
         "tempo_avg", "is_ranked_game", "is_top_matchup",
-        # F23: Schedule fatigue
+        # R3: Conference + season phase
+        "is_conf_game", "season_phase",
+        # R5: Schedule fatigue
         "rest_diff", "either_b2b",
+        # R8: Interaction features
+        "ppg_x_sos", "em_x_conf",
     ]
     return df[feature_cols].fillna(0)
 
@@ -990,7 +1056,7 @@ def train_ncaa():
     cv_folds = min(5, n)
 
     if n >= 200:
-        # ── STACKING ENSEMBLE (F18: tuned meta-learner) ──────────
+        # ── R7: Stacking with ElasticNet replacing Ridge for diversity ──
         gbm = GradientBoostingRegressor(
             n_estimators=150, max_depth=4,
             learning_rate=0.06, subsample=0.8,
@@ -1001,28 +1067,39 @@ def train_ncaa():
             min_samples_leaf=15, max_features=0.7,
             random_state=42, n_jobs=1,
         )
-        # F18 FIX: Use RidgeCV with broader alpha range for meta-learner
-        ridge = RidgeCV(alphas=[0.01, 0.1, 1.0, 5.0, 10.0, 50.0], cv=cv_folds)
+        # R7 FIX: ElasticNet replaces Ridge — L1 component adds feature selection
+        enet = ElasticNetCV(l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
+                            alphas=[0.01, 0.1, 1.0, 5.0],
+                            cv=cv_folds, random_state=42)
 
-        print("  NCAAB: Training stacking ensemble (GBM + RF + Ridge)...")
-        oof_gbm = cross_val_predict(gbm, X_scaled, y_margin, cv=cv_folds)
-        oof_rf  = cross_val_predict(rf_reg, X_scaled, y_margin, cv=cv_folds)
-        oof_ridge = cross_val_predict(ridge, X_scaled, y_margin, cv=cv_folds)
+        print("  NCAAB v17: Training stacking ensemble (GBM + RF + ElasticNet)...")
+        oof_gbm   = cross_val_predict(gbm, X_scaled, y_margin, cv=cv_folds)
+        oof_rf    = cross_val_predict(rf_reg, X_scaled, y_margin, cv=cv_folds)
+        oof_enet  = cross_val_predict(enet, X_scaled, y_margin, cv=cv_folds)
 
         gbm.fit(X_scaled, y_margin)
         rf_reg.fit(X_scaled, y_margin)
-        ridge.fit(X_scaled, y_margin)
+        enet.fit(X_scaled, y_margin)
 
-        meta_X = np.column_stack([oof_gbm, oof_rf, oof_ridge])
-        # F18 FIX: Use RidgeCV for meta-learner instead of fixed alpha
+        meta_X = np.column_stack([oof_gbm, oof_rf, oof_enet])
         meta_reg = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
         meta_reg.fit(meta_X, y_margin)
 
-        reg = StackedRegressor([gbm, rf_reg, ridge], meta_reg, scaler)
+        reg = StackedRegressor([gbm, rf_reg, enet], meta_reg, scaler)
         reg_cv = cross_val_score(gbm, X_scaled, y_margin,
                                   cv=cv_folds, scoring="neg_mean_absolute_error")
         explainer = shap.TreeExplainer(gbm)
-        model_type = "StackedEnsemble(GBM+RF+Ridge)"
+        model_type = "StackedEnsemble(GBM+RF+ElasticNet)"
+
+        # R7: Log meta weights for diagnostics
+        meta_weights = meta_reg.coef_.round(4).tolist()
+        print(f"  NCAAB meta weights [GBM, RF, ElasticNet]: {meta_weights}")
+        print(f"  ElasticNet selected: l1_ratio={enet.l1_ratio_}, alpha={enet.alpha_:.4f}")
+
+        # ── R6 FIX: Compute bias correction from OOF residuals ──
+        oof_meta = meta_reg.predict(meta_X)
+        bias_correction = float(np.mean(oof_meta - y_margin.values))
+        print(f"  NCAAB bias correction: {bias_correction:+.3f} pts (will be subtracted from predictions)")
 
         # Stacked classifier
         gbm_clf = GradientBoostingClassifier(
@@ -1035,8 +1112,6 @@ def train_ncaa():
             min_samples_leaf=15, max_features=0.7,
             random_state=42, n_jobs=1,
         )
-        # F19 FIX: Use LogisticRegression without balanced class_weight
-        # (home win rate ~60% is mild, balanced weights hurt calibration)
         lr_clf = LogisticRegression(max_iter=1000, C=1.0)
 
         oof_gbm_p = cross_val_predict(gbm_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
@@ -1052,7 +1127,12 @@ def train_ncaa():
         meta_lr.fit(meta_clf_X, y_win)
         clf = StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr)
 
-        print(f"  NCAAB stacking meta weights: {meta_reg.coef_.round(3)}")
+        # ── R4 FIX: Isotonic calibration on OOF classifier probabilities ──
+        oof_stacked_probs = meta_lr.predict_proba(meta_clf_X)[:, 1]
+        isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+        isotonic.fit(oof_stacked_probs, y_win.values)
+        print(f"  NCAAB isotonic calibration fitted on {len(oof_stacked_probs)} OOF samples")
+
     else:
         # Simple models for small data
         reg = GradientBoostingRegressor(n_estimators=150, max_depth=3,
@@ -1066,16 +1146,27 @@ def train_ncaa():
         clf.fit(X_scaled, y_win)
         explainer = shap.TreeExplainer(reg)
         model_type = "GBM"
+        bias_correction = 0.0
+        isotonic = None
+        meta_weights = []
 
     bundle = {
         "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
         "feature_cols": list(X.columns), "n_train": len(df),
         "mae_cv": float(-reg_cv.mean()), "model_type": model_type,
         "trained_at": datetime.utcnow().isoformat(),
+        # R6: Bias correction
+        "bias_correction": bias_correction,
+        # R4: Isotonic calibration
+        "isotonic": isotonic,
+        # R7: Meta diagnostics
+        "meta_weights": meta_weights,
     }
     save_model("ncaa", bundle)
     return {"status": "trained", "n_train": len(df), "model_type": model_type,
-            "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns)}
+            "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns),
+            "bias_correction": round(bias_correction, 3),
+            "meta_weights": meta_weights}
 
 def predict_ncaa(game: dict):
     bundle = load_model("ncaa")
@@ -1088,17 +1179,21 @@ def predict_ncaa(game: dict):
     ae = game.get("away_adj_em", 0)
 
     # Build a single-row DataFrame with all features the model expects
-    # F3/F4 FIX: Removed win_pct_home and most heuristic outputs
     row_data = {
         "home_adj_em": he, "away_adj_em": ae,
         "neutral_site": game.get("neutral_site", False),
-        # F4: Keep pred scores for backward compat but they're no longer features
         "pred_home_score": ph, "pred_away_score": pa,
         "model_ml_home": game.get("model_ml_home", 0),
         "spread_home": game.get("spread_home", 0),
         "market_spread_home": game.get("market_spread_home", 0),
         "market_ou_total": game.get("market_ou_total", game.get("ou_total", 145)),
         "ou_total": game.get("ou_total", 145),
+        # R2: Heuristic win probability for capped feature
+        "win_pct_home": game.get("win_pct_home", 0.5),
+        # R3: Conference info
+        "home_conference": game.get("home_conference", ""),
+        "away_conference": game.get("away_conference", ""),
+        "game_date": game.get("game_date", ""),
         # Raw stats
         "home_ppg": game.get("home_ppg", 75), "away_ppg": game.get("away_ppg", 75),
         "home_opp_ppg": game.get("home_opp_ppg", 72), "away_opp_ppg": game.get("away_opp_ppg", 72),
@@ -1120,7 +1215,6 @@ def predict_ncaa(game: dict):
         "home_form": game.get("home_form", 0), "away_form": game.get("away_form", 0),
         "home_sos": game.get("home_sos", 0.500), "away_sos": game.get("away_sos", 0.500),
         "home_rank": game.get("home_rank", 200), "away_rank": game.get("away_rank", 200),
-        # F23: Rest days
         "home_rest_days": game.get("home_rest_days", 3), "away_rest_days": game.get("away_rest_days", 3),
     }
     row = pd.DataFrame([row_data])
@@ -1133,8 +1227,20 @@ def predict_ncaa(game: dict):
     X_built = X_built[bundle["feature_cols"]]
 
     X_s      = bundle["scaler"].transform(X_built)
-    margin   = float(bundle["reg"].predict(X_s)[0])
-    win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
+    raw_margin = float(bundle["reg"].predict(X_s)[0])
+    raw_win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
+
+    # R6 FIX: Apply bias correction to margin prediction
+    bias = bundle.get("bias_correction", 0.0)
+    margin = raw_margin - bias
+
+    # R4 FIX: Apply isotonic calibration to win probability
+    isotonic = bundle.get("isotonic")
+    if isotonic is not None:
+        win_prob = float(isotonic.predict([raw_win_prob])[0])
+    else:
+        win_prob = raw_win_prob
+
     shap_vals = bundle["explainer"].shap_values(X_s)
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[0]
@@ -1147,8 +1253,11 @@ def predict_ncaa(game: dict):
     return {
         "sport": "NCAAB",
         "ml_margin": round(margin, 2),
+        "ml_margin_raw": round(raw_margin, 2),  # before bias correction
         "ml_win_prob_home": round(win_prob, 4),
         "ml_win_prob_away": round(1 - win_prob, 4),
+        "ml_win_prob_raw": round(raw_win_prob, 4),  # before isotonic
+        "bias_correction_applied": round(bias, 3),
         "shap": shap_out,
         "model_meta": {"n_train": bundle["n_train"], "mae_cv": bundle["mae_cv"],
                        "model_type": bundle.get("model_type", "unknown"),
@@ -2171,15 +2280,14 @@ def route_backtest_current_model():
 
 
 # ═══════════════════════════════════════════════════════════════
-# NCAA BACKTEST (F12 FIX: uses stacking ensemble, adds sigma calibration)
+# NCAA BACKTEST (v17: R1-R8 fixes — ElasticNet, bias correction, isotonic)
 # ═══════════════════════════════════════════════════════════════
 
 @app.route("/backtest/ncaa", methods=["POST"])
 def route_backtest_ncaa():
     """
     Walk-forward backtest for NCAAB predictions.
-    Trains on games before each month, tests on that month.
-    F12 FIX: Uses stacking ensemble when n >= 200 (matches production).
+    v17: Uses ElasticNet, bias correction, isotonic calibration.
     Body: { "min_train": 200 }
     """
     import traceback
@@ -2230,8 +2338,8 @@ def route_backtest_ncaa():
 
             cv_folds = min(3, len(train_df))
 
-            # F12 FIX: Use stacking ensemble when enough training data
             if len(train_df) >= 200:
+                # R7: ElasticNet replaces Ridge
                 gbm = GradientBoostingRegressor(
                     n_estimators=150, max_depth=4,
                     learning_rate=0.06, subsample=0.8,
@@ -2242,24 +2350,30 @@ def route_backtest_ncaa():
                     min_samples_leaf=15, max_features=0.7,
                     random_state=42, n_jobs=1,
                 )
-                rdg = RidgeCV(alphas=[0.01, 0.1, 1.0, 5.0, 10.0], cv=cv_folds)
+                enet = ElasticNetCV(l1_ratio=[0.1, 0.5, 0.9],
+                                    alphas=[0.01, 0.1, 1.0],
+                                    cv=cv_folds, random_state=42)
 
                 oof_g = cross_val_predict(gbm, X_tr, y_train_margin, cv=cv_folds)
                 oof_r = cross_val_predict(rf_r, X_tr, y_train_margin, cv=cv_folds)
-                oof_d = cross_val_predict(rdg, X_tr, y_train_margin, cv=cv_folds)
+                oof_e = cross_val_predict(enet, X_tr, y_train_margin, cv=cv_folds)
 
                 gbm.fit(X_tr, y_train_margin)
                 rf_r.fit(X_tr, y_train_margin)
-                rdg.fit(X_tr, y_train_margin)
+                enet.fit(X_tr, y_train_margin)
 
-                meta_X = np.column_stack([oof_g, oof_r, oof_d])
+                meta_X = np.column_stack([oof_g, oof_r, oof_e])
                 meta = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
                 meta.fit(meta_X, y_train_margin)
 
+                # R6: Compute bias correction from OOF residuals
+                oof_meta = meta.predict(meta_X)
+                bias_correction = float(np.mean(oof_meta - y_train_margin))
+
                 test_meta_X = np.column_stack([
-                    gbm.predict(X_te), rf_r.predict(X_te), rdg.predict(X_te)
+                    gbm.predict(X_te), rf_r.predict(X_te), enet.predict(X_te)
                 ])
-                pred_margin = meta.predict(test_meta_X)
+                pred_margin = meta.predict(test_meta_X) - bias_correction  # R6: apply
 
                 # Stacked classifier
                 gbm_c = GradientBoostingClassifier(
@@ -2282,14 +2396,22 @@ def route_backtest_ncaa():
                 rf_c.fit(X_tr, y_train_win)
                 lr_c.fit(X_tr, y_train_win)
 
+                meta_clf = LogisticRegression(max_iter=1000, C=1.0)
+                oof_clf_X = np.column_stack([oof_gc, oof_rc, oof_lc])
+                meta_clf.fit(oof_clf_X, y_train_win)
+
+                # R4: Isotonic calibration on OOF stacked probs
+                oof_stacked_p = meta_clf.predict_proba(oof_clf_X)[:, 1]
+                iso = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+                iso.fit(oof_stacked_p, y_train_win)
+
                 test_clf_X = np.column_stack([
                     gbm_c.predict_proba(X_te)[:, 1],
                     rf_c.predict_proba(X_te)[:, 1],
                     lr_c.predict_proba(X_te)[:, 1],
                 ])
-                meta_clf = LogisticRegression(max_iter=1000, C=1.0)
-                meta_clf.fit(np.column_stack([oof_gc, oof_rc, oof_lc]), y_train_win)
-                pred_wp = meta_clf.predict_proba(test_clf_X)[:, 1]
+                raw_wp = meta_clf.predict_proba(test_clf_X)[:, 1]
+                pred_wp = iso.predict(raw_wp)  # R4: isotonic calibrated
             else:
                 reg = GradientBoostingRegressor(
                     n_estimators=100, max_depth=3,
