@@ -2185,8 +2185,8 @@ def route_backtest_ncaa():
 
         df["game_date"] = pd.to_datetime(df["game_date"])
         df["month"] = df["game_date"].dt.to_period("M")
-        y_margin = (df["actual_home_score"] - df["actual_away_score"]).values
-        y_win = (y_margin > 0).astype(int).values
+        y_margin = (df["actual_home_score"] - df["actual_away_score"]).to_numpy().astype(float)
+        y_win = (y_margin > 0).astype(int)
 
         months = sorted(df["month"].unique())
         results_by_month = []
@@ -2203,10 +2203,10 @@ def route_backtest_ncaa():
 
             X_train = ncaa_build_features(train_df)
             X_test = ncaa_build_features(test_df)
-            y_train_margin = y_margin[train_mask.values]
-            y_test_margin = y_margin[test_mask.values]
-            y_train_win = y_win[train_mask.values]
-            y_test_win = y_win[test_mask.values]
+            y_train_margin = y_margin[train_mask.to_numpy()]
+            y_test_margin = y_margin[test_mask.to_numpy()]
+            y_train_win = y_win[train_mask.to_numpy()]
+            y_test_win = y_win[test_mask.to_numpy()]
 
             scaler = StandardScaler()
             X_tr = scaler.fit_transform(X_train)
