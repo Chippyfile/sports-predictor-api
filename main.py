@@ -986,9 +986,13 @@ def ncaa_build_features(df):
     df["neutral"]         = df["neutral_site"].fillna(False).astype(int)
 
     # ── R2 FIX: Re-introduce heuristic win probability (capped) ──
-    # Capped to [0.15, 0.85] to prevent ML from passing through verbatim
+    # AMPLIFICATION FIX: Previous cap [0.15, 0.85] was too wide — the ML model
+    # learned to amplify the heuristic signal since win_pct_home already encodes
+    # the same information as neutral_em_diff, ppg_diff, rank_diff, etc.
+    # Tightened to [0.35, 0.65] so it provides only a weak directional nudge
+    # without dominating the prediction or double-counting raw features.
     if "win_pct_home" in df.columns:
-        df["heur_win_prob_capped"] = df["win_pct_home"].fillna(0.5).clip(0.15, 0.85)
+        df["heur_win_prob_capped"] = df["win_pct_home"].fillna(0.5).clip(0.35, 0.65)
     else:
         df["heur_win_prob_capped"] = 0.5
 
@@ -1006,7 +1010,13 @@ def ncaa_build_features(df):
     df["blocks_diff"]    = df["home_blocks"] - df["away_blocks"]
     df["sos_diff"]       = df["home_sos"] - df["away_sos"]
     df["form_diff"]      = df["home_form"] - df["away_form"]
-    df["rank_diff"]      = df["away_rank"] - df["home_rank"]
+    # AMPLIFICATION FIX: Unranked teams default to rank=200, creating extreme
+    # rank_diff values (e.g., -187 for #13 vs unranked) that GBM overfits on.
+    # Cap at 50 before differencing — beyond rank 50, the marginal predictive
+    # value of rank is negligible, but the raw number creates outlier inputs.
+    df["home_rank_capped"] = df["home_rank"].clip(upper=50)
+    df["away_rank_capped"] = df["away_rank"].clip(upper=50)
+    df["rank_diff"]      = df["away_rank_capped"] - df["home_rank_capped"]
     df["win_pct_diff"]   = (df["home_wins"] / (df["home_wins"] + df["home_losses"]).clip(1)) - \
                            (df["away_wins"] / (df["away_wins"] + df["away_losses"]).clip(1))
 
@@ -1016,7 +1026,7 @@ def ncaa_build_features(df):
     df["steals_to_ratio_a"] = df["away_steals"] / df["away_turnovers"].clip(0.5)
     df["steals_to_diff"]    = df["steals_to_ratio_h"] - df["steals_to_ratio_a"]
 
-    # Ranking context
+    # Ranking context (use raw ranks for threshold checks, capped for differentials)
     df["is_ranked_game"] = ((df["home_rank"] <= 25) | (df["away_rank"] <= 25)).astype(int)
     df["is_top_matchup"] = ((df["home_rank"] <= 25) & (df["away_rank"] <= 25)).astype(int)
 
@@ -1316,6 +1326,13 @@ def predict_ncaa(game: dict):
         win_prob = float(isotonic.predict([raw_win_prob])[0])
     else:
         win_prob = raw_win_prob
+
+    # AMPLIFICATION FIX: Clamp final win probability to [0.12, 0.88].
+    # Without this, the prob→moneyline formula (prob/(1-prob)*100) produces
+    # extreme moneylines: 0.775 → -344, 0.85 → -567, 0.90 → -900.
+    # College basketball rarely produces true win probabilities above ~85%
+    # even in massive mismatches (tournament 1 vs 16 seeds win ~1% of the time).
+    win_prob = max(0.12, min(0.88, win_prob))
 
     shap_vals = bundle["explainer"].shap_values(X_s)
     if isinstance(shap_vals, list):
