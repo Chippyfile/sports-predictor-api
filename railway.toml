@@ -7,3 +7,12 @@ healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
+
+# ── Daily auto-training at 4 AM ET (8:00 UTC) ─────────────────
+# Trains in-season sports, compares MAE vs current model,
+# promotes only if better. Logs to Supabase training_log table.
+# Requires Railway Hobby plan ($5/mo). Free-tier alternative:
+# use GitHub Actions workflow (see daily-train.yml).
+[[cron]]
+schedule = "0 8 * * *"
+endpoint = "/cron/auto-train"
