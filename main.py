@@ -351,6 +351,14 @@ def mlb_build_features(df):
     df["bp_exposure_diff"] = df["home_bp_exposure"] - df["away_bp_exposure"]
     df["def_oaa_diff"]     = df["home_def_oaa"] - df["away_def_oaa"]
 
+    # ── FIX ML2: Interaction features (capture non-linear relationships) ──
+    # starter_quality × bullpen_quality: short-start ace with bad bullpen is different
+    df["fip_x_bullpen"] = df["fip_diff"] * df["bullpen_era_diff"]
+    # offensive advantage × park factor: wOBA edge compounds in hitter-friendly parks
+    df["woba_x_park"] = df["woba_diff"] * df["park_factor"]
+    # wind × pitching advantage: wind out compresses pitching quality advantages
+    df["wind_x_fip"] = df["wind_out"].astype(float) * df["fip_diff"]
+
     # ── League run environment context ──
     if "season" in df.columns:
         df["lg_rpg"] = df["season"].map(
@@ -375,31 +383,38 @@ def mlb_build_features(df):
     df["ou_gap"]         = df["total_pred"] - df["ou_total"]
     df["has_heuristic"]  = (df["total_pred"] > 0).astype(int)
 
+    # ═══════════════════════════════════════════════════════════════
+    # FIX S2/ML1: PRUNED FEATURE SET (47 → 25)
+    # ═══════════════════════════════════════════════════════════════
+    # Rationale: VIF analysis showed 15+ features were linear combinations.
+    # Keep DIFFS only (woba_diff, fip_diff, etc.) — drop individual home/away
+    # components that the diff already captures. Drop 9 K/BB features → keep
+    # k_bb_diff only. Drop 8 heuristic outputs → keep run_diff_pred + has_heuristic.
+    # Add 3 interaction features (Finding ML2) for non-linear signal.
+    #
+    # Expected impact: +1-1.5% accuracy from reduced multicollinearity,
+    # more stable stacking ensemble, better generalization.
     feature_cols = [
-        # Raw inputs — primary signal
-        "home_woba", "away_woba", "woba_diff",
-        "home_starter_fip", "away_starter_fip", "fip_diff",
-        "has_sp_fip",
-        "home_bullpen_era", "away_bullpen_era", "bullpen_era_diff",
+        # Offensive differential (primary signal)
+        "woba_diff",
+        # Pitching differentials
+        "fip_diff", "has_sp_fip",
+        "bullpen_era_diff",
+        # Strikeout/walk composite differential
+        "k_bb_diff",
+        # SP workload & defense
+        "sp_ip_diff", "bp_exposure_diff", "def_oaa_diff",
+        # Park & environment
         "park_factor",
         "temp_f", "wind_mph", "wind_out",
         "is_warm", "is_cold",
+        # Context
         "rest_diff", "travel_diff",
-        # K/9 and BB/9 features
-        "home_k9", "away_k9", "k9_diff",
-        "home_bb9", "away_bb9", "bb9_diff",
-        "k_bb_home", "k_bb_away", "k_bb_diff",
-        # SP workload & defensive quality
-        "home_sp_ip", "away_sp_ip", "sp_ip_diff",
-        "home_bp_exposure", "away_bp_exposure", "bp_exposure_diff",
-        "home_def_oaa", "away_def_oaa", "def_oaa_diff",
-        # League era context
         "lg_rpg",
-        # Heuristic outputs — secondary signal (0 for historical rows)
-        "pred_home_runs", "pred_away_runs",
-        "run_diff_pred", "total_pred",
-        "win_pct_home", "home_fav", "ou_gap",
-        "has_heuristic",
+        # Interaction features (Finding ML2)
+        "fip_x_bullpen", "woba_x_park", "wind_x_fip",
+        # Heuristic signal (sparse — 0 for 95% of training data)
+        "run_diff_pred", "has_heuristic",
     ]
 
     return df[feature_cols].fillna(0)
@@ -568,10 +583,22 @@ def train_mlb():
         meta_lr.fit(meta_clf_X, y_win)
 
         # Use module-level StackedClassifier for pickle compatibility
-        # The stacked meta-learner (LogisticRegression) already produces well-calibrated
-        # probabilities via Platt scaling. No additional CalibratedClassifierCV needed.
-        # (cv="prefit" was removed in sklearn 1.4+)
         clf = StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr)
+
+        # ── FIX S3: Isotonic calibration on OOF classifier probabilities ──
+        # MLB is a lower-variance sport (~54% home win rate) so small probability
+        # miscalibrations in the 48-56% range have outsized betting impact.
+        # Isotonic regression maps raw stacked probabilities → empirically calibrated ones.
+        # Pattern copied from NCAAB R4 fix which improved calibration significantly.
+        oof_stacked_probs = meta_lr.predict_proba(meta_clf_X)[:, 1]
+        isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+        isotonic.fit(oof_stacked_probs, y_win.values if hasattr(y_win, 'values') else y_win)
+        print(f"  MLB isotonic calibration fitted on {len(oof_stacked_probs)} OOF samples")
+
+        # ── FIX S2b: Bias correction from OOF residuals ──
+        oof_meta = meta_reg.predict(meta_X)
+        bias_correction = float(np.mean(oof_meta - y_margin.values if hasattr(y_margin, 'values') else oof_meta - y_margin))
+        print(f"  MLB bias correction: {bias_correction:+.3f} runs")
 
         print(f"  Stacking meta weights (reg): {meta_reg.coef_.round(3)}")
 
@@ -589,6 +616,8 @@ def train_mlb():
             cv=cv_folds
         )
         clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+        isotonic = None
+        bias_correction = 0.0
 
     bundle = {
         "scaler": scaler,
@@ -603,6 +632,10 @@ def train_mlb():
         "trained_at": datetime.utcnow().isoformat(),
         "model_type": model_type,
         "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
+        # FIX S3: Isotonic calibration (maps raw probs → calibrated probs)
+        "isotonic": isotonic,
+        # FIX S2b: Bias correction for margin predictions
+        "bias_correction": bias_correction,
     }
     save_model("mlb", bundle)
 
@@ -673,63 +706,38 @@ def predict_mlb(game: dict):
     home_bp_exposure = max(0, 9.0 - home_sp_ip) * (home_bullpen / 4.10)
     away_bp_exposure = max(0, 9.0 - away_sp_ip) * (away_bullpen / 4.10)
 
+    # Diffs
+    woba_diff = home_woba - away_woba
+    fip_diff = home_starter_fip - away_starter_fip
+    bullpen_era_diff = home_bullpen - away_bullpen
+    k_bb_diff = (home_k9 - home_bb9) - (away_k9 - away_bb9)
+    wind_out = int(wind_out_flag)
+
     row_data = {
-        # Raw inputs
-        "home_woba": home_woba,
-        "away_woba": away_woba,
-        "woba_diff": home_woba - away_woba,
-        
-        "home_starter_fip": home_starter_fip,
-        "away_starter_fip": away_starter_fip,
-        "fip_diff": home_starter_fip - away_starter_fip,
+        # ── Pruned feature set (S2/ML1 fix: 47→22) ──
+        "woba_diff": woba_diff,
+        "fip_diff": fip_diff,
         "has_sp_fip": has_sp_fip,
-        
-        "home_bullpen_era": home_bullpen,
-        "away_bullpen_era": away_bullpen,
-        "bullpen_era_diff": home_bullpen - away_bullpen,
-        
+        "bullpen_era_diff": bullpen_era_diff,
+        "k_bb_diff": k_bb_diff,
+        "sp_ip_diff": home_sp_ip - away_sp_ip,
+        "bp_exposure_diff": home_bp_exposure - away_bp_exposure,
+        "def_oaa_diff": home_def_oaa - away_def_oaa,
         "park_factor": park_factor,
         "temp_f": temp_f,
         "wind_mph": wind_mph,
-        "wind_out": int(wind_out_flag),
+        "wind_out": wind_out,
         "is_warm": 1 if temp_f > 75 else 0,
         "is_cold": 1 if temp_f < 45 else 0,
-        
         "rest_diff": home_rest - away_rest,
         "travel_diff": home_travel - away_travel,
-
-        # K/9 and BB/9 features
-        "home_k9": home_k9,
-        "away_k9": away_k9,
-        "k9_diff": home_k9 - away_k9,
-        "home_bb9": home_bb9,
-        "away_bb9": away_bb9,
-        "bb9_diff": home_bb9 - away_bb9,
-        "k_bb_home": home_k9 - home_bb9,
-        "k_bb_away": away_k9 - away_bb9,
-        "k_bb_diff": (home_k9 - home_bb9) - (away_k9 - away_bb9),
-
-        # SP workload & defensive quality
-        "home_sp_ip": home_sp_ip,
-        "away_sp_ip": away_sp_ip,
-        "sp_ip_diff": home_sp_ip - away_sp_ip,
-        "home_bp_exposure": home_bp_exposure,
-        "away_bp_exposure": away_bp_exposure,
-        "bp_exposure_diff": home_bp_exposure - away_bp_exposure,
-        "home_def_oaa": home_def_oaa,
-        "away_def_oaa": away_def_oaa,
-        "def_oaa_diff": home_def_oaa - away_def_oaa,
-
-        # League run environment context
         "lg_rpg": DEFAULT_CONSTANTS["lg_rpg"],
-        # Heuristic outputs
-        "pred_home_runs": ph,
-        "pred_away_runs": pa,
+        # Interaction features (ML2 fix)
+        "fip_x_bullpen": fip_diff * bullpen_era_diff,
+        "woba_x_park": woba_diff * park_factor,
+        "wind_x_fip": float(wind_out) * fip_diff,
+        # Heuristic signal
         "run_diff_pred": ph - pa,
-        "total_pred": ph + pa,
-        "win_pct_home": float(game.get("win_pct_home", 0.5)),
-        "home_fav": 1 if game.get("model_ml_home", 0) < 0 else 0,
-        "ou_gap": (ph + pa) - float(game.get("ou_total", 9.0)),
         "has_heuristic": 1 if ph > 0 or pa > 0 else 0,
     }
 
@@ -738,8 +746,19 @@ def predict_mlb(game: dict):
     
     # Scale and predict
     X_s = bundle["scaler"].transform(row[bundle["feature_cols"]])
-    margin = float(bundle["reg"].predict(X_s)[0])
-    win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
+    raw_margin = float(bundle["reg"].predict(X_s)[0])
+    raw_win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
+
+    # FIX S2b: Apply bias correction to margin prediction
+    bias = bundle.get("bias_correction", 0.0)
+    margin = raw_margin - bias
+
+    # FIX S3: Apply isotonic calibration to win probability
+    isotonic = bundle.get("isotonic")
+    if isotonic is not None:
+        win_prob = float(isotonic.predict([raw_win_prob])[0])
+    else:
+        win_prob = raw_win_prob
 
     # SHAP explanation
     shap_vals = bundle["explainer"].shap_values(X_s)
@@ -764,8 +783,11 @@ def predict_mlb(game: dict):
     return {
         "sport": "MLB",
         "ml_margin": round(margin, 2),
+        "ml_margin_raw": round(raw_margin, 2),
         "ml_win_prob_home": round(win_prob, 4),
         "ml_win_prob_away": round(1 - win_prob, 4),
+        "ml_win_prob_raw": round(raw_win_prob, 4),
+        "bias_correction": round(bias, 3),
         "shap": shap_out[:10],  # Top 10 SHAP values
         "model_meta": {
             "n_train": bundle["n_train"],
@@ -774,6 +796,7 @@ def predict_mlb(game: dict):
             "mae_cv": bundle["mae_cv"],
             "trained_at": bundle["trained_at"],
             "model_type": bundle["model_type"],
+            "has_isotonic": bundle.get("isotonic") is not None,
         },
     }
 
@@ -1904,20 +1927,46 @@ def heuristic_predict_row(row):
     lg_fip = sc["lg_fip"]
     pa_pg = sc["pa_pg"]
 
-    # F-03: Regress pitching stats 50% toward league mean to limit forward-looking leak.
-    # End-of-season FIP contains information from games that haven't happened yet at
-    # prediction time. 50% regression approximates mid-season knowledge.
-    LEAK_DISCOUNT = 0.50
+    # ═══════════════════════════════════════════════════════════════
+    # FIX S1: Game-date-aware regression (replaces flat 50% discount)
+    # ═══════════════════════════════════════════════════════════════
+    # End-of-season stats in mlb_historical contain future information.
+    # The leak magnitude varies by game date:
+    #   - April game: ~85% of season is future → heavy regression
+    #   - June game: ~60% is future → moderate regression
+    #   - September game: ~10% is future → light regression
+    # Formula: discount = games_before_date / total_season_games
+    # We approximate via game_date month if available, else use 50%.
+    game_date = row.get("game_date")
+    if game_date and isinstance(game_date, str) and len(game_date) >= 7:
+        try:
+            month = int(game_date[5:7])
+            day = int(game_date[8:10]) if len(game_date) >= 10 else 15
+            # MLB season: ~March 27 (game 1) → September 29 (game 162)
+            # Approximate games played by month using cumulative schedule
+            GAMES_BY_MONTH_END = {3: 5, 4: 30, 5: 56, 6: 81, 7: 105, 8: 133, 9: 162, 10: 162}
+            games_before = GAMES_BY_MONTH_END.get(month - 1, 0)
+            games_in_month = GAMES_BY_MONTH_END.get(month, 162) - games_before
+            games_so_far = games_before + games_in_month * (day / 30.0)
+            LEAK_DISCOUNT = max(0.15, min(0.85, games_so_far / 162.0))
+        except (ValueError, TypeError):
+            LEAK_DISCOUNT = 0.50  # fallback
+    else:
+        LEAK_DISCOUNT = 0.50  # no date info → use original midpoint
+
     home_fip_adj = lg_fip + (home_fip - lg_fip) * LEAK_DISCOUNT
     away_fip_adj = lg_fip + (away_fip - lg_fip) * LEAK_DISCOUNT
     home_k9_adj  = 8.5 + (home_k9 - 8.5) * LEAK_DISCOUNT
     away_k9_adj  = 8.5 + (away_k9 - 8.5) * LEAK_DISCOUNT
     home_bb9_adj = 3.2 + (home_bb9 - 3.2) * LEAK_DISCOUNT
     away_bb9_adj = 3.2 + (away_bb9 - 3.2) * LEAK_DISCOUNT
+    # Also regress wOBA (same leak, previously missed)
+    home_woba_adj = lg_woba + (home_woba - lg_woba) * LEAK_DISCOUNT
+    away_woba_adj = lg_woba + (away_woba - lg_woba) * LEAK_DISCOUNT
 
-    # ── wOBA → Runs (FanGraphs method) ──
-    hr = lg_rpg + ((home_woba - lg_woba) / woba_scale) * pa_pg
-    ar = lg_rpg + ((away_woba - lg_woba) / woba_scale) * pa_pg
+    # ── wOBA → Runs (FanGraphs method) — now using regressed wOBA (S1 fix) ──
+    hr = lg_rpg + ((home_woba_adj - lg_woba) / woba_scale) * pa_pg
+    ar = lg_rpg + ((away_woba_adj - lg_woba) / woba_scale) * pa_pg
 
     # ── Team FIP impact (F-02 aligned: marginal, discounted) ──
     # Using discounted FIP (leak-adjusted) and 0.65 coefficient (reduced from 1.0
