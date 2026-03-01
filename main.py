@@ -956,6 +956,14 @@ def ncaa_build_features(df):
         "home_sos": 0.500, "away_sos": 0.500,
         "home_rank": 200, "away_rank": 200,
         "home_rest_days": 3, "away_rest_days": 3,
+        # v18 P1-INJ: Injury columns
+        "home_injury_penalty": 0.0, "away_injury_penalty": 0.0,
+        "injury_diff": 0.0,
+        "home_missing_starters": 0, "away_missing_starters": 0,
+        # v18 P1-CTX: Tournament context columns
+        "is_conference_tournament": 0, "is_ncaa_tournament": 0,
+        "is_bubble_game": 0, "is_early_season": 0,
+        "importance_multiplier": 1.0,
     }
     for col, default in raw_cols.items():
         if col in df.columns:
@@ -1040,6 +1048,30 @@ def ncaa_build_features(df):
     df["ppg_x_sos"]     = df["ppg_diff"] * df["sos_diff"]
     df["em_x_conf"]     = df["neutral_em_diff"] * df["is_conf_game"]
 
+    # ── v18 P1-INJ: Injury features ──
+    df["home_injury_penalty"] = pd.to_numeric(df["home_injury_penalty"], errors="coerce").fillna(0)
+    df["away_injury_penalty"] = pd.to_numeric(df["away_injury_penalty"], errors="coerce").fillna(0)
+    df["injury_diff"] = df["home_injury_penalty"] - df["away_injury_penalty"]
+    df["home_missing_starters"] = pd.to_numeric(df["home_missing_starters"], errors="coerce").fillna(0)
+    df["away_missing_starters"] = pd.to_numeric(df["away_missing_starters"], errors="coerce").fillna(0)
+    df["starters_diff"] = df["home_missing_starters"] - df["away_missing_starters"]
+    df["any_injury_flag"] = ((df["home_missing_starters"] > 0) | (df["away_missing_starters"] > 0)).astype(int)
+    df["injury_x_em"] = df["injury_diff"] * df["neutral_em_diff"]
+
+    # ── v18 P1-CTX: Tournament context features ──
+    for _bc in ["is_conference_tournament", "is_ncaa_tournament", "is_bubble_game", "is_early_season"]:
+        if _bc in df.columns:
+            df[_bc] = df[_bc].map({True: 1, False: 0, "true": 1, "false": 0, 1: 1, 0: 0}).fillna(0).astype(int)
+        else:
+            df[_bc] = 0
+    df["is_conf_tourney"] = df["is_conference_tournament"]
+    df["is_ncaa_tourney"] = df["is_ncaa_tournament"]
+    df["is_bubble"] = df["is_bubble_game"]
+    df["is_early"] = df["is_early_season"]
+    df["importance"] = pd.to_numeric(df["importance_multiplier"], errors="coerce").fillna(1.0)
+    df["tourney_x_em"] = df["is_ncaa_tourney"] * df["neutral_em_diff"]
+    df["early_x_form"] = df["is_early"] * df["form_diff"]
+
     feature_cols = [
         # R1: Decomposed efficiency + HCA
         "neutral_em_diff", "hca_pts", "neutral",
@@ -1060,6 +1092,14 @@ def ncaa_build_features(df):
         "rest_diff", "either_b2b",
         # R8: Interaction features
         "ppg_x_sos", "em_x_conf",
+        # ── v18 NEW FEATURES ──
+        # P1-INJ: Injury signal
+        "injury_diff", "starters_diff", "any_injury_flag", "injury_x_em",
+        # P1-CTX: Tournament context
+        "is_conf_tourney", "is_ncaa_tourney", "is_bubble", "is_early",
+        "importance",
+        # P1 interactions
+        "tourney_x_em", "early_x_form",
     ]
     return df[feature_cols].fillna(0)
 
@@ -1240,6 +1280,18 @@ def predict_ncaa(game: dict):
         "home_sos": game.get("home_sos", 0.500), "away_sos": game.get("away_sos", 0.500),
         "home_rank": game.get("home_rank", 200), "away_rank": game.get("away_rank", 200),
         "home_rest_days": game.get("home_rest_days", 3), "away_rest_days": game.get("away_rest_days", 3),
+        # v18 P1-INJ: Injury features
+        "home_injury_penalty": game.get("home_injury_penalty", 0),
+        "away_injury_penalty": game.get("away_injury_penalty", 0),
+        "injury_diff": game.get("injury_diff", 0),
+        "home_missing_starters": game.get("home_missing_starters", 0),
+        "away_missing_starters": game.get("away_missing_starters", 0),
+        # v18 P1-CTX: Tournament context
+        "is_conference_tournament": game.get("is_conference_tournament", False),
+        "is_ncaa_tournament": game.get("is_ncaa_tournament", False),
+        "is_bubble_game": game.get("is_bubble_game", False),
+        "is_early_season": game.get("is_early_season", False),
+        "importance_multiplier": game.get("importance_multiplier", 1.0),
     }
     row = pd.DataFrame([row_data])
     X_built = ncaa_build_features(row)
