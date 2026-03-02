@@ -3150,6 +3150,8 @@ def _fetch_team_data_for_ratings(team_id):
                         "opp_id": str(opp_comp["team"]["id"]),
                         "my_score": _parse_score(team_comp.get("score", 0)),
                         "opp_score": _parse_score(opp_comp.get("score", 0)),
+                        "is_home": team_comp.get("homeAway") == "home",
+                        "is_neutral": comp.get("neutralSite", False),
                     })
                 except (ValueError, TypeError):
                     continue
@@ -3171,13 +3173,30 @@ def _fetch_team_data_for_ratings(team_id):
 
 def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0.01):
     """
-    Iterative KenPom-style efficiency computation.
-
-    Each iteration adjusts every team's per-game efficiency by their
-    opponent's current rating, then re-averages. Converges in 5-8 iterations.
+    Iterative KenPom-style efficiency computation with:
+    - Home court advantage adjustment (3.5 pts total, 1.75 per side)
+    - Per-game possession estimation from scoring
+    - Non-D1 opponent handling (floor rating)
+    - Post-iteration normalization
+    - Dynamic Bayesian shrinkage
     """
     lookup = {t["team_id"]: t for t in teams_data}
     team_ids = list(lookup.keys())
+
+    # Home court advantage: KenPom uses ~3.5 pts (1.75 per team)
+    HCA_PER_TEAM = 1.75
+
+    # Non-D1 floor: assign 5th percentile ratings to unknown opponents
+    all_raw_oe = sorted([lookup[t]["raw_oe"] for t in team_ids])
+    all_raw_de = sorted([lookup[t]["raw_de"] for t in team_ids], reverse=True)
+    all_ppg = sorted([lookup[t]["ppg"] for t in team_ids])
+    all_opp = sorted([lookup[t]["opp_ppg"] for t in team_ids], reverse=True)
+    p5_idx = max(0, int(len(team_ids) * 0.05))
+    NON_D1_OE = all_raw_oe[p5_idx]     # weak offense
+    NON_D1_DE = all_raw_de[p5_idx]      # weak defense (high = allows lots)
+    NON_D1_PPG = all_ppg[p5_idx]
+    NON_D1_OPP_PPG = all_opp[p5_idx]
+    NON_D1_TEMPO = 65.0
 
     # Iteration 0: raw values
     adj_oe = {tid: lookup[tid]["raw_oe"] for tid in team_ids}
@@ -3189,10 +3208,10 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
     for iteration in range(max_iterations):
         n_iters = iteration + 1
 
-        all_oe = [adj_oe[t] for t in team_ids if adj_oe[t] is not None]
-        all_de = [adj_de[t] for t in team_ids if adj_de[t] is not None]
-        lg_oe = sum(all_oe) / len(all_oe) if all_oe else 113.5
-        lg_de = sum(all_de) / len(all_de) if all_de else 113.5
+        all_oe_v = [adj_oe[t] for t in team_ids if adj_oe[t] is not None]
+        all_de_v = [adj_de[t] for t in team_ids if adj_de[t] is not None]
+        lg_oe = sum(all_oe_v) / len(all_oe_v) if all_oe_v else 109.7
+        lg_de = sum(all_de_v) / len(all_de_v) if all_de_v else 109.7
         lg_ppg = sum(lookup[t]["ppg"] for t in team_ids) / len(team_ids)
 
         new_oe, new_de, new_ppg, new_opp_ppg = {}, {}, {}, {}
@@ -3211,27 +3230,63 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
 
             for game in team["game_log"]:
                 opp_id = game["opp_id"]
-                if opp_id not in lookup:
-                    continue
+                is_d1 = opp_id in lookup
+                is_neutral = game.get("is_neutral", False)
 
-                opp = lookup[opp_id]
-                game_poss = (team["tempo"] + opp["tempo"]) / 2
+                # Get opponent data (or non-D1 floor values)
+                if is_d1:
+                    opp = lookup[opp_id]
+                    opp_tempo = opp["tempo"]
+                    opp_de_r = adj_de.get(opp_id, lg_de)
+                    opp_oe_r = adj_oe.get(opp_id, lg_oe)
+                    opp_def_ppg = adj_opp_ppg.get(opp_id, opp["opp_ppg"])
+                    opp_off_ppg = adj_ppg.get(opp_id, opp["ppg"])
+                else:
+                    opp_tempo = NON_D1_TEMPO
+                    opp_de_r = NON_D1_DE
+                    opp_oe_r = NON_D1_OE
+                    opp_def_ppg = NON_D1_OPP_PPG
+                    opp_off_ppg = NON_D1_PPG
+
+                # ── Home court adjustment ──
+                # Remove venue bias: home teams score ~1.75 more, away ~1.75 less
+                my_score = game["my_score"]
+                opp_score = game["opp_score"]
+                if not is_neutral:
+                    if game.get("is_home"):
+                        my_score -= HCA_PER_TEAM
+                        opp_score += HCA_PER_TEAM
+                    else:
+                        my_score += HCA_PER_TEAM
+                        opp_score -= HCA_PER_TEAM
+
+                # ── Per-game possession estimation ──
+                # Better than season-avg tempo: use actual game total and
+                # expected efficiency to back-calculate possessions.
+                # game_total / (expected_oe + expected_de) * 200
+                avg_tempo = (team["tempo"] + opp_tempo) / 2
+                total_score = my_score + opp_score
+                if total_score > 40:  # sanity check
+                    # Blend: 70% score-derived, 30% tempo-derived
+                    score_poss = total_score / (lg_oe + lg_de) * 100
+                    game_poss = 0.7 * score_poss + 0.3 * avg_tempo
+                else:
+                    game_poss = avg_tempo
+
                 if game_poss <= 0:
                     continue
 
-                game_oe_raw = game["my_score"] / game_poss * 100
-                game_de_raw = game["opp_score"] / game_poss * 100
+                # Per-game efficiency
+                game_oe_raw = my_score / game_poss * 100
+                game_de_raw = opp_score / game_poss * 100
 
-                opp_de_r = adj_de.get(opp_id, lg_de)
-                opp_oe_r = adj_oe.get(opp_id, lg_oe)
-
+                # Opponent-adjust
                 g_oes.append(game_oe_raw * (lg_de / opp_de_r) if opp_de_r > 0 else game_oe_raw)
                 g_des.append(game_de_raw * (lg_oe / opp_oe_r) if opp_oe_r > 0 else game_de_raw)
 
-                opp_def_ppg = adj_opp_ppg.get(opp_id, opp["opp_ppg"])
-                opp_off_ppg = adj_ppg.get(opp_id, opp["ppg"])
-                g_ppgs.append(game["my_score"] * (lg_ppg / opp_def_ppg) if opp_def_ppg > 0 else game["my_score"])
-                g_opps.append(game["opp_score"] * (lg_ppg / opp_off_ppg) if opp_off_ppg > 0 else game["opp_score"])
+                # PPG-level adjustment (for O/U total formula)
+                g_ppgs.append(my_score * (lg_ppg / opp_def_ppg) if opp_def_ppg > 0 else my_score)
+                g_opps.append(opp_score * (lg_ppg / opp_off_ppg) if opp_off_ppg > 0 else opp_score)
 
             if g_oes:
                 nv_oe = sum(g_oes) / len(g_oes)
