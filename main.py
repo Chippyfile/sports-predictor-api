@@ -2965,43 +2965,46 @@ def _espn_cbb_get(path, retries=2):
 
 
 def _fetch_all_d1_teams():
-    """Fetch all D1 basketball team IDs from ESPN using multiple methods."""
+    """Fetch all D1 basketball team IDs from ESPN using pagination."""
     team_ids = set()
 
-    # Method 1: ESPN conferences endpoint — most reliable
-    # D1 conference IDs: iterate 1-50 to catch all conferences
-    print("  Method 1: Conference groups...")
-    for group in [2, 3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20,
-                  21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
-                  36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 62]:
-        try:
-            data = _espn_cbb_get(f"teams?limit=100&groups={group}")
-            if data:
-                # ESPN returns {"sports":[{"leagues":[{"teams":[...]}]}]} or {"teams":[...]}
-                teams_list = []
-                if "sports" in data:
-                    for sport in data["sports"]:
-                        for league in sport.get("leagues", []):
-                            teams_list.extend(league.get("teams", []))
-                elif "teams" in data:
-                    teams_list = data.get("teams", [])
+    # Method 1: Paginate through groups=50 (all D1)
+    # ESPN returns max 50 per page, ~363 D1 teams total = ~8 pages
+    print("  Fetching D1 teams (paginated)...")
+    page = 1
+    while page <= 10:
+        data = _espn_cbb_get(f"teams?limit=50&groups=50&page={page}")
+        if not data:
+            break
+        teams_list = []
+        if "sports" in data:
+            for sport in data["sports"]:
+                for league in sport.get("leagues", []):
+                    teams_list.extend(league.get("teams", []))
+        elif "teams" in data:
+            teams_list = data.get("teams", [])
 
-                for team_obj in teams_list:
-                    t = team_obj.get("team", team_obj)  # Handle both wrapped and unwrapped
-                    tid = t.get("id")
-                    if tid:
-                        team_ids.add(str(tid))
-        except Exception:
-            pass
-        if len(team_ids) > 0 and group % 10 == 0:
-            _time.sleep(0.3)
+        if not teams_list:
+            break
 
-    print(f"  Conference groups: {len(team_ids)} teams")
+        for team_obj in teams_list:
+            t = team_obj.get("team", team_obj)
+            tid = t.get("id")
+            if tid:
+                team_ids.add(str(tid))
 
-    # Method 2: Scoreboard scrape across many dates (captures teams in games)
+        print(f"    Page {page}: +{len(teams_list)} teams (total: {len(team_ids)})")
+        if len(teams_list) < 50:
+            break  # Last page
+        page += 1
+        _time.sleep(0.3)
+
+    print(f"  Total from pagination: {len(team_ids)} teams")
+
+    # Method 2: Scoreboard fallback if pagination didn't get enough
     if len(team_ids) < 300:
-        print("  Method 2: Scoreboard scrape...")
-        for days_back in range(0, 90, 2):  # Every other day for 3 months
+        print("  Scoreboard fallback...")
+        for days_back in range(0, 60, 2):
             dt = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y%m%d")
             try:
                 data = _espn_cbb_get(f"scoreboard?dates={dt}&limit=200")
@@ -3015,28 +3018,8 @@ def _fetch_all_d1_teams():
             except Exception:
                 pass
             if days_back % 20 == 0 and days_back > 0:
-                print(f"    ... {days_back} days scanned, {len(team_ids)} teams so far")
                 _time.sleep(0.5)
         print(f"  After scoreboard: {len(team_ids)} teams")
-
-    # Method 3: Direct team ID range scan (ESPN IDs for CBB are roughly 1-3000)
-    # Only if other methods failed badly
-    if len(team_ids) < 200:
-        print("  Method 3: ID range scan (slow fallback)...")
-        # Well-known team IDs to seed from
-        known_ids = [
-            "150", "2", "12", "52", "66", "96", "97", "127", "130", "150",
-            "153", "158", "164", "183", "193", "194", "213", "222", "228",
-            "239", "248", "251", "258", "259", "275", "277", "278", "305",
-            "311", "324", "328", "333", "344", "356", "2116", "2132", "2168",
-            "2199", "2226", "2250", "2294", "2305", "2348", "2390", "2393",
-            "2415", "2440", "2459", "2483", "2507", "2509", "2550", "2567",
-            "2579", "2603", "2617", "2633", "2641", "2670", "2681", "2711",
-            "2724", "2739", "2752",  # Top ~65 major program IDs
-        ]
-        for tid in known_ids:
-            team_ids.add(tid)
-        print(f"  After known IDs: {len(team_ids)} teams")
 
     return list(team_ids)
 
@@ -3119,10 +3102,15 @@ def _fetch_team_data_for_ratings(team_id):
                     opp_comp = c
             if team_comp and opp_comp:
                 try:
+                    # ESPN score can be int, str, or dict {"displayValue":"75","value":75.0}
+                    def _parse_score(s):
+                        if isinstance(s, dict):
+                            return int(float(s.get("value", s.get("displayValue", 0))))
+                        return int(s)
                     game_log.append({
                         "opp_id": str(opp_comp["team"]["id"]),
-                        "my_score": int(team_comp.get("score", 0)),
-                        "opp_score": int(opp_comp.get("score", 0)),
+                        "my_score": _parse_score(team_comp.get("score", 0)),
+                        "opp_score": _parse_score(opp_comp.get("score", 0)),
                     })
                 except (ValueError, TypeError):
                     continue
