@@ -2384,6 +2384,7 @@ def index():
             "POST /monte-carlo         (body: sport, home_mean, away_mean, n_sims, ou_line)",
             "POST /backtest/mlb        (walk-forward MLB backtest)",
             "POST /backtest/ncaa       (walk-forward NCAAB backtest)",
+            "GET  /backtest/nba        (walk-forward NBA backtest)",
             "GET  /accuracy/<sport>",
             "GET  /accuracy/all",
             "GET  /model-info/<sport>",
@@ -2701,6 +2702,234 @@ def nba_calibration_diagnostic():
         "refit_potential": refit_info,
         "recommendations": recs,
     })
+
+
+# ═══════════════════════════════════════════════════════════════
+# NBA WALK-FORWARD BACKTEST
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/backtest/nba", methods=["GET", "POST"])
+def route_backtest_nba():
+    """
+    Walk-forward backtest for NBA predictions.
+    Uses stacking ensemble (GBM+RF+Ridge) with isotonic calibration.
+    Trains on all months BEFORE the test month, predicts the test month.
+    """
+    import traceback
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        min_train = int(body.get("min_train", 200))
+
+        rows = sb_get("nba_predictions",
+                      "result_entered=eq.true&actual_home_score=not.is.null&select=*&order=game_date.asc")
+        if not rows or len(rows) < min_train + 50:
+            return jsonify({"error": f"Need {min_train + 50}+ graded games, have {len(rows) if rows else 0}"})
+
+        df = pd.DataFrame(rows)
+        for col in ["actual_home_score", "actual_away_score", "pred_home_score", "pred_away_score",
+                     "win_pct_home", "spread_home", "ou_total",
+                     "market_spread_home", "market_ou_total", "model_ml_home",
+                     "home_net_rtg", "away_net_rtg"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df["game_date"] = pd.to_datetime(df["game_date"])
+        df["month"] = df["game_date"].dt.to_period("M")
+        y_margin = (df["actual_home_score"] - df["actual_away_score"]).to_numpy().astype(float)
+        y_win = (y_margin > 0).astype(int)
+
+        months = sorted(df["month"].unique())
+        results_by_month = []
+        all_predictions = []
+
+        for i, test_month in enumerate(months):
+            train_mask = df["month"] < test_month
+            test_mask = df["month"] == test_month
+            train_df = df[train_mask]
+            test_df = df[test_mask]
+
+            if len(train_df) < min_train or len(test_df) < 5:
+                continue
+
+            X_train = nba_build_features(train_df)
+            X_test = nba_build_features(test_df)
+            y_train_margin = y_margin[train_mask.to_numpy()]
+            y_test_margin = y_margin[test_mask.to_numpy()]
+            y_train_win = y_win[train_mask.to_numpy()]
+            y_test_win = y_win[test_mask.to_numpy()]
+
+            scaler = StandardScaler()
+            X_tr = scaler.fit_transform(X_train)
+            X_te = scaler.transform(X_test)
+
+            cv_folds = min(3, len(train_df))
+
+            if len(train_df) >= 200:
+                # Stacking ensemble (matches train_nba architecture)
+                gbm = GradientBoostingRegressor(
+                    n_estimators=150, max_depth=4,
+                    learning_rate=0.06, subsample=0.8,
+                    min_samples_leaf=20, random_state=42,
+                )
+                rf_r = RandomForestRegressor(
+                    n_estimators=100, max_depth=6,
+                    min_samples_leaf=15, max_features=0.7,
+                    random_state=42, n_jobs=1,
+                )
+                ridge = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
+
+                oof_g = cross_val_predict(gbm, X_tr, y_train_margin, cv=cv_folds)
+                oof_r = cross_val_predict(rf_r, X_tr, y_train_margin, cv=cv_folds)
+                oof_ridge = cross_val_predict(ridge, X_tr, y_train_margin, cv=cv_folds)
+
+                gbm.fit(X_tr, y_train_margin)
+                rf_r.fit(X_tr, y_train_margin)
+                ridge.fit(X_tr, y_train_margin)
+
+                meta_X = np.column_stack([oof_g, oof_r, oof_ridge])
+                meta = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
+                meta.fit(meta_X, y_train_margin)
+
+                # Bias correction
+                oof_meta = meta.predict(meta_X)
+                bias_correction = float(np.mean(oof_meta - y_train_margin))
+
+                test_meta_X = np.column_stack([
+                    gbm.predict(X_te), rf_r.predict(X_te), ridge.predict(X_te)
+                ])
+                pred_margin = meta.predict(test_meta_X) - bias_correction
+
+                # Stacked classifier
+                gbm_c = GradientBoostingClassifier(
+                    n_estimators=100, max_depth=3,
+                    learning_rate=0.06, subsample=0.8,
+                    min_samples_leaf=20, random_state=42,
+                )
+                rf_c = RandomForestClassifier(
+                    n_estimators=100, max_depth=6,
+                    min_samples_leaf=15, max_features=0.7,
+                    random_state=42, n_jobs=1,
+                )
+                lr_c = LogisticRegression(max_iter=1000, C=1.0)
+
+                oof_gc = cross_val_predict(gbm_c, X_tr, y_train_win, cv=cv_folds, method="predict_proba")[:, 1]
+                oof_rc = cross_val_predict(rf_c, X_tr, y_train_win, cv=cv_folds, method="predict_proba")[:, 1]
+                oof_lc = cross_val_predict(lr_c, X_tr, y_train_win, cv=cv_folds, method="predict_proba")[:, 1]
+
+                gbm_c.fit(X_tr, y_train_win)
+                rf_c.fit(X_tr, y_train_win)
+                lr_c.fit(X_tr, y_train_win)
+
+                meta_clf = LogisticRegression(max_iter=1000, C=1.0)
+                oof_clf_X = np.column_stack([oof_gc, oof_rc, oof_lc])
+                meta_clf.fit(oof_clf_X, y_train_win)
+
+                # Isotonic calibration on OOF stacked probs
+                oof_stacked_p = meta_clf.predict_proba(oof_clf_X)[:, 1]
+                iso = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+                iso.fit(oof_stacked_p, y_train_win)
+
+                test_clf_X = np.column_stack([
+                    gbm_c.predict_proba(X_te)[:, 1],
+                    rf_c.predict_proba(X_te)[:, 1],
+                    lr_c.predict_proba(X_te)[:, 1],
+                ])
+                raw_wp = meta_clf.predict_proba(test_clf_X)[:, 1]
+                pred_wp = iso.predict(raw_wp)
+            else:
+                reg = GradientBoostingRegressor(
+                    n_estimators=100, max_depth=3,
+                    learning_rate=0.08, subsample=0.8,
+                    min_samples_leaf=15, random_state=42,
+                )
+                reg.fit(X_tr, y_train_margin)
+                pred_margin = reg.predict(X_te)
+
+                clf = GradientBoostingClassifier(
+                    n_estimators=100, max_depth=3,
+                    learning_rate=0.08, subsample=0.8,
+                    min_samples_leaf=15, random_state=42,
+                )
+                clf.fit(X_tr, y_train_win)
+                pred_wp = clf.predict_proba(X_te)[:, 1]
+
+            pred_pick = (pred_wp >= 0.5).astype(int)
+
+            accuracy = float(np.mean(pred_pick == y_test_win))
+            mae_margin = float(mean_absolute_error(y_test_margin, pred_margin))
+            brier = float(brier_score_loss(y_test_win, pred_wp))
+
+            # Heuristic baseline
+            heur_wp = test_df["win_pct_home"].fillna(0.5).values
+            heur_pick = (heur_wp >= 0.5).astype(int)
+            heur_acc = float(np.mean(heur_pick == y_test_win))
+            heur_brier = float(brier_score_loss(y_test_win, heur_wp))
+
+            results_by_month.append({
+                "month": str(test_month),
+                "n_train": len(train_df),
+                "n_test": len(test_df),
+                "ml_accuracy": round(accuracy, 4),
+                "ml_brier": round(brier, 4),
+                "ml_mae_margin": round(mae_margin, 3),
+                "heuristic_accuracy": round(heur_acc, 4),
+                "heuristic_brier": round(heur_brier, 4),
+                "home_win_rate": round(float(y_test_win.mean()), 3),
+            })
+
+            for j in range(len(test_df)):
+                all_predictions.append({
+                    "pred_win_prob": round(float(pred_wp[j]), 4),
+                    "heur_win_prob": round(float(heur_wp[j]), 4),
+                    "pred_margin": round(float(pred_margin[j]), 2),
+                    "actual_margin": int(y_test_margin[j]),
+                    "actual_home_win": int(y_test_win[j]),
+                    "ml_correct": int(pred_pick[j] == y_test_win[j]),
+                    "heur_correct": int(heur_pick[j] == y_test_win[j]),
+                })
+
+        if not results_by_month:
+            return jsonify({"error": f"No months with >= {min_train} training games"})
+
+        total = sum(r["n_test"] for r in results_by_month)
+        agg = {
+            "total_games_tested": total,
+            "months_tested": len(results_by_month),
+            "ml_overall_accuracy": round(sum(r["ml_accuracy"] * r["n_test"] for r in results_by_month) / total, 4),
+            "ml_overall_brier": round(sum(r["ml_brier"] * r["n_test"] for r in results_by_month) / total, 4),
+            "ml_overall_mae_margin": round(sum(r["ml_mae_margin"] * r["n_test"] for r in results_by_month) / total, 3),
+            "heur_overall_accuracy": round(sum(r["heuristic_accuracy"] * r["n_test"] for r in results_by_month) / total, 4),
+            "heur_overall_brier": round(sum(r["heuristic_brier"] * r["n_test"] for r in results_by_month) / total, 4),
+            "baseline_home_always": round(sum(r["home_win_rate"] * r["n_test"] for r in results_by_month) / total, 4),
+        }
+
+        # Confidence tier analysis on walk-forward predictions
+        conf_results = []
+        all_preds_arr = np.array([(p["pred_win_prob"], p["actual_home_win"]) for p in all_predictions])
+        if len(all_preds_arr) > 0:
+            for t in [0.52, 0.55, 0.58, 0.60, 0.65, 0.70]:
+                strong = (all_preds_arr[:, 0] >= t) | (all_preds_arr[:, 0] <= (1 - t))
+                ns = int(strong.sum())
+                if ns > 0:
+                    pred_side = (all_preds_arr[strong, 0] >= 0.5).astype(int)
+                    actual = all_preds_arr[strong, 1].astype(int)
+                    conf_results.append({
+                        "min_confidence": f"{t:.0%}",
+                        "n_games": ns,
+                        "accuracy": round(float(np.mean(pred_side == actual)), 4),
+                    })
+
+        return jsonify({
+            "status": "backtest_complete",
+            "model": "StackedEnsemble(GBM+RF+Ridge) with isotonic calibration",
+            "aggregate": agg,
+            "by_month": results_by_month,
+            "confidence_tiers": conf_results,
+            "n_predictions": len(all_predictions),
+            "sample_predictions": all_predictions[:20],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "type": type(e).__name__, "traceback": traceback.format_exc()}), 500
 
 
 # ═══════════════════════════════════════════════════════════════
