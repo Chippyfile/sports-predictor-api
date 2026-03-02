@@ -2820,6 +2820,121 @@ def clv_diagnostic():
 
     return jsonify(results)
 
+
+@app.route("/debug/spread-accuracy")
+def spread_accuracy_analysis():
+    """
+    Detailed spread accuracy analysis: model vs market for each sport.
+    Shows how often the model's spread is closer to the actual result.
+    """
+    results = {}
+    for sport, (table, label) in SPORT_TABLES.items():
+        try:
+            rows = sb_get(table, "result_entered=eq.true&select=*&limit=5000")
+            if not rows:
+                results[sport] = {"n": 0, "status": "no_graded_games"}
+                continue
+
+            df = pd.DataFrame(rows)
+            n_total = len(df)
+
+            # Determine score columns
+            h_score = a_score = None
+            for h, a in [("actual_home_score", "actual_away_score"),
+                         ("actual_home_runs", "actual_away_runs")]:
+                if h in df.columns and a in df.columns:
+                    h_score, a_score = h, a
+                    break
+            if not h_score:
+                results[sport] = {"n": n_total, "error": "no_score_columns"}
+                continue
+
+            df["actual_margin"] = pd.to_numeric(df[h_score], errors="coerce") - pd.to_numeric(df[a_score], errors="coerce")
+            df["actual_total"] = pd.to_numeric(df[h_score], errors="coerce") + pd.to_numeric(df[a_score], errors="coerce")
+
+            model_spread_col = "spread_home" if "spread_home" in df.columns else None
+            model_total_col = "ou_total" if "ou_total" in df.columns else None
+            market_spread_col = "market_spread_home" if "market_spread_home" in df.columns else None
+            market_total_col = "market_ou_total" if "market_ou_total" in df.columns else None
+
+            analysis = {"n_graded": n_total, "label": label}
+
+            # Model spread accuracy
+            if model_spread_col:
+                ms = pd.to_numeric(df[model_spread_col], errors="coerce")
+                valid = ms.notna() & df["actual_margin"].notna()
+                if valid.sum() >= 10:
+                    errs = (ms[valid] - df.loc[valid, "actual_margin"]).abs()
+                    analysis["model_spread"] = {
+                        "n": int(valid.sum()),
+                        "mae": round(float(errs.mean()), 2),
+                        "correct_side_pct": round(float(
+                            ((ms[valid] > 0) == (df.loc[valid, "actual_margin"] > 0)).mean()
+                        ), 4),
+                    }
+
+            # Market spread accuracy
+            if market_spread_col:
+                mkt = pd.to_numeric(df[market_spread_col], errors="coerce")
+                valid = mkt.notna() & df["actual_margin"].notna()
+                if valid.sum() >= 10:
+                    errs = (mkt[valid] - df.loc[valid, "actual_margin"]).abs()
+                    analysis["market_spread"] = {
+                        "n": int(valid.sum()),
+                        "mae": round(float(errs.mean()), 2),
+                        "correct_side_pct": round(float(
+                            ((mkt[valid] > 0) == (df.loc[valid, "actual_margin"] > 0)).mean()
+                        ), 4),
+                    }
+
+            # Head-to-head spread
+            if model_spread_col and market_spread_col:
+                ms = pd.to_numeric(df[model_spread_col], errors="coerce")
+                mkt = pd.to_numeric(df[market_spread_col], errors="coerce")
+                valid = ms.notna() & mkt.notna() & df["actual_margin"].notna()
+                if valid.sum() >= 5:
+                    me = (ms[valid] - df.loc[valid, "actual_margin"]).abs()
+                    mke = (mkt[valid] - df.loc[valid, "actual_margin"]).abs()
+                    analysis["h2h_spread"] = {
+                        "n": int(valid.sum()),
+                        "model_closer_pct": round(float((me < mke).mean()), 4),
+                        "avg_model_advantage": round(float((mke - me).mean()), 2),
+                    }
+
+            # Model total accuracy + bias
+            if model_total_col:
+                mt = pd.to_numeric(df[model_total_col], errors="coerce")
+                valid = mt.notna() & df["actual_total"].notna()
+                if valid.sum() >= 10:
+                    errs = (mt[valid] - df.loc[valid, "actual_total"]).abs()
+                    bias = float((mt[valid] - df.loc[valid, "actual_total"]).mean())
+                    analysis["model_total"] = {
+                        "n": int(valid.sum()),
+                        "mae": round(float(errs.mean()), 2),
+                        "bias": round(bias, 2),
+                        "bias_direction": "HIGH" if bias > 1 else "LOW" if bias < -1 else "OK",
+                    }
+
+            # Head-to-head totals
+            if model_total_col and market_total_col:
+                mt = pd.to_numeric(df[model_total_col], errors="coerce")
+                mkt_t = pd.to_numeric(df[market_total_col], errors="coerce")
+                valid = mt.notna() & mkt_t.notna() & df["actual_total"].notna()
+                if valid.sum() >= 5:
+                    me = (mt[valid] - df.loc[valid, "actual_total"]).abs()
+                    mke = (mkt_t[valid] - df.loc[valid, "actual_total"]).abs()
+                    analysis["h2h_total"] = {
+                        "n": int(valid.sum()),
+                        "model_closer_pct": round(float((me < mke).mean()), 4),
+                    }
+
+            results[sport] = analysis
+        except Exception as e:
+            import traceback as _tb
+            results[sport] = {"error": str(e)}
+
+    return jsonify(results)
+
 # ══════════════════════════════════════════════════════════════════
 # PYTHON-SIDE HEURISTIC REPLAY (mirrors mlb.js logic)
 # Uses columns that ACTUALLY EXIST in mlb_historical:
