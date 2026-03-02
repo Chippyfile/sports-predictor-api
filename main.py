@@ -3183,27 +3183,6 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
     lookup = {t["team_id"]: t for t in teams_data}
     team_ids = list(lookup.keys())
 
-    # Home court advantage: NOT applied directly to scores.
-    # Our Bayesian shrinkage implicitly accounts for home/away variance
-    # by compressing the distribution. Explicit HCA over-corrects because:
-    #  1. ESPN often doesn't flag neutral-site tournament games
-    #  2. HCA varies widely by venue (1.0-4.5 pts)
-    #  3. Applying uniform HCA creates systematic negative bias
-    # Tested HCA 1.0 and 1.75 — both degraded accuracy vs KenPom.
-    HCA_PER_TEAM = 0  # disabled — handled by shrinkage
-
-    # Non-D1 floor: assign 5th percentile ratings to unknown opponents
-    all_raw_oe = sorted([lookup[t]["raw_oe"] for t in team_ids])
-    all_raw_de = sorted([lookup[t]["raw_de"] for t in team_ids], reverse=True)
-    all_ppg = sorted([lookup[t]["ppg"] for t in team_ids])
-    all_opp = sorted([lookup[t]["opp_ppg"] for t in team_ids], reverse=True)
-    p5_idx = max(0, int(len(team_ids) * 0.05))
-    NON_D1_OE = all_raw_oe[p5_idx]     # weak offense
-    NON_D1_DE = all_raw_de[p5_idx]      # weak defense (high = allows lots)
-    NON_D1_PPG = all_ppg[p5_idx]
-    NON_D1_OPP_PPG = all_opp[p5_idx]
-    NON_D1_TEMPO = 65.0
-
     # Iteration 0: raw values
     adj_oe = {tid: lookup[tid]["raw_oe"] for tid in team_ids}
     adj_de = {tid: lookup[tid]["raw_de"] for tid in team_ids}
@@ -3236,37 +3215,23 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
 
             for game in team["game_log"]:
                 opp_id = game["opp_id"]
-                is_d1 = opp_id in lookup
-                is_neutral = game.get("is_neutral", False)
+                # Skip non-D1 opponents — including them with floor ratings
+                # deflates top teams because blowout wins get heavily adjusted down.
+                if opp_id not in lookup:
+                    continue
 
-                # Get opponent data (or non-D1 floor values)
-                if is_d1:
-                    opp = lookup[opp_id]
-                    opp_tempo = opp["tempo"]
-                    opp_de_r = adj_de.get(opp_id, lg_de)
-                    opp_oe_r = adj_oe.get(opp_id, lg_oe)
-                    opp_def_ppg = adj_opp_ppg.get(opp_id, opp["opp_ppg"])
-                    opp_off_ppg = adj_ppg.get(opp_id, opp["ppg"])
-                else:
-                    opp_tempo = NON_D1_TEMPO
-                    opp_de_r = NON_D1_DE
-                    opp_oe_r = NON_D1_OE
-                    opp_def_ppg = NON_D1_OPP_PPG
-                    opp_off_ppg = NON_D1_PPG
+                opp = lookup[opp_id]
+                opp_tempo = opp["tempo"]
+                opp_de_r = adj_de.get(opp_id, lg_de)
+                opp_oe_r = adj_oe.get(opp_id, lg_oe)
+                opp_def_ppg = adj_opp_ppg.get(opp_id, opp["opp_ppg"])
+                opp_off_ppg = adj_ppg.get(opp_id, opp["ppg"])
 
-                # ── Home court adjustment ──
-                # Remove venue bias: home teams score ~1.75 more, away ~1.75 less
+                # Scores (no HCA adjustment — handled by shrinkage)
                 my_score = game["my_score"]
                 opp_score = game["opp_score"]
-                if not is_neutral:
-                    if game.get("is_home"):
-                        my_score -= HCA_PER_TEAM
-                        opp_score += HCA_PER_TEAM
-                    else:
-                        my_score += HCA_PER_TEAM
-                        opp_score -= HCA_PER_TEAM
 
-                # ── Possession estimation: average of both teams' tempo ──
+                # Possession estimation: average of both teams' tempo
                 game_poss = (team["tempo"] + opp_tempo) / 2
 
                 if game_poss <= 0:
