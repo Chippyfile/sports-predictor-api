@@ -2965,35 +2965,78 @@ def _espn_cbb_get(path, retries=2):
 
 
 def _fetch_all_d1_teams():
-    """Fetch all D1 basketball team IDs from ESPN."""
+    """Fetch all D1 basketball team IDs from ESPN using multiple methods."""
     team_ids = set()
-    try:
-        data = _espn_cbb_get("teams?limit=500&groups=50")
-        if data and "sports" in data:
-            for sport in data["sports"]:
-                for league in sport.get("leagues", []):
-                    for team in league.get("teams", []):
-                        t = team.get("team", {})
-                        tid = t.get("id")
-                        if tid:
-                            team_ids.add(str(tid))
-        print(f"  ESPN groups=50: {len(team_ids)} teams")
-    except Exception as e:
-        print(f"  Team fetch failed: {e}")
 
-    # Fallback: scrape recent scoreboards
+    # Method 1: ESPN conferences endpoint — most reliable
+    # D1 conference IDs: iterate 1-50 to catch all conferences
+    print("  Method 1: Conference groups...")
+    for group in [2, 3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20,
+                  21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+                  36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 62]:
+        try:
+            data = _espn_cbb_get(f"teams?limit=100&groups={group}")
+            if data:
+                # ESPN returns {"sports":[{"leagues":[{"teams":[...]}]}]} or {"teams":[...]}
+                teams_list = []
+                if "sports" in data:
+                    for sport in data["sports"]:
+                        for league in sport.get("leagues", []):
+                            teams_list.extend(league.get("teams", []))
+                elif "teams" in data:
+                    teams_list = data.get("teams", [])
+
+                for team_obj in teams_list:
+                    t = team_obj.get("team", team_obj)  # Handle both wrapped and unwrapped
+                    tid = t.get("id")
+                    if tid:
+                        team_ids.add(str(tid))
+        except Exception:
+            pass
+        if len(team_ids) > 0 and group % 10 == 0:
+            _time.sleep(0.3)
+
+    print(f"  Conference groups: {len(team_ids)} teams")
+
+    # Method 2: Scoreboard scrape across many dates (captures teams in games)
     if len(team_ids) < 300:
-        for days_back in [1, 3, 5, 7, 14]:
+        print("  Method 2: Scoreboard scrape...")
+        for days_back in range(0, 90, 2):  # Every other day for 3 months
             dt = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y%m%d")
-            data = _espn_cbb_get(f"scoreboard?dates={dt}&limit=200")
-            if data and "events" in data:
-                for ev in data["events"]:
-                    for comp in ev.get("competitions", []):
-                        for c in comp.get("competitors", []):
-                            tid = c.get("team", {}).get("id")
-                            if tid:
-                                team_ids.add(str(tid))
-        print(f"  After scoreboard fallback: {len(team_ids)} teams")
+            try:
+                data = _espn_cbb_get(f"scoreboard?dates={dt}&limit=200")
+                if data and "events" in data:
+                    for ev in data["events"]:
+                        for comp in ev.get("competitions", []):
+                            for c in comp.get("competitors", []):
+                                tid = c.get("team", {}).get("id")
+                                if tid:
+                                    team_ids.add(str(tid))
+            except Exception:
+                pass
+            if days_back % 20 == 0 and days_back > 0:
+                print(f"    ... {days_back} days scanned, {len(team_ids)} teams so far")
+                _time.sleep(0.5)
+        print(f"  After scoreboard: {len(team_ids)} teams")
+
+    # Method 3: Direct team ID range scan (ESPN IDs for CBB are roughly 1-3000)
+    # Only if other methods failed badly
+    if len(team_ids) < 200:
+        print("  Method 3: ID range scan (slow fallback)...")
+        # Well-known team IDs to seed from
+        known_ids = [
+            "150", "2", "12", "52", "66", "96", "97", "127", "130", "150",
+            "153", "158", "164", "183", "193", "194", "213", "222", "228",
+            "239", "248", "251", "258", "259", "275", "277", "278", "305",
+            "311", "324", "328", "333", "344", "356", "2116", "2132", "2168",
+            "2199", "2226", "2250", "2294", "2305", "2348", "2390", "2393",
+            "2415", "2440", "2459", "2483", "2507", "2509", "2550", "2567",
+            "2579", "2603", "2617", "2633", "2641", "2670", "2681", "2711",
+            "2724", "2739", "2752",  # Top ~65 major program IDs
+        ]
+        for tid in known_ids:
+            team_ids.add(tid)
+        print(f"  After known IDs: {len(team_ids)} teams")
 
     return list(team_ids)
 
@@ -3008,7 +3051,8 @@ def _fetch_team_data_for_ratings(team_id):
     sched_data = _espn_cbb_get(f"teams/{team_id}/schedule")
     record_data = _espn_cbb_get(f"teams/{team_id}/record")
 
-    team = team_data.get("team", {})
+    # Handle both {"team": {...}} and direct {...} response formats
+    team = team_data.get("team", team_data)
     cats = (stats_data or {}).get("results", {}).get("stats", {}).get("categories", [])
 
     def get_stat(name):
@@ -3309,6 +3353,68 @@ def route_compute_ncaa_efficiency():
     except Exception as e:
         import traceback
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/debug/ncaa-teams")
+def route_debug_ncaa_teams():
+    """Debug: test team discovery and single team data fetch."""
+    results = {}
+
+    # Test 1: Try fetching a known team (Duke = 150)
+    print("Debug: fetching Duke (150)...")
+    duke_raw = _espn_cbb_get("teams/150")
+    results["duke_raw_keys"] = list(duke_raw.keys()) if duke_raw else "FAILED"
+    if duke_raw:
+        team = duke_raw.get("team", duke_raw)
+        results["duke_name"] = team.get("displayName", team.get("name", "???"))
+        results["duke_id"] = team.get("id", "???")
+
+    # Test 2: Try fetching Duke schedule
+    duke_sched = _espn_cbb_get("teams/150/schedule")
+    if duke_sched:
+        events = duke_sched.get("events", [])
+        completed = [e for e in events if e.get("competitions", [{}])[0].get("status", {}).get("type", {}).get("completed")]
+        results["duke_schedule_events"] = len(events)
+        results["duke_completed_games"] = len(completed)
+    else:
+        results["duke_schedule"] = "FAILED"
+
+    # Test 3: Try conference group fetch
+    for group in [2, 8, 50]:
+        data = _espn_cbb_get(f"teams?limit=10&groups={group}")
+        if data:
+            results[f"group_{group}_keys"] = list(data.keys())
+            if "sports" in data:
+                for sport in data["sports"]:
+                    for league in sport.get("leagues", []):
+                        teams = league.get("teams", [])
+                        results[f"group_{group}_team_count"] = len(teams)
+                        if teams:
+                            t = teams[0].get("team", teams[0])
+                            results[f"group_{group}_first_team"] = t.get("displayName", "???")
+            elif "teams" in data:
+                results[f"group_{group}_team_count"] = len(data["teams"])
+        else:
+            results[f"group_{group}"] = "FAILED"
+
+    # Test 4: Scoreboard
+    dt = (datetime.utcnow() - timedelta(days=1)).strftime("%Y%m%d")
+    sb = _espn_cbb_get(f"scoreboard?dates={dt}&limit=50")
+    if sb:
+        results["scoreboard_events"] = len(sb.get("events", []))
+    else:
+        results["scoreboard"] = "FAILED"
+
+    # Test 5: Full team data for Duke
+    duke_full = _fetch_team_data_for_ratings("150")
+    if duke_full:
+        results["duke_full_ppg"] = duke_full["ppg"]
+        results["duke_full_tempo"] = duke_full["tempo"]
+        results["duke_full_games"] = len(duke_full["game_log"])
+    else:
+        results["duke_full"] = "FAILED"
+
+    return jsonify(results)
 
 
 @app.route("/ratings/ncaa")
