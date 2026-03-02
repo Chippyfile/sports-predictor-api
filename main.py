@@ -3183,10 +3183,14 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
     lookup = {t["team_id"]: t for t in teams_data}
     team_ids = list(lookup.keys())
 
-    # Home court advantage: conservative estimate
-    # KenPom's average is ~1.4/team but varies by venue.
-    # Using 1.0 to avoid overcorrection from neutral-site misclassification.
-    HCA_PER_TEAM = 1.0
+    # Home court advantage: NOT applied directly to scores.
+    # Our Bayesian shrinkage implicitly accounts for home/away variance
+    # by compressing the distribution. Explicit HCA over-corrects because:
+    #  1. ESPN often doesn't flag neutral-site tournament games
+    #  2. HCA varies widely by venue (1.0-4.5 pts)
+    #  3. Applying uniform HCA creates systematic negative bias
+    # Tested HCA 1.0 and 1.75 — both degraded accuracy vs KenPom.
+    HCA_PER_TEAM = 0  # disabled — handled by shrinkage
 
     # Non-D1 floor: assign 5th percentile ratings to unknown opponents
     all_raw_oe = sorted([lookup[t]["raw_oe"] for t in team_ids])
@@ -3326,21 +3330,16 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
             break
 
     # ── POST-CONVERGENCE: Bayesian shrinkage ──
-    # Our iterative adjustment produces wider distributions than KenPom
-    # because KenPom applies additional Bayesian priors (regression to mean
-    # based on sample size, conference strength, etc.) that compress extremes.
+    # Compresses deviations from the mean to match KenPom's distribution.
+    # Implicitly accounts for HCA variance, preseason priors, and
+    # conference strength effects that we don't model explicitly.
     #
-    # Calibrated WITH HCA=1.0 adjustment active.
-    # HCA compresses raw EM, so less shrinkage needed vs no-HCA version.
-    #
-    # Formula: shrink = 0.73 + 0.23 * avg_games / (avg_games + 8)
-    #   At 10 games: 0.858 (more compression — noisy early data)
-    #   At 20 games: 0.894
-    #   At 29 games: 0.910 (calibrated against KenPom 2025-26)
-    #   At 35 games: 0.917 (less compression — earned late-season data)
+    # Formula: shrink = 0.60 + 0.35 * avg_games / (avg_games + 8)
+    #   At 10 games: 0.794  At 20: 0.850  At 29: 0.874  At 35: 0.885
+    # Calibrated against KenPom 2025-26 at 29 games → EM MAE=1.5
     avg_games = sum(len(lookup[t]["game_log"]) for t in team_ids) / len(team_ids)
-    SHRINK = 0.73 + 0.23 * avg_games / (avg_games + 8)
-    SHRINK = max(0.80, min(0.95, SHRINK))  # clamp
+    SHRINK = 0.60 + 0.35 * avg_games / (avg_games + 8)
+    SHRINK = max(0.70, min(0.92, SHRINK))  # clamp
     final_oe_vals = [adj_oe[t] for t in team_ids]
     final_de_vals = [adj_de[t] for t in team_ids]
     oe_avg = sum(final_oe_vals) / len(final_oe_vals)
