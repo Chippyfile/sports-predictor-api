@@ -482,178 +482,182 @@ def _mlb_merge_historical(current_df):
 
 
 def train_mlb():
-    # Current season predictions with results (may be empty early in season)
-    rows = sb_get("mlb_predictions",
-                  "result_entered=eq.true&actual_home_runs=not.is.null&game_type=eq.R&select=*")
-    current_df = pd.DataFrame(rows) if rows else pd.DataFrame()
+    """
+    MLB model training with Railway timeout protection.
+    Fixes: data cap at 8000, lighter ensemble (60 estimators, skip RF clf),
+           try/except wrapper so it never returns 500.
+    """
+    import traceback as _tb
+    try:
+        # ── Step 1: Fetch current season data ────────────────────
+        rows = sb_get("mlb_predictions",
+                      "result_entered=eq.true&actual_home_runs=not.is.null&game_type=eq.R&select=*")
+        current_df = pd.DataFrame(rows) if rows else pd.DataFrame()
 
-    # Merge with historical corpus — this is the primary training data
-    df, sample_weights = _mlb_merge_historical(current_df)
+        # ── Step 2: Merge with historical corpus ─────────────────
+        df, sample_weights = _mlb_merge_historical(current_df)
 
-    if len(df) < 10:
-        return {
-            "error": "Not enough MLB regular season data to train (need 10+). "
-                     "Spring training games (game_type=S) are excluded.",
+        if len(df) < 10:
+            return {
+                "error": "Not enough MLB regular season data to train (need 10+). "
+                         "Spring training games (game_type=S) are excluded.",
+                "n_current": len(current_df),
+                "n_historical": len(df) - len(current_df) if df is not None else 0,
+            }
+
+        X = mlb_build_features(df)
+        y_margin = df["actual_home_runs"].astype(float) - df["actual_away_runs"].astype(float)
+        y_win = (y_margin > 0).astype(int)
+        fit_weights = sample_weights if sample_weights is not None else np.ones(len(df))
+
+        # ── FIX 1: Cap training data to prevent Railway timeout ──
+        # With 14k+ rows, 6x cross_val_predict exceeds Railway CPU budget.
+        MAX_TRAIN = 8000
+        n = len(df)
+        if n > MAX_TRAIN:
+            if "season_weight" in df.columns:
+                keep_idx = df["season_weight"].fillna(0.5).nlargest(MAX_TRAIN).index
+            else:
+                keep_idx = df.index[-MAX_TRAIN:]
+            X = X.loc[keep_idx].reset_index(drop=True)
+            y_margin = y_margin.loc[keep_idx].reset_index(drop=True)
+            y_win = y_win.loc[keep_idx].reset_index(drop=True)
+            fit_weights = fit_weights[keep_idx.values] if hasattr(keep_idx, 'values') else fit_weights[-MAX_TRAIN:]
+            n = len(X)
+            print(f"  Capped training data: {len(df)} -> {n} rows (Railway timeout protection)")
+
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        cv_folds = min(3, n)
+
+        if n >= 200:
+            # ── FIX 2: Lighter stacking ensemble ─────────────────
+            # 60 estimators (was 150/100), shallower trees — saves ~50% time
+            gbm = GradientBoostingRegressor(
+                n_estimators=60, max_depth=3,
+                learning_rate=0.08, subsample=0.8,
+                min_samples_leaf=20, random_state=42,
+            )
+            rf_reg = RandomForestRegressor(
+                n_estimators=60, max_depth=5,
+                min_samples_leaf=15, max_features=0.7,
+                random_state=42, n_jobs=1,
+            )
+            enet = ElasticNetCV(
+                l1_ratio=[0.1, 0.5, 0.9],
+                alphas=[0.01, 0.1, 1.0],
+                cv=cv_folds, random_state=42,
+            )
+
+            print(f"  MLB: Training stacking ensemble on {n} rows (lite mode)...")
+            oof_gbm = cross_val_predict(gbm, X_scaled, y_margin, cv=cv_folds)
+            oof_rf  = cross_val_predict(rf_reg, X_scaled, y_margin, cv=cv_folds)
+            oof_enet = cross_val_predict(enet, X_scaled, y_margin, cv=cv_folds)
+
+            gbm.fit(X_scaled, y_margin, sample_weight=fit_weights)
+            rf_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
+            enet.fit(X_scaled, y_margin)  # ElasticNet: no sample_weight
+
+            meta_X = np.column_stack([oof_gbm, oof_rf, oof_enet])
+            meta_reg = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
+            meta_reg.fit(meta_X, y_margin)
+
+            # Bias correction from OOF residuals
+            oof_meta = meta_reg.predict(meta_X)
+            bias_correction = float(np.mean(oof_meta - y_margin.values if hasattr(y_margin, 'values') else oof_meta - y_margin))
+            print(f"  MLB bias correction: {bias_correction:+.3f} runs")
+
+            reg = StackedRegressor([gbm, rf_reg, enet], meta_reg, scaler)
+            reg_cv = cross_val_score(gbm, X_scaled, y_margin,
+                                      cv=cv_folds, scoring="neg_mean_absolute_error")
+
+            explainer = shap.TreeExplainer(gbm)
+            model_type = "StackedEnsemble_v2_lite"
+
+            # ── FIX 3: Lighter classifier (GBM + LR, skip RF) ───
+            # RF classifier adds ~30% training time with minimal gain
+            gbm_clf = GradientBoostingClassifier(
+                n_estimators=60, max_depth=3,
+                learning_rate=0.06, subsample=0.8,
+                min_samples_leaf=20, random_state=42,
+            )
+            lr_clf = LogisticRegression(max_iter=1000, C=1.0)
+
+            gbm_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+            lr_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+
+            oof_gbm_p = cross_val_predict(gbm_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+            oof_lr_p  = cross_val_predict(lr_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+
+            meta_lr = LogisticRegression(max_iter=1000, C=1.0)
+            meta_clf_X = np.column_stack([oof_gbm_p, oof_lr_p])
+            meta_lr.fit(meta_clf_X, y_win)
+
+            clf = StackedClassifier([gbm_clf, lr_clf], meta_lr)
+
+            # Isotonic calibration on OOF stacked probs
+            oof_stacked_probs = meta_lr.predict_proba(meta_clf_X)[:, 1]
+            isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+            isotonic.fit(oof_stacked_probs, y_win.values if hasattr(y_win, 'values') else y_win)
+            print(f"  MLB isotonic calibration fitted on {len(oof_stacked_probs)} OOF samples")
+            print(f"  Stacking meta weights (reg): {meta_reg.coef_.round(3)}")
+
+        else:
+            reg = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
+            reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
+            reg_cv = cross_val_score(reg, X_scaled, y_margin,
+                                      cv=cv_folds, scoring="neg_mean_absolute_error")
+            explainer = shap.LinearExplainer(reg, X_scaled, feature_perturbation="interventional")
+            model_type = "Ridge"
+            clf = CalibratedClassifierCV(
+                LogisticRegression(max_iter=1000), cv=cv_folds
+            )
+            clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+            isotonic = None
+            bias_correction = 0.0
+
+        bundle = {
+            "scaler": scaler,
+            "reg": reg,
+            "clf": clf,
+            "explainer": explainer,
+            "feature_cols": list(X.columns),
+            "n_train": n,
+            "n_historical": len(df) - len(current_df),
             "n_current": len(current_df),
-            "n_historical": len(df) - len(current_df) if df is not None else 0,
+            "mae_cv": float(-reg_cv.mean()),
+            "trained_at": datetime.utcnow().isoformat(),
+            "model_type": model_type,
+            "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
+            "isotonic": isotonic,
+            "bias_correction": bias_correction,
+        }
+        save_model("mlb", bundle)
+
+        disp = calibrate_mlb_dispersion()
+
+        return {
+            "status": "trained",
+            "model_type": model_type,
+            "n_train": n,
+            "n_historical": len(df) - len(current_df),
+            "n_current": len(current_df),
+            "mae_cv": round(float(-reg_cv.mean()), 3),
+            "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
+            "features": list(X.columns),
+            "dispersion": disp,
+            "bias_correction": round(bias_correction, 4) if n >= 200 else None,
         }
 
-    X = mlb_build_features(df)
-    y_margin = df["actual_home_runs"].astype(float) - df["actual_away_runs"].astype(float)
-    y_win = (y_margin > 0).astype(int)
-
-    # Use sample weights if available (recency weighting)
-    fit_weights = sample_weights if sample_weights is not None else np.ones(len(df))
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    # Choose model based on data volume
-    n = len(df)
-    cv_folds = min(3, n)  # 3-fold CV (was 5) — faster, still robust at 5k+ rows
-
-    if n >= 200:
-        # ── STACKING ENSEMBLE ──────────────────────────────────────────
-        # Reduced complexity for Railway deployment constraints.
-        # 3-fold CV, fewer estimators — minimal accuracy loss vs 5-fold/300 trees.
-
-        gbm = GradientBoostingRegressor(
-            n_estimators=150, max_depth=4,
-            learning_rate=0.06, subsample=0.8,
-            min_samples_leaf=20, random_state=42,
-        )
-        rf_reg = RandomForestRegressor(
-            n_estimators=100, max_depth=6,
-            min_samples_leaf=15, max_features=0.7,
-            random_state=42, n_jobs=1,
-        )
-        ridge = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
-
-        # Generate out-of-fold predictions for stacking
-        print("  Training stacking ensemble (GBM + RF + Ridge)...")
-        oof_gbm = cross_val_predict(gbm, X_scaled, y_margin, cv=cv_folds)
-        oof_rf  = cross_val_predict(rf_reg, X_scaled, y_margin, cv=cv_folds)
-        oof_ridge = cross_val_predict(ridge, X_scaled, y_margin, cv=cv_folds)
-
-        # Fit all base learners on full data
-        gbm.fit(X_scaled, y_margin, sample_weight=fit_weights)
-        rf_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
-        ridge.fit(X_scaled, y_margin, sample_weight=fit_weights)
-
-        # Level 1: meta-learner on stacked OOF predictions
-        meta_X = np.column_stack([oof_gbm, oof_rf, oof_ridge])
-        meta_reg = Ridge(alpha=1.0)
-        meta_reg.fit(meta_X, y_margin)
-
-        # Use module-level StackedRegressor for pickle compatibility
-        reg = StackedRegressor([gbm, rf_reg, ridge], meta_reg, scaler)
-        reg_cv = cross_val_score(gbm, X_scaled, y_margin,
-                                  cv=cv_folds, scoring="neg_mean_absolute_error")
-
-        # SHAP: use GBM component (most interpretable tree-based learner)
-        explainer = shap.TreeExplainer(gbm)
-        model_type = "StackedEnsemble(GBM+RF+Ridge)"
-
-        # ── Stacked classifier for win probability ───────────────────────
-        gbm_clf = GradientBoostingClassifier(
-            n_estimators=100, max_depth=3,
-            learning_rate=0.06, subsample=0.8,
-            min_samples_leaf=20, random_state=42,
-        )
-        rf_clf = RandomForestClassifier(
-            n_estimators=100, max_depth=6,
-            min_samples_leaf=15, max_features=0.7,
-            random_state=42, n_jobs=1,
-        )
-        lr_clf = LogisticRegression(max_iter=1000)
-
-        # OOF probabilities for classifier stacking
-        oof_gbm_p = cross_val_predict(gbm_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
-        oof_rf_p  = cross_val_predict(rf_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
-        oof_lr_p  = cross_val_predict(lr_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
-
-        # Fit base classifiers on full data
-        gbm_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
-        rf_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
-        lr_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
-
-        # Meta-classifier on stacked OOF probabilities
-        meta_clf_X = np.column_stack([oof_gbm_p, oof_rf_p, oof_lr_p])
-        meta_lr = LogisticRegression(max_iter=1000)
-        meta_lr.fit(meta_clf_X, y_win)
-
-        # Use module-level StackedClassifier for pickle compatibility
-        clf = StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr)
-
-        # ── FIX S3: Isotonic calibration on OOF classifier probabilities ──
-        # MLB is a lower-variance sport (~54% home win rate) so small probability
-        # miscalibrations in the 48-56% range have outsized betting impact.
-        # Isotonic regression maps raw stacked probabilities → empirically calibrated ones.
-        # Pattern copied from NCAAB R4 fix which improved calibration significantly.
-        oof_stacked_probs = meta_lr.predict_proba(meta_clf_X)[:, 1]
-        isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
-        isotonic.fit(oof_stacked_probs, y_win.values if hasattr(y_win, 'values') else y_win)
-        print(f"  MLB isotonic calibration fitted on {len(oof_stacked_probs)} OOF samples")
-
-        # ── FIX S2b: Bias correction from OOF residuals ──
-        oof_meta = meta_reg.predict(meta_X)
-        bias_correction = float(np.mean(oof_meta - y_margin.values if hasattr(y_margin, 'values') else oof_meta - y_margin))
-        print(f"  MLB bias correction: {bias_correction:+.3f} runs")
-
-        print(f"  Stacking meta weights (reg): {meta_reg.coef_.round(3)}")
-
-    else:
-        reg = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
-        reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
-        reg_cv = cross_val_score(reg, X_scaled, y_margin,
-                                  cv=cv_folds, scoring="neg_mean_absolute_error")
-        explainer = shap.LinearExplainer(reg, X_scaled, feature_perturbation="interventional")
-        model_type = "Ridge"
-
-        # Simple classifier for small data
-        clf = CalibratedClassifierCV(
-            LogisticRegression(max_iter=1000),
-            cv=cv_folds
-        )
-        clf.fit(X_scaled, y_win, sample_weight=fit_weights)
-        isotonic = None
-        bias_correction = 0.0
-
-    bundle = {
-        "scaler": scaler,
-        "reg": reg,
-        "clf": clf,
-        "explainer": explainer,
-        "feature_cols": list(X.columns),
-        "n_train": n,
-        "n_historical": len(df) - len(current_df),
-        "n_current": len(current_df),
-        "mae_cv": float(-reg_cv.mean()),
-        "trained_at": datetime.utcnow().isoformat(),
-        "model_type": model_type,
-        "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
-        # FIX S3: Isotonic calibration (maps raw probs → calibrated probs)
-        "isotonic": isotonic,
-        # FIX S2b: Bias correction for margin predictions
-        "bias_correction": bias_correction,
-    }
-    save_model("mlb", bundle)
-
-    # Auto-calibrate dispersion whenever we retrain
-    disp = calibrate_mlb_dispersion()
-
-    return {
-        "status": "trained",
-        "model_type": model_type,
-        "n_train": n,
-        "n_historical": len(df) - len(current_df),
-        "n_current": len(current_df),
-        "mae_cv": round(float(-reg_cv.mean()), 3),
-        "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
-        "features": list(X.columns),
-        "dispersion": disp,
-        "upgrade_note": f"Using {'StackedEnsemble (GBM+RF+Ridge)' if 'Stacked' in model_type else 'Ridge (linear) — will auto-upgrade to stacking ensemble at 200+ training rows'}",
-    }
+    except Exception as e:
+        # ── FIX 4: Never return 500 — always return diagnostic JSON ──
+        return {
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": _tb.format_exc(),
+            "hint": "Check Railway logs for memory/timeout issues. "
+                    "If OOM, reduce MAX_TRAIN. If timeout, reduce n_estimators.",
+        }
 
 
 def predict_mlb(game: dict):
@@ -1122,134 +1126,273 @@ def ncaa_build_features(df):
     ]
     return df[feature_cols].fillna(0)
 
-def train_ncaa():
-    rows = sb_get("ncaa_predictions",
-                  "result_entered=eq.true&actual_home_score=not.is.null&select=*")
-    if len(rows) < 10:
-        return {"error": "Not enough NCAAB data", "n": len(rows)}
 
-    df = pd.DataFrame(rows)
-    X  = ncaa_build_features(df)
-    y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
-    y_win    = (y_margin > 0).astype(int)
+# ── NCAA Historical Corpus Support ────────────────────────────
 
-    scaler   = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    n = len(df)
-    cv_folds = min(5, n)
+def _ncaa_season_weight(season):
+    """Recency weighting: recent seasons get higher weight for ML training."""
+    current_year = datetime.utcnow().year
+    age = current_year - season
+    if age <= 0: return 1.0
+    if age == 1: return 0.9
+    if age == 2: return 0.75
+    if age == 3: return 0.6
+    return 0.5
 
-    if n >= 200:
-        # ── R7: Stacking with ElasticNet replacing Ridge for diversity ──
-        gbm = GradientBoostingRegressor(
-            n_estimators=150, max_depth=4,
-            learning_rate=0.06, subsample=0.8,
-            min_samples_leaf=20, random_state=42,
-        )
-        rf_reg = RandomForestRegressor(
-            n_estimators=100, max_depth=6,
-            min_samples_leaf=15, max_features=0.7,
-            random_state=42, n_jobs=1,
-        )
-        # R7 FIX: ElasticNet replaces Ridge — L1 component adds feature selection
-        enet = ElasticNetCV(l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
-                            alphas=[0.01, 0.1, 1.0, 5.0],
-                            cv=cv_folds, random_state=42)
 
-        print("  NCAAB v17: Training stacking ensemble (GBM + RF + ElasticNet)...")
-        oof_gbm   = cross_val_predict(gbm, X_scaled, y_margin, cv=cv_folds)
-        oof_rf    = cross_val_predict(rf_reg, X_scaled, y_margin, cv=cv_folds)
-        oof_enet  = cross_val_predict(enet, X_scaled, y_margin, cv=cv_folds)
-
-        gbm.fit(X_scaled, y_margin)
-        rf_reg.fit(X_scaled, y_margin)
-        enet.fit(X_scaled, y_margin)
-
-        meta_X = np.column_stack([oof_gbm, oof_rf, oof_enet])
-        meta_reg = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
-        meta_reg.fit(meta_X, y_margin)
-
-        reg = StackedRegressor([gbm, rf_reg, enet], meta_reg, scaler)
-        reg_cv = cross_val_score(gbm, X_scaled, y_margin,
-                                  cv=cv_folds, scoring="neg_mean_absolute_error")
-        explainer = shap.TreeExplainer(gbm)
-        model_type = "StackedEnsemble(GBM+RF+ElasticNet)"
-
-        # R7: Log meta weights for diagnostics
-        meta_weights = meta_reg.coef_.round(4).tolist()
-        print(f"  NCAAB meta weights [GBM, RF, ElasticNet]: {meta_weights}")
-        print(f"  ElasticNet selected: l1_ratio={enet.l1_ratio_}, alpha={enet.alpha_:.4f}")
-
-        # ── R6 FIX: Compute bias correction from OOF residuals ──
-        oof_meta = meta_reg.predict(meta_X)
-        bias_correction = float(np.mean(oof_meta - y_margin.values))
-        print(f"  NCAAB bias correction: {bias_correction:+.3f} pts (will be subtracted from predictions)")
-
-        # Stacked classifier
-        gbm_clf = GradientBoostingClassifier(
-            n_estimators=100, max_depth=3,
-            learning_rate=0.06, subsample=0.8,
-            min_samples_leaf=20, random_state=42,
-        )
-        rf_clf = RandomForestClassifier(
-            n_estimators=100, max_depth=6,
-            min_samples_leaf=15, max_features=0.7,
-            random_state=42, n_jobs=1,
-        )
-        lr_clf = LogisticRegression(max_iter=1000, C=1.0)
-
-        oof_gbm_p = cross_val_predict(gbm_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
-        oof_rf_p  = cross_val_predict(rf_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
-        oof_lr_p  = cross_val_predict(lr_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
-
-        gbm_clf.fit(X_scaled, y_win)
-        rf_clf.fit(X_scaled, y_win)
-        lr_clf.fit(X_scaled, y_win)
-
-        meta_clf_X = np.column_stack([oof_gbm_p, oof_rf_p, oof_lr_p])
-        meta_lr = LogisticRegression(max_iter=1000, C=1.0)
-        meta_lr.fit(meta_clf_X, y_win)
-        clf = StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr)
-
-        # ── R4 FIX: Isotonic calibration on OOF classifier probabilities ──
-        oof_stacked_probs = meta_lr.predict_proba(meta_clf_X)[:, 1]
-        isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
-        isotonic.fit(oof_stacked_probs, y_win.values)
-        print(f"  NCAAB isotonic calibration fitted on {len(oof_stacked_probs)} OOF samples")
-
-    else:
-        # Simple models for small data
-        reg = GradientBoostingRegressor(n_estimators=150, max_depth=3,
-                                         learning_rate=0.08, random_state=42)
-        reg.fit(X_scaled, y_margin)
-        reg_cv = cross_val_score(reg, X_scaled, y_margin,
-                                  cv=min(5, len(df)), scoring="neg_mean_absolute_error")
-        clf = CalibratedClassifierCV(
-            LogisticRegression(max_iter=1000), cv=min(5, len(df))
-        )
-        clf.fit(X_scaled, y_win)
-        explainer = shap.TreeExplainer(reg)
-        model_type = "GBM"
-        bias_correction = 0.0
-        isotonic = None
-        meta_weights = []
-
-    bundle = {
-        "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
-        "feature_cols": list(X.columns), "n_train": len(df),
-        "mae_cv": float(-reg_cv.mean()), "model_type": model_type,
-        "trained_at": datetime.utcnow().isoformat(),
-        # R6: Bias correction
-        "bias_correction": bias_correction,
-        # R4: Isotonic calibration
-        "isotonic": isotonic,
-        # R7: Meta diagnostics
-        "meta_weights": meta_weights,
+def _flush_ncaa_batch(rows):
+    """Insert a batch of ncaa_historical rows via Supabase UPSERT."""
+    if not rows:
+        return
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
     }
-    save_model("ncaa", bundle)
-    return {"status": "trained", "n_train": len(df), "model_type": model_type,
-            "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns),
-            "bias_correction": round(bias_correction, 3),
-            "meta_weights": meta_weights}
+    try:
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/ncaa_historical",
+            headers=headers,
+            json=rows,
+            timeout=30,
+        )
+        if not resp.ok:
+            print(f"  UPSERT error: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        print(f"  UPSERT exception: {e}")
+
+
+def _ncaa_merge_historical(current_df):
+    """
+    Fetch ncaa_historical (multi-season) and combine with current season
+    ncaa_predictions for ML training. Same pattern as _mlb_merge_historical.
+    """
+    hist_rows = sb_get(
+        "ncaa_historical",
+        "actual_home_score=not.is.null&select=*&order=season.desc&limit=100000"
+    )
+    if not hist_rows:
+        print("  WARNING: ncaa_historical empty - training on current season only")
+        if current_df is None or len(current_df) == 0:
+            return pd.DataFrame(), None
+        return current_df, None
+
+    hist_df = pd.DataFrame(hist_rows)
+
+    numeric_cols = [
+        "actual_home_score", "actual_away_score", "home_win",
+        "home_adj_em", "away_adj_em", "home_adj_oe", "away_adj_oe",
+        "home_adj_de", "away_adj_de", "home_ppg", "away_ppg",
+        "home_opp_ppg", "away_opp_ppg", "home_tempo", "away_tempo",
+        "home_record_wins", "away_record_wins",
+        "home_record_losses", "away_record_losses",
+        "home_rank", "away_rank", "season_weight",
+    ]
+    for col in numeric_cols:
+        if col in hist_df.columns:
+            hist_df[col] = pd.to_numeric(hist_df[col], errors="coerce")
+
+    # Historical rows have no heuristic predictions - zero them out
+    hist_df["pred_home_score"] = 0.0
+    hist_df["pred_away_score"] = 0.0
+    hist_df["win_pct_home"] = 0.5  # No pre-game prediction available
+    hist_df["spread_home"] = 0.0
+    hist_df["ou_total"] = 0.0
+
+    if "home_team" not in hist_df.columns and "home_team_abbr" in hist_df.columns:
+        hist_df["home_team"] = hist_df["home_team_abbr"]
+    if "away_team" not in hist_df.columns and "away_team_abbr" in hist_df.columns:
+        hist_df["away_team"] = hist_df["away_team_abbr"]
+
+    if "neutral_site" in hist_df.columns:
+        hist_df["neutral_site"] = hist_df["neutral_site"].fillna(False)
+
+    if "actual_margin" not in hist_df.columns:
+        hist_df["actual_margin"] = (
+            hist_df["actual_home_score"] - hist_df["actual_away_score"]
+        )
+
+    if current_df is not None and len(current_df) > 0:
+        combined = pd.concat([hist_df, current_df], ignore_index=True)
+    else:
+        combined = hist_df
+
+    if "season_weight" in combined.columns:
+        weights = combined["season_weight"].fillna(1.0).astype(float)
+    else:
+        weights = pd.Series(1.0, index=combined.index)
+
+    n_hist = len(hist_df)
+    n_curr = len(current_df) if current_df is not None else 0
+    print(f"  NCAA training corpus: {n_hist} historical + {n_curr} current "
+          f"= {n_hist + n_curr} total")
+
+    return combined, weights.values
+
+
+def train_ncaa():
+    """NCAA model training with multi-season historical corpus."""
+    import traceback as _tb
+    try:
+        rows = sb_get("ncaa_predictions",
+                      "result_entered=eq.true&actual_home_score=not.is.null&select=*")
+        current_df = pd.DataFrame(rows) if rows else pd.DataFrame()
+
+        # ── NEW: Merge with historical corpus ────────────────
+        df, sample_weights = _ncaa_merge_historical(current_df)
+
+        if len(df) < 10:
+            return {"error": "Not enough NCAAB data", "n": len(df),
+                    "n_current": len(current_df)}
+
+        X  = ncaa_build_features(df)
+        y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
+        y_win    = (y_margin > 0).astype(int)
+
+        scaler   = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        n = len(df)
+
+        # Cap training data for Railway timeout protection
+        MAX_TRAIN = 12000
+        if n > MAX_TRAIN:
+            if "season_weight" in df.columns:
+                keep_idx = df["season_weight"].fillna(0.5).nlargest(MAX_TRAIN).index
+            else:
+                keep_idx = df.index[-MAX_TRAIN:]
+            X_scaled = X_scaled[keep_idx]
+            y_margin = y_margin.iloc[keep_idx].reset_index(drop=True)
+            y_win = y_win.iloc[keep_idx].reset_index(drop=True)
+            if sample_weights is not None:
+                sample_weights = sample_weights[keep_idx.values]
+            n = MAX_TRAIN
+            print(f"  NCAA: Capped to {n} rows for Railway timeout protection")
+
+        cv_folds = min(5, n)
+        fit_weights = sample_weights if sample_weights is not None else np.ones(n)
+
+        if n >= 200:
+            # ── R7: Stacking with ElasticNet replacing Ridge for diversity ──
+            gbm = GradientBoostingRegressor(
+                n_estimators=150, max_depth=4,
+                learning_rate=0.06, subsample=0.8,
+                min_samples_leaf=20, random_state=42,
+            )
+            rf_reg = RandomForestRegressor(
+                n_estimators=100, max_depth=6,
+                min_samples_leaf=15, max_features=0.7,
+                random_state=42, n_jobs=1,
+            )
+            # R7 FIX: ElasticNet replaces Ridge — L1 component adds feature selection
+            enet = ElasticNetCV(l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
+                                alphas=[0.01, 0.1, 1.0, 5.0],
+                                cv=cv_folds, random_state=42)
+
+            print("  NCAAB v17: Training stacking ensemble (GBM + RF + ElasticNet)...")
+            oof_gbm   = cross_val_predict(gbm, X_scaled, y_margin, cv=cv_folds)
+            oof_rf    = cross_val_predict(rf_reg, X_scaled, y_margin, cv=cv_folds)
+            oof_enet  = cross_val_predict(enet, X_scaled, y_margin, cv=cv_folds)
+
+            gbm.fit(X_scaled, y_margin, sample_weight=fit_weights)
+            rf_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
+            enet.fit(X_scaled, y_margin)
+
+            meta_X = np.column_stack([oof_gbm, oof_rf, oof_enet])
+            meta_reg = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
+            meta_reg.fit(meta_X, y_margin)
+
+            reg = StackedRegressor([gbm, rf_reg, enet], meta_reg, scaler)
+            reg_cv = cross_val_score(gbm, X_scaled, y_margin,
+                                      cv=cv_folds, scoring="neg_mean_absolute_error")
+            explainer = shap.TreeExplainer(gbm)
+            model_type = "StackedEnsemble(GBM+RF+ElasticNet)"
+
+            # R7: Log meta weights for diagnostics
+            meta_weights = meta_reg.coef_.round(4).tolist()
+            print(f"  NCAAB meta weights [GBM, RF, ElasticNet]: {meta_weights}")
+            print(f"  ElasticNet selected: l1_ratio={enet.l1_ratio_}, alpha={enet.alpha_:.4f}")
+
+            # ── R6 FIX: Compute bias correction from OOF residuals ──
+            oof_meta = meta_reg.predict(meta_X)
+            bias_correction = float(np.mean(oof_meta - y_margin.values))
+            print(f"  NCAAB bias correction: {bias_correction:+.3f} pts (will be subtracted from predictions)")
+
+            # Stacked classifier
+            gbm_clf = GradientBoostingClassifier(
+                n_estimators=100, max_depth=3,
+                learning_rate=0.06, subsample=0.8,
+                min_samples_leaf=20, random_state=42,
+            )
+            rf_clf = RandomForestClassifier(
+                n_estimators=100, max_depth=6,
+                min_samples_leaf=15, max_features=0.7,
+                random_state=42, n_jobs=1,
+            )
+            lr_clf = LogisticRegression(max_iter=1000, C=1.0)
+
+            oof_gbm_p = cross_val_predict(gbm_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+            oof_rf_p  = cross_val_predict(rf_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+            oof_lr_p  = cross_val_predict(lr_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+
+            gbm_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+            rf_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+            lr_clf.fit(X_scaled, y_win, sample_weight=fit_weights)
+
+            meta_clf_X = np.column_stack([oof_gbm_p, oof_rf_p, oof_lr_p])
+            meta_lr = LogisticRegression(max_iter=1000, C=1.0)
+            meta_lr.fit(meta_clf_X, y_win)
+            clf = StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr)
+
+            # ── R4 FIX: Isotonic calibration on OOF classifier probabilities ──
+            oof_stacked_probs = meta_lr.predict_proba(meta_clf_X)[:, 1]
+            isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+            isotonic.fit(oof_stacked_probs, y_win.values)
+            print(f"  NCAAB isotonic calibration fitted on {len(oof_stacked_probs)} OOF samples")
+
+        else:
+            # Simple models for small data
+            reg = GradientBoostingRegressor(n_estimators=150, max_depth=3,
+                                             learning_rate=0.08, random_state=42)
+            reg.fit(X_scaled, y_margin)
+            reg_cv = cross_val_score(reg, X_scaled, y_margin,
+                                      cv=min(5, len(df)), scoring="neg_mean_absolute_error")
+            clf = CalibratedClassifierCV(
+                LogisticRegression(max_iter=1000), cv=min(5, len(df))
+            )
+            clf.fit(X_scaled, y_win)
+            explainer = shap.TreeExplainer(reg)
+            model_type = "GBM"
+            bias_correction = 0.0
+            isotonic = None
+            meta_weights = []
+
+        bundle = {
+            "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
+            "feature_cols": list(X.columns), "n_train": len(df),
+            "mae_cv": float(-reg_cv.mean()), "model_type": model_type,
+            "trained_at": datetime.utcnow().isoformat(),
+            # R6: Bias correction
+            "bias_correction": bias_correction,
+            # R4: Isotonic calibration
+            "isotonic": isotonic,
+            # R7: Meta diagnostics
+            "meta_weights": meta_weights,
+        }
+        save_model("ncaa", bundle)
+        return {"status": "trained", "n_train": len(df), "model_type": model_type,
+                "n_historical": n - len(current_df),
+                "n_current": len(current_df),
+                "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns),
+                "bias_correction": round(bias_correction, 3),
+                "meta_weights": meta_weights}
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": _tb.format_exc(),
+        }
 
 def predict_ncaa(game: dict):
     bundle = load_model("ncaa")
@@ -3884,6 +4027,226 @@ def ncaa_confidence_calibration():
             "note": "Based on where cumulative accuracy exceeds 55% / 65%"
         },
     })
+
+
+# ── NCAA Historical Backfill & Enrichment ─────────────────────
+
+@app.route("/backfill/ncaa-historical", methods=["POST"])
+def backfill_ncaa_historical():
+    """
+    Scrape NCAA game results from ESPN for historical seasons.
+    Body: { "seasons": [2022, 2023, 2024, 2025] }
+    Safe to call multiple times (uses UPSERT on game_id).
+    """
+    import traceback
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        seasons = body.get("seasons", [2022, 2023, 2024, 2025])
+        total_inserted = 0
+        season_counts = {}
+        errors = []
+
+        for season in seasons:
+            start_date = datetime(season - 1, 11, 1)
+            end_date = datetime(season, 4, 15)
+            current = start_date
+            season_count = 0
+            batch = []
+
+            print(f"\n[ncaa-backfill] Season {season}: "
+                  f"{start_date.date()} -> {end_date.date()}")
+
+            while current <= end_date:
+                date_str = current.strftime("%Y%m%d")
+                api_date = current.strftime("%Y-%m-%d")
+                try:
+                    url = (
+                        "https://site.api.espn.com/apis/site/v2/sports/"
+                        "basketball/mens-college-basketball/scoreboard"
+                        f"?dates={date_str}&limit=200"
+                    )
+                    resp = requests.get(url, timeout=15)
+                    if not resp.ok:
+                        current += timedelta(days=1)
+                        _time.sleep(0.2)
+                        continue
+                    data = resp.json()
+                    for event in data.get("events", []):
+                        comp = event.get("competitions", [{}])[0]
+                        if not comp.get("status", {}).get("type", {}).get("completed", False):
+                            continue
+                        competitors = comp.get("competitors", [])
+                        if len(competitors) != 2:
+                            continue
+                        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+                        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+                        if not home or not away:
+                            continue
+                        home_score = int(home.get("score", 0))
+                        away_score = int(away.get("score", 0))
+                        home_team = home.get("team", {})
+                        away_team = away.get("team", {})
+                        if not home_team.get("id") or not away_team.get("id"):
+                            continue
+                        neutral = comp.get("neutralSite", False)
+                        home_rank = None
+                        away_rank = None
+                        try:
+                            hrv = home.get("curatedRank", {}).get("current")
+                            if hrv and hrv <= 25: home_rank = hrv
+                            arv = away.get("curatedRank", {}).get("current")
+                            if arv and arv <= 25: away_rank = arv
+                        except Exception:
+                            pass
+                        is_post = 0
+                        if event.get("season", {}).get("type", 2) == 3:
+                            is_post = 1
+                        elif api_date >= f"{season}-03-15":
+                            is_post = 1
+                        batch.append({
+                            "game_id": event.get("id", ""),
+                            "game_date": api_date,
+                            "season": season,
+                            "home_team_id": str(home_team.get("id")),
+                            "away_team_id": str(away_team.get("id")),
+                            "home_team_name": home_team.get("displayName", ""),
+                            "away_team_name": away_team.get("displayName", ""),
+                            "home_team_abbr": home_team.get("abbreviation", ""),
+                            "away_team_abbr": away_team.get("abbreviation", ""),
+                            "actual_home_score": home_score,
+                            "actual_away_score": away_score,
+                            "actual_margin": home_score - away_score,
+                            "home_win": 1 if home_score > away_score else 0,
+                            "neutral_site": neutral,
+                            "home_conference": str(home_team.get("conferenceId", "")),
+                            "away_conference": str(away_team.get("conferenceId", "")),
+                            "is_postseason": is_post,
+                            "home_rank": home_rank,
+                            "away_rank": away_rank,
+                            "season_weight": _ncaa_season_weight(season),
+                        })
+                    if len(batch) >= 200:
+                        _flush_ncaa_batch(batch)
+                        season_count += len(batch)
+                        batch = []
+                except Exception as e:
+                    errors.append(f"{api_date}: {str(e)[:100]}")
+                current += timedelta(days=1)
+                _time.sleep(0.35)
+
+            if batch:
+                _flush_ncaa_batch(batch)
+                season_count += len(batch)
+            total_inserted += season_count
+            season_counts[season] = season_count
+            print(f"  Season {season}: {season_count} games inserted")
+
+        return jsonify({
+            "status": "complete",
+            "total_inserted": total_inserted,
+            "by_season": season_counts,
+            "errors_count": len(errors),
+            "errors_sample": errors[:10],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/enrich/ncaa-historical", methods=["POST"])
+def enrich_ncaa_historical():
+    """
+    Compute team efficiency ratings from game results and attach to ncaa_historical.
+    Body: { "season": 2024 }
+    Processes games chronologically (no data leakage).
+    """
+    import traceback
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        season = body.get("season", 2024)
+
+        rows = sb_get(
+            "ncaa_historical",
+            f"season=eq.{season}&actual_home_score=not.is.null&select=*&order=game_date.asc"
+        )
+        if not rows:
+            return jsonify({"error": f"No games found for season {season}"})
+
+        df = pd.DataFrame(rows)
+        print(f"  Enriching {len(df)} games for season {season}")
+
+        team_stats = {}
+        updates = []
+        for _, row in df.iterrows():
+            h_id = str(row["home_team_id"])
+            a_id = str(row["away_team_id"])
+            h_score = float(row["actual_home_score"])
+            a_score = float(row["actual_away_score"])
+
+            h_stats = team_stats.get(h_id, {"ppg_sum": 0, "opp_sum": 0, "games": 0, "wins": 0, "losses": 0})
+            a_stats = team_stats.get(a_id, {"ppg_sum": 0, "opp_sum": 0, "games": 0, "wins": 0, "losses": 0})
+
+            h_ppg = h_stats["ppg_sum"] / max(1, h_stats["games"])
+            h_opp = h_stats["opp_sum"] / max(1, h_stats["games"])
+            a_ppg = a_stats["ppg_sum"] / max(1, a_stats["games"])
+            a_opp = a_stats["opp_sum"] / max(1, a_stats["games"])
+
+            update = {
+                "home_ppg": round(h_ppg, 2) if h_stats["games"] > 0 else None,
+                "away_ppg": round(a_ppg, 2) if a_stats["games"] > 0 else None,
+                "home_opp_ppg": round(h_opp, 2) if h_stats["games"] > 0 else None,
+                "away_opp_ppg": round(a_opp, 2) if a_stats["games"] > 0 else None,
+                "home_adj_em": round(h_ppg - h_opp, 2) if h_stats["games"] >= 3 else None,
+                "away_adj_em": round(a_ppg - a_opp, 2) if a_stats["games"] >= 3 else None,
+                "home_adj_oe": round(h_ppg, 2) if h_stats["games"] >= 3 else None,
+                "away_adj_oe": round(a_ppg, 2) if a_stats["games"] >= 3 else None,
+                "home_adj_de": round(h_opp, 2) if h_stats["games"] >= 3 else None,
+                "away_adj_de": round(a_opp, 2) if a_stats["games"] >= 3 else None,
+                "home_tempo": round((h_ppg + h_opp) / 2, 1) if h_stats["games"] > 0 else 70.0,
+                "away_tempo": round((a_ppg + a_opp) / 2, 1) if a_stats["games"] > 0 else 70.0,
+                "home_record_wins": h_stats["wins"],
+                "away_record_wins": a_stats["wins"],
+                "home_record_losses": h_stats["losses"],
+                "away_record_losses": a_stats["losses"],
+            }
+            updates.append((row["id"], update))
+
+            h_stats["ppg_sum"] += h_score
+            h_stats["opp_sum"] += a_score
+            h_stats["games"] += 1
+            h_stats["wins" if h_score > a_score else "losses"] += 1
+            team_stats[h_id] = h_stats
+
+            a_stats["ppg_sum"] += a_score
+            a_stats["opp_sum"] += h_score
+            a_stats["games"] += 1
+            a_stats["wins" if a_score > h_score else "losses"] += 1
+            team_stats[a_id] = a_stats
+
+        updated = 0
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+        }
+        for row_id, update in updates:
+            try:
+                resp = requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/ncaa_historical?id=eq.{row_id}",
+                    headers=headers, json=update, timeout=10,
+                )
+                if resp.ok: updated += 1
+            except Exception:
+                pass
+            if updated % 100 == 0:
+                _time.sleep(0.1)
+
+        return jsonify({
+            "status": "enriched", "season": season,
+            "games_processed": len(updates), "games_updated": updated,
+            "teams_tracked": len(team_stats),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 # ── Startup ────────────────────────────────────────────────────
