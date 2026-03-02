@@ -1324,8 +1324,8 @@ def _ncaa_merge_historical(current_df):
     if not hist_rows:
         print("  WARNING: ncaa_historical empty - training on current season only")
         if current_df is None or len(current_df) == 0:
-            return pd.DataFrame(), None
-        return current_df, None
+            return pd.DataFrame(), None, 0
+        return current_df, None, 0
 
     hist_df = pd.DataFrame(hist_rows)
 
@@ -1428,7 +1428,7 @@ def _ncaa_merge_historical(current_df):
     print(f"  NCAA training corpus: {n_hist} historical + {n_curr} current "
           f"= {n_hist + n_curr} total")
 
-    return combined, weights.values
+    return combined, weights.values, n_hist
 
 
 def train_ncaa():
@@ -1440,7 +1440,8 @@ def train_ncaa():
         current_df = pd.DataFrame(rows) if rows else pd.DataFrame()
 
         # ── NEW: Merge with historical corpus ────────────────
-        df, sample_weights = _ncaa_merge_historical(current_df)
+        df, sample_weights, n_historical = _ncaa_merge_historical(current_df)
+        n_current = len(current_df) if current_df is not None else 0
 
         if len(df) < 10:
             return {"error": "Not enough NCAAB data", "n": len(df),
@@ -1449,6 +1450,11 @@ def train_ncaa():
         X  = ncaa_build_features(df)
         y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
         y_win    = (y_margin > 0).astype(int)
+
+        # Track which rows are current-season (for isotonic calibration)
+        # Merge puts historical first [0..n_historical-1], then current [n_historical..]
+        is_current = np.zeros(len(df), dtype=bool)
+        is_current[n_historical:] = True
 
         scaler   = StandardScaler()
         X_scaled = scaler.fit_transform(X)
@@ -1464,6 +1470,7 @@ def train_ncaa():
             X_scaled = X_scaled[keep_idx]
             y_margin = y_margin.iloc[keep_idx].reset_index(drop=True)
             y_win = y_win.iloc[keep_idx].reset_index(drop=True)
+            is_current = is_current[keep_idx.values]
             if sample_weights is not None:
                 sample_weights = sample_weights[keep_idx.values]
             n = MAX_TRAIN
@@ -1544,11 +1551,27 @@ def train_ncaa():
             meta_lr.fit(meta_clf_X, y_win)
             clf = StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr)
 
-            # ── R4 FIX: Isotonic calibration on OOF classifier probabilities ──
+            # ── R4 FIX: Isotonic calibration on CURRENT-SEASON OOF only ──
+            # Historical rows have simplified features (missing fgpct, threepct, etc.)
+            # which makes their OOF probabilities noisier. Fitting isotonic on all rows
+            # causes the calibrator to dampen probabilities too aggressively.
+            # Solution: fit on current-season rows only (real pipeline predictions).
             oof_stacked_probs = meta_lr.predict_proba(meta_clf_X)[:, 1]
-            isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
-            isotonic.fit(oof_stacked_probs, y_win.values)
-            print(f"  NCAAB isotonic calibration fitted on {len(oof_stacked_probs)} OOF samples")
+            current_mask = is_current[:len(oof_stacked_probs)]
+            n_current_oof = int(current_mask.sum())
+
+            if n_current_oof >= 50:
+                # Enough current-season data — fit isotonic on those rows only
+                isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+                isotonic.fit(oof_stacked_probs[current_mask], y_win.values[current_mask])
+                print(f"  NCAAB isotonic calibration fitted on {n_current_oof} CURRENT-SEASON OOF samples "
+                      f"(skipped {len(oof_stacked_probs) - n_current_oof} historical)")
+            else:
+                # Fallback: not enough current-season data, use all OOF
+                isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+                isotonic.fit(oof_stacked_probs, y_win.values)
+                print(f"  NCAAB isotonic: only {n_current_oof} current-season rows, "
+                      f"falling back to ALL {len(oof_stacked_probs)} OOF samples")
 
         else:
             # Simple models for small data
@@ -1566,6 +1589,7 @@ def train_ncaa():
             bias_correction = 0.0
             isotonic = None
             meta_weights = []
+            n_current_oof = 0
 
         bundle = {
             "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
@@ -1581,8 +1605,9 @@ def train_ncaa():
         }
         save_model("ncaa", bundle)
         return {"status": "trained", "n_train": len(df), "model_type": model_type,
-                "n_historical": n - len(current_df),
-                "n_current": len(current_df),
+                "n_historical": n_historical,
+                "n_current": n_current,
+                "isotonic_source": f"current_season ({n_current_oof} OOF samples)" if n >= 200 and n_current_oof >= 50 else "all_data",
                 "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns),
                 "bias_correction": round(bias_correction, 3),
                 "meta_weights": meta_weights}
