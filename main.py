@@ -3183,8 +3183,10 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
     lookup = {t["team_id"]: t for t in teams_data}
     team_ids = list(lookup.keys())
 
-    # Home court advantage: KenPom uses ~3.5 pts (1.75 per team)
-    HCA_PER_TEAM = 1.75
+    # Home court advantage: conservative estimate
+    # KenPom's average is ~1.4/team but varies by venue.
+    # Using 1.0 to avoid overcorrection from neutral-site misclassification.
+    HCA_PER_TEAM = 1.0
 
     # Non-D1 floor: assign 5th percentile ratings to unknown opponents
     all_raw_oe = sorted([lookup[t]["raw_oe"] for t in team_ids])
@@ -3260,18 +3262,8 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
                         my_score += HCA_PER_TEAM
                         opp_score -= HCA_PER_TEAM
 
-                # ── Per-game possession estimation ──
-                # Better than season-avg tempo: use actual game total and
-                # expected efficiency to back-calculate possessions.
-                # game_total / (expected_oe + expected_de) * 200
-                avg_tempo = (team["tempo"] + opp_tempo) / 2
-                total_score = my_score + opp_score
-                if total_score > 40:  # sanity check
-                    # Blend: 70% score-derived, 30% tempo-derived
-                    score_poss = total_score / (lg_oe + lg_de) * 100
-                    game_poss = 0.7 * score_poss + 0.3 * avg_tempo
-                else:
-                    game_poss = avg_tempo
+                # ── Possession estimation: average of both teams' tempo ──
+                game_poss = (team["tempo"] + opp_tempo) / 2
 
                 if game_poss <= 0:
                     continue
