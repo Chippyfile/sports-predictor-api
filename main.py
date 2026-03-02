@@ -2913,6 +2913,11 @@ def spread_accuracy_analysis():
                         "mae": round(float(errs.mean()), 2),
                         "bias": round(bias, 2),
                         "bias_direction": "HIGH" if bias > 1 else "LOW" if bias < -1 else "OK",
+                        "avg_model": round(float(mt[valid].mean()), 2),
+                        "avg_actual": round(float(df.loc[valid, "actual_total"].mean()), 2),
+                        "model_p10": round(float(mt[valid].quantile(0.1)), 1),
+                        "model_p50": round(float(mt[valid].quantile(0.5)), 1),
+                        "model_p90": round(float(mt[valid].quantile(0.9)), 1),
                     }
 
             # Head-to-head totals
@@ -2926,6 +2931,11 @@ def spread_accuracy_analysis():
                     analysis["h2h_total"] = {
                         "n": int(valid.sum()),
                         "model_closer_pct": round(float((me < mke).mean()), 4),
+                        "avg_model": round(float(mt[valid].mean()), 2),
+                        "avg_market": round(float(mkt_t[valid].mean()), 2),
+                        "avg_actual": round(float(df.loc[valid, "actual_total"].mean()), 2),
+                        "model_mae": round(float(me.mean()), 2),
+                        "market_mae": round(float(mke.mean()), 2),
                     }
 
             results[sport] = analysis
