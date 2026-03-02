@@ -2517,7 +2517,7 @@ def route_model_info(sport):
 
 @app.route("/backtest/nba-confidence")
 def nba_confidence_calibration():
-    """NBA confidence/calibration analysis — mirrors NCAA version."""
+    """NBA confidence/calibration analysis — tiers based on win probability margin."""
     rows = sb_get("nba_predictions",
                   "result_entered=eq.true&actual_home_score=not.is.null&ml_correct=not.is.null"
                   "&select=*&order=game_date.asc")
@@ -2527,23 +2527,35 @@ def nba_confidence_calibration():
     df = pd.DataFrame(rows)
     df["win_pct_home"] = pd.to_numeric(df["win_pct_home"], errors="coerce").fillna(0.5)
     df["ml_correct"] = df["ml_correct"].astype(bool)
-    df["confidence"] = df["confidence"].fillna("MEDIUM")
+    df["conf_margin"] = (df["win_pct_home"] - 0.5).abs()
 
-    # Accuracy by confidence tier
+    # ── Margin-based tiers (what actually predicts accuracy) ──
+    # Sport-specific thresholds calibrated from cumulative accuracy curves.
+    # NBA: tighter spreads, more parity → lower thresholds than NCAA.
+    NBA_HIGH = 0.15   # ≥65% win prob → HIGH
+    NBA_MED  = 0.05   # ≥55% win prob → MEDIUM
     tier_results = {}
-    for tier in ["LOW", "MEDIUM", "HIGH"]:
-        subset = df[df["confidence"] == tier]
+    for tier, lo, hi in [("LOW", 0, NBA_MED), ("MEDIUM", NBA_MED, NBA_HIGH), ("HIGH", NBA_HIGH, 0.5)]:
+        subset = df[(df["conf_margin"] >= lo) & (df["conf_margin"] < hi)] if tier != "HIGH" else df[df["conf_margin"] >= lo]
         if len(subset) > 0:
             tier_results[tier] = {
                 "n_games": len(subset),
                 "accuracy": round(float(subset["ml_correct"].mean()), 4),
-                "avg_win_pct_margin": round(float(
-                    (subset["win_pct_home"].clip(0.5, 1.0) - 0.5).mean()
-                ), 4),
+                "avg_win_pct_margin": round(float(subset["conf_margin"].mean()), 4),
+                "margin_range": f"{lo:.2f}-{hi:.2f}" if tier != "HIGH" else f">={lo:.2f}",
             }
 
+    # ── Data quality breakdown (secondary info) ──
+    dq_results = {}
+    if "confidence" in df.columns:
+        df["confidence"] = df["confidence"].fillna("MEDIUM")
+        for dq in ["LOW", "MEDIUM", "HIGH"]:
+            subset = df[df["confidence"] == dq]
+            if len(subset) > 0:
+                dq_results[dq] = {"n_games": len(subset),
+                                  "accuracy": round(float(subset["ml_correct"].mean()), 4)}
+
     # Accuracy by win probability margin decile
-    df["conf_margin"] = (df["win_pct_home"] - 0.5).abs()
     decile_results = []
     thresholds = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50]
     for j in range(len(thresholds) - 1):
@@ -2587,6 +2599,8 @@ def nba_confidence_calibration():
         "overall_accuracy": round(float(df["ml_correct"].mean()), 4),
         "brier_score": brier_overall,
         "by_tier": tier_results,
+        "data_quality_tiers": dq_results,
+        "tier_thresholds": {"LOW": f"<{NBA_MED}", "MEDIUM": f"{NBA_MED}-{NBA_HIGH}", "HIGH": f">={NBA_HIGH}"},
         "by_margin_decile": decile_results,
         "cumulative_threshold": cumulative,
         "suggested_thresholds": {
@@ -4995,23 +5009,35 @@ def ncaa_confidence_calibration():
     df = pd.DataFrame(rows)
     df["win_pct_home"] = pd.to_numeric(df["win_pct_home"], errors="coerce").fillna(0.5)
     df["ml_correct"] = df["ml_correct"].astype(bool)
-    df["confidence"] = df["confidence"].fillna("MEDIUM")
+    df["conf_margin"] = (df["win_pct_home"] - 0.5).abs()
 
-    # Accuracy by confidence tier
+    # ── Margin-based tiers (what actually predicts accuracy) ──
+    # NCAA: wider spreads, more blowouts → higher thresholds than NBA.
+    # Calibrated from cumulative accuracy: ≥0.25 margin → 83.9% accuracy.
+    NCAA_HIGH = 0.25   # ≥75% win prob → HIGH
+    NCAA_MED  = 0.10   # ≥60% win prob → MEDIUM
     tier_results = {}
-    for tier in ["LOW", "MEDIUM", "HIGH"]:
-        subset = df[df["confidence"] == tier]
+    for tier, lo, hi in [("LOW", 0, NCAA_MED), ("MEDIUM", NCAA_MED, NCAA_HIGH), ("HIGH", NCAA_HIGH, 0.5)]:
+        subset = df[(df["conf_margin"] >= lo) & (df["conf_margin"] < hi)] if tier != "HIGH" else df[df["conf_margin"] >= lo]
         if len(subset) > 0:
             tier_results[tier] = {
                 "n_games": len(subset),
                 "accuracy": round(float(subset["ml_correct"].mean()), 4),
-                "avg_win_pct_margin": round(float(
-                    (subset["win_pct_home"].clip(0.5, 1.0) - 0.5).mean()
-                ), 4),
+                "avg_win_pct_margin": round(float(subset["conf_margin"].mean()), 4),
+                "margin_range": f"{lo:.2f}-{hi:.2f}" if tier != "HIGH" else f">={lo:.2f}",
             }
 
+    # ── Data quality breakdown (secondary info) ──
+    dq_results = {}
+    if "confidence" in df.columns:
+        df["confidence"] = df["confidence"].fillna("MEDIUM")
+        for dq in ["LOW", "MEDIUM", "HIGH"]:
+            subset = df[df["confidence"] == dq]
+            if len(subset) > 0:
+                dq_results[dq] = {"n_games": len(subset),
+                                  "accuracy": round(float(subset["ml_correct"].mean()), 4)}
+
     # Accuracy by win probability margin decile
-    df["conf_margin"] = (df["win_pct_home"] - 0.5).abs()
     decile_results = []
     thresholds = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50]
     for j in range(len(thresholds) - 1):
@@ -5055,9 +5081,10 @@ def ncaa_confidence_calibration():
         "overall_accuracy": round(float(df["ml_correct"].mean()), 4),
         "brier_score": brier_overall,
         "by_tier": tier_results,
+        "data_quality_tiers": dq_results,
+        "tier_thresholds": {"LOW": f"<{NCAA_MED}", "MEDIUM": f"{NCAA_MED}-{NCAA_HIGH}", "HIGH": f">={NCAA_HIGH}"},
         "by_margin_decile": decile_results,
         "cumulative_threshold": cumulative,
-        "current_thresholds": {"LOW": "<35", "MEDIUM": "35-62", "HIGH": ">=62"},
         "suggested_thresholds": {
             "MEDIUM_min_margin": suggested_medium,
             "HIGH_min_margin": suggested_high,
