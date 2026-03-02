@@ -1812,6 +1812,9 @@ def index():
             "GET  /model-info/<sport>",
             "POST /cron/auto-train     (daily auto-training — Railway cron)",
             "GET  /cron/status         (model freshness & last training run)",
+            "POST /compute/ncaa-efficiency  (KenPom-style ratings — ~360 teams)",
+            "GET  /ratings/ncaa        (current ratings from Supabase)",
+            "GET  /ratings/ncaa/<id>   (single team rating)",
         ],
     })
 
@@ -2817,6 +2820,22 @@ def cron_auto_train():
         except Exception as e:
             results["mlb_dispersion"] = {"error": str(e)}
 
+    # NCAA KenPom-style efficiency ratings (nightly)
+    if "ncaa" in sports:
+        try:
+            print("\n[auto-train] Computing NCAA efficiency ratings...")
+            eff_result = run_ncaa_efficiency_computation()
+            results["ncaa_efficiency"] = {
+                "status": "ok",
+                "teams_rated": eff_result.get("teams_rated", 0),
+                "iterations": eff_result.get("iterations", 0),
+                "elapsed_sec": eff_result.get("elapsed_sec", 0),
+            }
+            print(f"[auto-train] NCAA ratings: {eff_result.get('teams_rated', 0)} teams rated")
+        except Exception as e:
+            results["ncaa_efficiency"] = {"status": "error", "error": str(e)}
+            print(f"[auto-train] NCAA ratings error: {e}")
+
     total_duration = _time.time() - start
     summary = {
         "status": "complete",
@@ -2908,6 +2927,406 @@ def debug_train_mlb():
             "type": type(e).__name__,
             "traceback": traceback.format_exc()
         }), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# NCAA KENPOM-STYLE EFFICIENCY RATINGS
+# ═══════════════════════════════════════════════════════════════
+# Iterative opponent-adjusted efficiency computation for all D1 teams.
+# POST /compute/ncaa-efficiency — triggers computation (~3-5 min)
+# GET  /ratings/ncaa — returns current ratings from Supabase
+#
+# Supabase table: ncaa_team_ratings
+#   team_id TEXT PRIMARY KEY, team_name TEXT, team_abbr TEXT,
+#   conference TEXT, adj_oe REAL, adj_de REAL, adj_em REAL,
+#   adj_ppg REAL, adj_opp_ppg REAL, adj_tempo REAL,
+#   raw_oe REAL, raw_de REAL, raw_ppg REAL, raw_opp_ppg REAL,
+#   sos REAL, wins INT, losses INT, games_used INT,
+#   iterations INT, rank_adj_em INT,
+#   updated_at TIMESTAMPTZ DEFAULT now()
+
+ESPN_CBB_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball"
+
+def _espn_cbb_get(path, retries=2):
+    """Fetch from ESPN CBB API with retries."""
+    url = f"{ESPN_CBB_BASE}/{path}"
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, timeout=15)
+            if r.ok:
+                return r.json()
+            if r.status_code == 429:
+                _time.sleep(2 ** attempt)
+                continue
+        except Exception as e:
+            if attempt == retries:
+                print(f"  ESPN CBB fetch failed: {path} — {e}")
+    return None
+
+
+def _fetch_all_d1_teams():
+    """Fetch all D1 basketball team IDs from ESPN."""
+    team_ids = set()
+    try:
+        data = _espn_cbb_get("teams?limit=500&groups=50")
+        if data and "sports" in data:
+            for sport in data["sports"]:
+                for league in sport.get("leagues", []):
+                    for team in league.get("teams", []):
+                        t = team.get("team", {})
+                        tid = t.get("id")
+                        if tid:
+                            team_ids.add(str(tid))
+        print(f"  ESPN groups=50: {len(team_ids)} teams")
+    except Exception as e:
+        print(f"  Team fetch failed: {e}")
+
+    # Fallback: scrape recent scoreboards
+    if len(team_ids) < 300:
+        for days_back in [1, 3, 5, 7, 14]:
+            dt = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y%m%d")
+            data = _espn_cbb_get(f"scoreboard?dates={dt}&limit=200")
+            if data and "events" in data:
+                for ev in data["events"]:
+                    for comp in ev.get("competitions", []):
+                        for c in comp.get("competitors", []):
+                            tid = c.get("team", {}).get("id")
+                            if tid:
+                                team_ids.add(str(tid))
+        print(f"  After scoreboard fallback: {len(team_ids)} teams")
+
+    return list(team_ids)
+
+
+def _fetch_team_data_for_ratings(team_id):
+    """Fetch team info, season stats, schedule, and record for ratings."""
+    team_data = _espn_cbb_get(f"teams/{team_id}")
+    if not team_data:
+        return None
+
+    stats_data = _espn_cbb_get(f"teams/{team_id}/statistics")
+    sched_data = _espn_cbb_get(f"teams/{team_id}/schedule")
+    record_data = _espn_cbb_get(f"teams/{team_id}/record")
+
+    team = team_data.get("team", {})
+    cats = (stats_data or {}).get("results", {}).get("stats", {}).get("categories", [])
+
+    def get_stat(name):
+        for cat in cats:
+            for s in cat.get("stats", []):
+                if s.get("name") == name or s.get("displayName") == name:
+                    try:
+                        return float(s["value"])
+                    except (ValueError, TypeError):
+                        return None
+        return None
+
+    ppg = get_stat("avgPoints") or get_stat("pointsPerGame") or 75.0
+    opp_ppg = get_stat("avgPointsAllowed") or get_stat("opponentPointsPerGame") or 75.0
+    fga = get_stat("avgFieldGoalsAttempted") or get_stat("fieldGoalsAttempted") or 55.0
+    fta = get_stat("avgFreeThrowsAttempted") or get_stat("freeThrowsAttempted") or 18.0
+    off_reb = get_stat("avgOffensiveRebounds") or get_stat("offensiveReboundsPerGame") or 10.0
+    turnovers = get_stat("avgTurnovers") or 12.0
+
+    # Detect season totals vs per-game
+    wins, losses = 0, 0
+    if record_data and record_data.get("items"):
+        for item in record_data["items"]:
+            for st in item.get("stats", []):
+                if st.get("name") == "wins":
+                    wins = int(st.get("value", 0))
+                if st.get("name") == "losses":
+                    losses = int(st.get("value", 0))
+
+    gp = wins + losses or 30
+    if fga > 200:
+        fga /= gp
+        fta /= gp
+        off_reb /= gp
+
+    # Tempo (Dean Oliver)
+    off_poss = fga - off_reb + turnovers + 0.475 * fta
+    tempo = max(55, min(80, off_poss))
+
+    # SOS
+    sos = None
+    if record_data and record_data.get("items"):
+        sos_item = next((i for i in record_data["items"] if i.get("type") == "sos"), None)
+        if sos_item:
+            sos_stat = next((s for s in sos_item.get("stats", []) if s.get("name") == "opponentWinPercent"), None)
+            if sos_stat:
+                try:
+                    sos = float(sos_stat["value"])
+                except (ValueError, TypeError):
+                    pass
+
+    # Game log
+    game_log = []
+    if sched_data and sched_data.get("events"):
+        for ev in sched_data["events"]:
+            comp = (ev.get("competitions") or [{}])[0]
+            if not comp.get("status", {}).get("type", {}).get("completed"):
+                continue
+            team_comp, opp_comp = None, None
+            for c in comp.get("competitors", []):
+                if str(c.get("team", {}).get("id")) == str(team_id):
+                    team_comp = c
+                else:
+                    opp_comp = c
+            if team_comp and opp_comp:
+                try:
+                    game_log.append({
+                        "opp_id": str(opp_comp["team"]["id"]),
+                        "my_score": int(team_comp.get("score", 0)),
+                        "opp_score": int(opp_comp.get("score", 0)),
+                    })
+                except (ValueError, TypeError):
+                    continue
+
+    raw_oe = (ppg / tempo * 100) if tempo > 0 else 107.0
+    raw_de = (opp_ppg / tempo * 100) if tempo > 0 else 107.0
+
+    return {
+        "team_id": str(team_id),
+        "name": team.get("displayName", ""),
+        "abbr": team.get("abbreviation", ""),
+        "conference": (team.get("conference") or {}).get("name", ""),
+        "ppg": ppg, "opp_ppg": opp_ppg, "tempo": tempo,
+        "raw_oe": raw_oe, "raw_de": raw_de,
+        "sos": sos, "wins": wins, "losses": losses,
+        "game_log": game_log,
+    }
+
+
+def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0.01):
+    """
+    Iterative KenPom-style efficiency computation.
+
+    Each iteration adjusts every team's per-game efficiency by their
+    opponent's current rating, then re-averages. Converges in 5-8 iterations.
+    """
+    lookup = {t["team_id"]: t for t in teams_data}
+    team_ids = list(lookup.keys())
+
+    # Iteration 0: raw values
+    adj_oe = {tid: lookup[tid]["raw_oe"] for tid in team_ids}
+    adj_de = {tid: lookup[tid]["raw_de"] for tid in team_ids}
+    adj_ppg = {tid: lookup[tid]["ppg"] for tid in team_ids}
+    adj_opp_ppg = {tid: lookup[tid]["opp_ppg"] for tid in team_ids}
+
+    n_iters = 0
+    for iteration in range(max_iterations):
+        n_iters = iteration + 1
+
+        all_oe = [adj_oe[t] for t in team_ids if adj_oe[t] is not None]
+        all_de = [adj_de[t] for t in team_ids if adj_de[t] is not None]
+        lg_oe = sum(all_oe) / len(all_oe) if all_oe else 113.5
+        lg_de = sum(all_de) / len(all_de) if all_de else 113.5
+        lg_ppg = sum(lookup[t]["ppg"] for t in team_ids) / len(team_ids)
+
+        new_oe, new_de, new_ppg, new_opp_ppg = {}, {}, {}, {}
+        max_delta = 0.0
+
+        for tid in team_ids:
+            team = lookup[tid]
+            if not team["game_log"]:
+                new_oe[tid] = adj_oe[tid]
+                new_de[tid] = adj_de[tid]
+                new_ppg[tid] = adj_ppg[tid]
+                new_opp_ppg[tid] = adj_opp_ppg[tid]
+                continue
+
+            g_oes, g_des, g_ppgs, g_opps = [], [], [], []
+
+            for game in team["game_log"]:
+                opp_id = game["opp_id"]
+                if opp_id not in lookup:
+                    continue
+
+                opp = lookup[opp_id]
+                game_poss = (team["tempo"] + opp["tempo"]) / 2
+                if game_poss <= 0:
+                    continue
+
+                game_oe_raw = game["my_score"] / game_poss * 100
+                game_de_raw = game["opp_score"] / game_poss * 100
+
+                opp_de_r = adj_de.get(opp_id, lg_de)
+                opp_oe_r = adj_oe.get(opp_id, lg_oe)
+
+                g_oes.append(game_oe_raw * (lg_de / opp_de_r) if opp_de_r > 0 else game_oe_raw)
+                g_des.append(game_de_raw * (lg_oe / opp_oe_r) if opp_oe_r > 0 else game_de_raw)
+
+                opp_def_ppg = adj_opp_ppg.get(opp_id, opp["opp_ppg"])
+                opp_off_ppg = adj_ppg.get(opp_id, opp["ppg"])
+                g_ppgs.append(game["my_score"] * (lg_ppg / opp_def_ppg) if opp_def_ppg > 0 else game["my_score"])
+                g_opps.append(game["opp_score"] * (lg_ppg / opp_off_ppg) if opp_off_ppg > 0 else game["opp_score"])
+
+            if g_oes:
+                nv_oe = sum(g_oes) / len(g_oes)
+                nv_de = sum(g_des) / len(g_des)
+                max_delta = max(max_delta, abs(nv_oe - adj_oe[tid]), abs(nv_de - adj_de[tid]))
+                new_oe[tid] = nv_oe
+                new_de[tid] = nv_de
+                new_ppg[tid] = sum(g_ppgs) / len(g_ppgs)
+                new_opp_ppg[tid] = sum(g_opps) / len(g_opps)
+            else:
+                new_oe[tid] = adj_oe[tid]
+                new_de[tid] = adj_de[tid]
+                new_ppg[tid] = adj_ppg[tid]
+                new_opp_ppg[tid] = adj_opp_ppg[tid]
+
+        adj_oe, adj_de = new_oe, new_de
+        adj_ppg, adj_opp_ppg = new_ppg, new_opp_ppg
+
+        print(f"  Iteration {n_iters}: max_delta={max_delta:.4f}, lg_oe={lg_oe:.1f}")
+        if max_delta < convergence_threshold:
+            print(f"  Converged after {n_iters} iterations")
+            break
+
+    # Build results with rankings
+    results = []
+    for tid in team_ids:
+        t = lookup[tid]
+        em = adj_oe[tid] - adj_de[tid]
+        results.append({
+            "team_id": tid, "team_name": t["name"], "team_abbr": t["abbr"],
+            "conference": t["conference"],
+            "adj_oe": round(adj_oe[tid], 2), "adj_de": round(adj_de[tid], 2),
+            "adj_em": round(em, 2),
+            "adj_ppg": round(adj_ppg[tid], 2), "adj_opp_ppg": round(adj_opp_ppg[tid], 2),
+            "adj_tempo": round(t["tempo"], 1),
+            "raw_oe": round(t["raw_oe"], 2), "raw_de": round(t["raw_de"], 2),
+            "raw_ppg": round(t["ppg"], 2), "raw_opp_ppg": round(t["opp_ppg"], 2),
+            "sos": round(t["sos"], 4) if t["sos"] is not None else None,
+            "wins": t["wins"], "losses": t["losses"],
+            "games_used": len(t["game_log"]), "iterations": n_iters,
+        })
+
+    results.sort(key=lambda x: x["adj_em"], reverse=True)
+    for i, r in enumerate(results):
+        r["rank_adj_em"] = i + 1
+
+    return results
+
+
+def run_ncaa_efficiency_computation():
+    """Full pipeline: fetch teams → iterate → store in Supabase."""
+    start = _time.time()
+    print("\n" + "=" * 60)
+    print("NCAA EFFICIENCY RATINGS — KenPom Replication")
+    print("=" * 60)
+
+    print("\n[1/4] Fetching D1 team IDs...")
+    team_ids = _fetch_all_d1_teams()
+    print(f"  Found {len(team_ids)} teams")
+    if len(team_ids) < 100:
+        return {"error": f"Only found {len(team_ids)} teams", "teams_found": len(team_ids)}
+
+    print(f"\n[2/4] Fetching team data ({len(team_ids)} teams)...")
+    teams_data = []
+    failed = 0
+    for i, tid in enumerate(team_ids):
+        if i > 0 and i % 50 == 0:
+            print(f"  ... {i}/{len(team_ids)} teams ({failed} failed)")
+            _time.sleep(1)
+        if i > 0 and i % 10 == 0:
+            _time.sleep(0.2)
+
+        data = _fetch_team_data_for_ratings(tid)
+        if data and data["game_log"]:
+            teams_data.append(data)
+        else:
+            failed += 1
+
+    print(f"  Loaded {len(teams_data)} teams ({failed} failed)")
+    if len(teams_data) < 100:
+        return {"error": f"Only {len(teams_data)} teams with data", "teams_loaded": len(teams_data)}
+
+    print(f"\n[3/4] Computing ratings (iterative)...")
+    ratings = compute_kenpom_ratings(teams_data)
+
+    print(f"\n[4/4] Storing {len(ratings)} ratings in Supabase...")
+    stored = _store_ncaa_ratings(ratings)
+
+    elapsed = _time.time() - start
+    top5 = ratings[:5]
+    print(f"\nCOMPLETE: {len(ratings)} teams in {elapsed:.1f}s")
+    for r in top5:
+        print(f"  #{r['rank_adj_em']} {r['team_abbr']:6s} EM={r['adj_em']:+.1f} OE={r['adj_oe']:.1f} DE={r['adj_de']:.1f}")
+
+    return {
+        "status": "ok",
+        "teams_rated": len(ratings),
+        "teams_fetched": len(team_ids),
+        "iterations": ratings[0]["iterations"] if ratings else 0,
+        "elapsed_sec": round(elapsed, 1),
+        "stored_to_supabase": stored,
+        "top_10": ratings[:10],
+    }
+
+
+def _store_ncaa_ratings(ratings):
+    """Upsert ratings to ncaa_team_ratings in Supabase."""
+    if not SUPABASE_KEY:
+        print("  ⚠️ No Supabase key — skipping storage")
+        return False
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+
+    success = 0
+    batch_size = 50
+    for i in range(0, len(ratings), batch_size):
+        batch = ratings[i:i + batch_size]
+        for r in batch:
+            r["updated_at"] = datetime.utcnow().isoformat()
+        try:
+            resp = requests.post(
+                f"{SUPABASE_URL}/rest/v1/ncaa_team_ratings",
+                headers=headers, json=batch, timeout=15,
+            )
+            if resp.ok:
+                success += len(batch)
+            else:
+                print(f"  Upsert error (batch {i}): {resp.status_code} {resp.text[:200]}")
+        except Exception as e:
+            print(f"  Upsert exception (batch {i}): {e}")
+
+    print(f"  Stored {success}/{len(ratings)} ratings")
+    return success == len(ratings)
+
+
+@app.route("/compute/ncaa-efficiency", methods=["POST"])
+def route_compute_ncaa_efficiency():
+    try:
+        result = run_ncaa_efficiency_computation()
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/ratings/ncaa")
+def route_get_ncaa_ratings():
+    ratings = sb_get("ncaa_team_ratings", "select=*&order=rank_adj_em.asc")
+    return jsonify({
+        "count": len(ratings) if ratings else 0,
+        "updated_at": ratings[0].get("updated_at") if ratings else None,
+        "ratings": ratings or [],
+    })
+
+
+@app.route("/ratings/ncaa/<team_id>")
+def route_get_ncaa_team_rating(team_id):
+    rows = sb_get("ncaa_team_ratings", f"select=*&team_id=eq.{team_id}")
+    if rows:
+        return jsonify(rows[0])
+    return jsonify({"error": f"No rating for team {team_id}"}), 404
 
 
 # ── Startup ────────────────────────────────────────────────────
