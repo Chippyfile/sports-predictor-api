@@ -971,6 +971,21 @@ def ncaa_build_features(df):
         else:
             df[col] = default
 
+    # ── AUDIT P1: Flag potentially leaked ratings ──
+    # If rating_synced_at > 24h after game_date, adj_em may contain post-game data.
+    if "rating_synced_at" in df.columns and "game_date" in df.columns:
+        try:
+            synced = pd.to_datetime(df["rating_synced_at"], errors="coerce")
+            game_dt = pd.to_datetime(df["game_date"], errors="coerce")
+            df["rating_leak_flag"] = ((synced - game_dt).dt.total_seconds() > 86400).astype(int)
+            n_leaked = int(df["rating_leak_flag"].sum())
+            if n_leaked > 0:
+                print(f"  ⚠️ AUDIT: {n_leaked}/{len(df)} rows have ratings synced >24h after game date")
+        except:
+            df["rating_leak_flag"] = 0
+    else:
+        df["rating_leak_flag"] = 0
+
     # ── R1 FIX: Decompose adj_em_diff into neutral component + HCA component ──
     # The raw adj_em_diff contains HCA baked in (from home PPG). Separate them
     # so the ML can learn their independent weights instead of double-counting.
@@ -1054,9 +1069,9 @@ def ncaa_build_features(df):
     else:
         df["season_phase"] = 0.5
 
-    # ── R8 FIX: SOS-weighted interaction features ──
-    df["ppg_x_sos"]     = df["ppg_diff"] * df["sos_diff"]
-    df["em_x_conf"]     = df["neutral_em_diff"] * df["is_conf_game"]
+    # ── AUDIT P4: Interaction features REMOVED ──
+    # ppg_x_sos, em_x_conf had VIF > 10 with component features.
+    # Keeping components only reduces multicollinearity.
 
     # ── v18 P1-INJ: Injury features ──
     df["home_injury_penalty"] = pd.to_numeric(df["home_injury_penalty"], errors="coerce").fillna(0)
@@ -1066,7 +1081,7 @@ def ncaa_build_features(df):
     df["away_missing_starters"] = pd.to_numeric(df["away_missing_starters"], errors="coerce").fillna(0)
     df["starters_diff"] = df["home_missing_starters"] - df["away_missing_starters"]
     df["any_injury_flag"] = ((df["home_missing_starters"] > 0) | (df["away_missing_starters"] > 0)).astype(int)
-    df["injury_x_em"] = df["injury_diff"] * df["neutral_em_diff"]
+    # injury_x_em REMOVED (AUDIT P4) — correlated with injury_diff and neutral_em_diff
 
     # ── v18 P1-CTX: Tournament context features ──
     for _bc in ["is_conference_tournament", "is_ncaa_tournament", "is_bubble_game", "is_early_season"]:
@@ -1079,14 +1094,12 @@ def ncaa_build_features(df):
     df["is_bubble"] = df["is_bubble_game"]
     df["is_early"] = df["is_early_season"]
     df["importance"] = pd.to_numeric(df["importance_multiplier"], errors="coerce").fillna(1.0)
-    df["tourney_x_em"] = df["is_ncaa_tourney"] * df["neutral_em_diff"]
-    df["early_x_form"] = df["is_early"] * df["form_diff"]
+    # tourney_x_em, early_x_form REMOVED (AUDIT P4) — correlated with components
 
     feature_cols = [
         # R1: Decomposed efficiency + HCA
         "neutral_em_diff", "hca_pts", "neutral",
-        # R2: Heuristic signal (capped)
-        "heur_win_prob_capped",
+        # AUDIT P4: heur_win_prob_capped REMOVED — redundant with raw stats it derives from
         # Raw stats — differentials
         "ppg_diff", "opp_ppg_diff", "fgpct_diff", "threepct_diff",
         "orb_pct_diff", "fta_rate_diff", "ato_diff",
@@ -1100,16 +1113,12 @@ def ncaa_build_features(df):
         "is_conf_game", "season_phase",
         # R5: Schedule fatigue
         "rest_diff", "either_b2b",
-        # R8: Interaction features
-        "ppg_x_sos", "em_x_conf",
-        # ── v18 NEW FEATURES ──
-        # P1-INJ: Injury signal
-        "injury_diff", "starters_diff", "any_injury_flag", "injury_x_em",
-        # P1-CTX: Tournament context
+        # AUDIT P4: ppg_x_sos, em_x_conf, injury_x_em, tourney_x_em, early_x_form REMOVED
+        # P1-INJ: Injury signal (components only, no interaction)
+        "injury_diff", "starters_diff", "any_injury_flag",
+        # P1-CTX: Tournament context (components only, no interaction)
         "is_conf_tourney", "is_ncaa_tourney", "is_bubble", "is_early",
         "importance",
-        # P1 interactions
-        "tourney_x_em", "early_x_form",
     ]
     return df[feature_cols].fillna(0)
 
@@ -3686,6 +3695,195 @@ def route_get_ncaa_team_rating(team_id):
     if rows:
         return jsonify(rows[0])
     return jsonify({"error": f"No rating for team {team_id}"}), 404
+
+
+# ═══════════════════════════════════════════════════════════════
+# AUDIT FIX #1: Walk-Forward Validation — NCAA
+# Time-based expanding window: never trains on future data.
+# This is the HONEST accuracy measurement.
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/backtest/ncaa-walkforward")
+def ncaa_walk_forward():
+    rows = sb_get("ncaa_predictions",
+                  "result_entered=eq.true&actual_home_score=not.is.null&select=*&order=game_date.asc")
+    if len(rows) < 100:
+        return jsonify({"error": "Need 100+ graded games", "n": len(rows)})
+
+    df = pd.DataFrame(rows)
+    df["game_date"] = pd.to_datetime(df["game_date"])
+    df["actual_margin"] = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
+    df["actual_win"] = (df["actual_margin"] > 0).astype(int)
+    df = df.sort_values("game_date").reset_index(drop=True)
+
+    dates = sorted(df["game_date"].unique())
+    results = []
+    min_train = 200
+
+    cumulative = df.groupby("game_date").size().cumsum()
+    start_dates = cumulative[cumulative >= min_train].index
+    if len(start_dates) == 0:
+        return jsonify({"error": f"Need {min_train}+ games before first test window", "n": len(df)})
+
+    train_cutoff_idx = list(dates).index(start_dates[0])
+    window_days = 7
+    i = train_cutoff_idx
+
+    while i < len(dates):
+        test_start = dates[i]
+        test_end = test_start + pd.Timedelta(days=window_days)
+        train_df = df[df["game_date"] < test_start]
+        test_df = df[(df["game_date"] >= test_start) & (df["game_date"] < test_end)]
+
+        if len(test_df) == 0 or len(train_df) < min_train:
+            i += 1
+            continue
+        try:
+            X_train = ncaa_build_features(train_df)
+            y_train_m = train_df["actual_margin"]
+            y_train_w = train_df["actual_win"]
+            X_test = ncaa_build_features(test_df)
+            y_test_m = test_df["actual_margin"]
+            y_test_w = test_df["actual_win"]
+
+            scaler = StandardScaler()
+            X_tr_s = scaler.fit_transform(X_train)
+            X_te_s = scaler.transform(X_test)
+
+            reg = GradientBoostingRegressor(n_estimators=150, max_depth=4,
+                learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
+            clf = GradientBoostingClassifier(n_estimators=150, max_depth=4,
+                learning_rate=0.06, subsample=0.8, min_samples_leaf=20, random_state=42)
+            reg.fit(X_tr_s, y_train_m)
+            clf.fit(X_tr_s, y_train_w)
+
+            pred_prob = clf.predict_proba(X_te_s)[:, 1]
+            pred_win = (pred_prob >= 0.5).astype(int)
+            pred_margin = reg.predict(X_te_s)
+
+            accuracy = float((pred_win == y_test_w.values).mean())
+            mae_val = float(np.abs(pred_margin - y_test_m.values).mean())
+            brier = float(np.mean((pred_prob - y_test_w.values) ** 2))
+
+            results.append({
+                "period": f"{test_start.strftime('%Y-%m-%d')} to {test_end.strftime('%Y-%m-%d')}",
+                "n_train": len(train_df), "n_test": len(test_df),
+                "accuracy": round(accuracy, 4), "mae": round(mae_val, 2), "brier": round(brier, 4),
+            })
+        except Exception as e:
+            results.append({"period": str(test_start.date()), "error": str(e)})
+
+        next_dates = [d for d in dates if d >= test_end]
+        if not next_dates:
+            break
+        i = list(dates).index(next_dates[0])
+
+    valid = [r for r in results if "accuracy" in r]
+    if valid:
+        total_test = sum(r["n_test"] for r in valid)
+        agg = {
+            "accuracy": round(sum(r["accuracy"] * r["n_test"] for r in valid) / total_test, 4),
+            "mae": round(sum(r["mae"] * r["n_test"] for r in valid) / total_test, 2),
+            "brier": round(sum(r["brier"] * r["n_test"] for r in valid) / total_test, 4),
+        }
+    else:
+        agg = {}
+
+    return jsonify({
+        "method": "walk-forward (7-day expanding window)",
+        "min_train_size": min_train,
+        "total_periods": len(results),
+        "total_test_games": sum(r.get("n_test", 0) for r in results),
+        "aggregate": agg,
+        "by_period": results,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
+# AUDIT FIX #5: Confidence Score Calibration — NCAA
+# Validates whether HIGH/MEDIUM/LOW tiers actually predict accuracy.
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/backtest/ncaa-confidence")
+def ncaa_confidence_calibration():
+    rows = sb_get("ncaa_predictions",
+                  "result_entered=eq.true&actual_home_score=not.is.null&ml_correct=not.is.null"
+                  "&select=*&order=game_date.asc")
+    if len(rows) < 100:
+        return jsonify({"error": "Need 100+ graded games", "n": len(rows)})
+
+    df = pd.DataFrame(rows)
+    df["win_pct_home"] = pd.to_numeric(df["win_pct_home"], errors="coerce").fillna(0.5)
+    df["ml_correct"] = df["ml_correct"].astype(bool)
+    df["confidence"] = df["confidence"].fillna("MEDIUM")
+
+    # Accuracy by confidence tier
+    tier_results = {}
+    for tier in ["LOW", "MEDIUM", "HIGH"]:
+        subset = df[df["confidence"] == tier]
+        if len(subset) > 0:
+            tier_results[tier] = {
+                "n_games": len(subset),
+                "accuracy": round(float(subset["ml_correct"].mean()), 4),
+                "avg_win_pct_margin": round(float(
+                    (subset["win_pct_home"].clip(0.5, 1.0) - 0.5).mean()
+                ), 4),
+            }
+
+    # Accuracy by win probability margin decile
+    df["conf_margin"] = (df["win_pct_home"] - 0.5).abs()
+    decile_results = []
+    thresholds = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50]
+    for j in range(len(thresholds) - 1):
+        lo, hi = thresholds[j], thresholds[j + 1]
+        subset = df[(df["conf_margin"] >= lo) & (df["conf_margin"] < hi)]
+        if len(subset) >= 10:
+            decile_results.append({
+                "margin_range": f"{lo:.2f}-{hi:.2f}",
+                "n_games": len(subset),
+                "accuracy": round(float(subset["ml_correct"].mean()), 4),
+                "expected_accuracy": round(0.5 + (lo + hi) / 2, 4),
+            })
+
+    # Cumulative: "If I only bet on games with margin >= X, what accuracy?"
+    cumulative = []
+    for threshold in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]:
+        subset = df[df["conf_margin"] >= threshold]
+        if len(subset) >= 10:
+            cumulative.append({
+                "min_margin": threshold,
+                "n_games": len(subset),
+                "accuracy": round(float(subset["ml_correct"].mean()), 4),
+                "pct_of_total": round(len(subset) / len(df), 4),
+            })
+
+    # Brier score overall
+    brier_overall = round(float(np.mean(
+        (df["win_pct_home"].clip(0.5, 0.97) - df["ml_correct"].astype(float)) ** 2
+    )), 4)
+
+    # Suggested tier thresholds based on accuracy jumps
+    suggested_medium = suggested_high = None
+    for row in cumulative:
+        if row["accuracy"] >= 0.55 and suggested_medium is None:
+            suggested_medium = row["min_margin"]
+        if row["accuracy"] >= 0.65 and suggested_high is None:
+            suggested_high = row["min_margin"]
+
+    return jsonify({
+        "total_games": len(df),
+        "overall_accuracy": round(float(df["ml_correct"].mean()), 4),
+        "brier_score": brier_overall,
+        "by_tier": tier_results,
+        "by_margin_decile": decile_results,
+        "cumulative_threshold": cumulative,
+        "current_thresholds": {"LOW": "<35", "MEDIUM": "35-62", "HIGH": ">=62"},
+        "suggested_thresholds": {
+            "MEDIUM_min_margin": suggested_medium,
+            "HIGH_min_margin": suggested_high,
+            "note": "Based on where cumulative accuracy exceeds 55% / 65%"
+        },
+    })
 
 
 # ── Startup ────────────────────────────────────────────────────
