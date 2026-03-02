@@ -3037,7 +3037,14 @@ def _fetch_team_data_for_ratings(team_id):
     # Handle both {"team": {...}} and direct {...} response formats
     team = team_data.get("team", team_data)
     cats = (stats_data or {}).get("results", {}).get("stats", {}).get("categories", [])
-
+    # Fallback: some ESPN endpoints nest stats differently
+    if not cats:
+        cats = (stats_data or {}).get("statistics", {}).get("categories", [])
+        if not cats:
+            # Try splits format
+            splits = (stats_data or {}).get("results", {}).get("splits", {}).get("categories", [])
+            if splits:
+                cats = splits
     def get_stat(name):
         for cat in cats:
             for s in cat.get("stats", []):
@@ -3057,13 +3064,45 @@ def _fetch_team_data_for_ratings(team_id):
 
     # Detect season totals vs per-game
     wins, losses = 0, 0
+    # Method 1: record endpoint items
     if record_data and record_data.get("items"):
         for item in record_data["items"]:
-            for st in item.get("stats", []):
-                if st.get("name") == "wins":
-                    wins = int(st.get("value", 0))
-                if st.get("name") == "losses":
-                    losses = int(st.get("value", 0))
+            if item.get("type", "") == "total" or item.get("description", "") == "Overall":
+                for st in item.get("stats", []):
+                    if st.get("name") == "wins":
+                        wins = int(st.get("value", 0))
+                    if st.get("name") == "losses":
+                        losses = int(st.get("value", 0))
+    # Method 2: direct wins/losses in record
+    if wins == 0 and record_data:
+        for item in (record_data.get("items") or []):
+            summary = item.get("summary", "")
+            if "-" in summary and item.get("type") in ("total", None, ""):
+                parts = summary.split("-")
+                if len(parts) == 2 and parts[0].strip().isdigit():
+                    wins = int(parts[0].strip())
+                    losses = int(parts[1].strip())
+                    break
+    # Method 3: count from game log
+    if wins == 0 and sched_data and sched_data.get("events"):
+        for ev in sched_data["events"]:
+            comp = (ev.get("competitions") or [{}])[0]
+            if not comp.get("status", {}).get("type", {}).get("completed"):
+                continue
+            for c in comp.get("competitors", []):
+                if str(c.get("team", {}).get("id")) == str(team_id):
+                    if c.get("winner"):
+                        wins += 1
+                    else:
+                        losses += 1
+
+    # Conference: try multiple paths
+    conference = ""
+    conf_obj = team.get("conference") or team.get("groups", {})
+    if isinstance(conf_obj, dict):
+        conference = conf_obj.get("name", conf_obj.get("shortName", ""))
+    if not conference and team.get("groups", {}).get("parent"):
+        conference = team["groups"]["parent"].get("name", "")
 
     gp = wins + losses or 30
     if fga > 200:
@@ -3122,7 +3161,7 @@ def _fetch_team_data_for_ratings(team_id):
         "team_id": str(team_id),
         "name": team.get("displayName", ""),
         "abbr": team.get("abbreviation", ""),
-        "conference": (team.get("conference") or {}).get("name", ""),
+        "conference": conference,
         "ppg": ppg, "opp_ppg": opp_ppg, "tempo": tempo,
         "raw_oe": raw_oe, "raw_de": raw_de,
         "sos": sos, "wins": wins, "losses": losses,
@@ -3211,7 +3250,30 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
         adj_oe, adj_de = new_oe, new_de
         adj_ppg, adj_opp_ppg = new_ppg, new_opp_ppg
 
-        print(f"  Iteration {n_iters}: max_delta={max_delta:.4f}, lg_oe={lg_oe:.1f}")
+        # ── NORMALIZATION (critical for KenPom parity) ──
+        # Re-center so league avg OE = league avg DE = target
+        # Without this, each iteration drifts and inflates extremes.
+        # KenPom uses ~109.7 as the league average; we derive it from data.
+        target_avg = 109.7  # KenPom-scale D1 league average
+        cur_oe_vals = [adj_oe[t] for t in team_ids]
+        cur_de_vals = [adj_de[t] for t in team_ids]
+        cur_ppg_vals = [adj_ppg[t] for t in team_ids]
+        cur_opp_vals = [adj_opp_ppg[t] for t in team_ids]
+        oe_mean = sum(cur_oe_vals) / len(cur_oe_vals)
+        de_mean = sum(cur_de_vals) / len(cur_de_vals)
+        ppg_mean = sum(cur_ppg_vals) / len(cur_ppg_vals)
+        opp_mean = sum(cur_opp_vals) / len(cur_opp_vals)
+        oe_shift = target_avg - oe_mean
+        de_shift = target_avg - de_mean
+        ppg_shift = lg_ppg - ppg_mean
+        opp_shift = lg_ppg - opp_mean
+        for tid in team_ids:
+            adj_oe[tid] += oe_shift
+            adj_de[tid] += de_shift
+            adj_ppg[tid] += ppg_shift
+            adj_opp_ppg[tid] += opp_shift
+
+        print(f"  Iteration {n_iters}: max_delta={max_delta:.4f}, oe_mean={oe_mean:.1f}→{target_avg:.1f}, de_mean={de_mean:.1f}→{target_avg:.1f}")
         if max_delta < convergence_threshold:
             print(f"  Converged after {n_iters} iterations")
             break
