@@ -813,88 +813,255 @@ def predict_mlb(game: dict):
 # ═══════════════════════════════════════════════════════════════
 
 def nba_build_features(df):
+    """
+    NBA feature builder — expanded to use 30+ raw stat columns from nbaSync.
+    Mirrors the NCAA pattern: differential features + context + heuristic signal.
+    """
     df = df.copy()
-    df["net_rtg_diff"]    = df["home_net_rtg"].fillna(0) - df["away_net_rtg"].fillna(0)
+
+    # ── Core heuristic outputs ──
     df["score_diff_pred"] = df["pred_home_score"].fillna(0) - df["pred_away_score"].fillna(0)
     df["total_pred"]      = df["pred_home_score"].fillna(0) + df["pred_away_score"].fillna(0)
-    df["home_fav"]        = (df["model_ml_home"] < 0).astype(int)
-    df["spread_diff"]     = df["spread_home"].fillna(0) - df["market_spread_home"].fillna(0)
-    df["ou_gap"]          = df["total_pred"] - df["market_ou_total"].fillna(df["ou_total"].fillna(220))
-    df["win_pct_home"]    = df["win_pct_home"].fillna(0.5)
+    df["home_fav"]        = (pd.to_numeric(df.get("model_ml_home", 0), errors="coerce").fillna(0) < 0).astype(int)
+    df["win_pct_home"]    = pd.to_numeric(df.get("win_pct_home", 0.5), errors="coerce").fillna(0.5)
+    df["ou_gap"]          = df["total_pred"] - pd.to_numeric(
+        df.get("market_ou_total", df.get("ou_total", 220)), errors="coerce"
+    ).fillna(220)
+
+    # ── Net rating ──
+    df["home_net_rtg"] = pd.to_numeric(df.get("home_net_rtg", 0), errors="coerce").fillna(0)
+    df["away_net_rtg"] = pd.to_numeric(df.get("away_net_rtg", 0), errors="coerce").fillna(0)
+    df["net_rtg_diff"] = df["home_net_rtg"] - df["away_net_rtg"]
+
+    # ── Raw stat differentials (from nbaSync 30+ columns) ──
+    for col_base, default in [
+        ("ppg", 110), ("opp_ppg", 110), ("fgpct", 0.46), ("threepct", 0.36),
+        ("ftpct", 0.77), ("assists", 25), ("turnovers", 14), ("tempo", 100),
+        ("orb_pct", 0.25), ("fta_rate", 0.28), ("ato_ratio", 1.7),
+        ("opp_fgpct", 0.46), ("opp_threepct", 0.35),
+        ("steals", 7.5), ("blocks", 5.0),
+    ]:
+        h_col = f"home_{col_base}"
+        a_col = f"away_{col_base}"
+        df[h_col] = pd.to_numeric(df.get(h_col, default), errors="coerce").fillna(default)
+        df[a_col] = pd.to_numeric(df.get(a_col, default), errors="coerce").fillna(default)
+        df[f"{col_base}_diff"] = df[h_col] - df[a_col]
+
+    # ── Win % differential ──
+    h_wins = pd.to_numeric(df.get("home_wins", 0), errors="coerce").fillna(0)
+    h_losses = pd.to_numeric(df.get("home_losses", 0), errors="coerce").fillna(0)
+    a_wins = pd.to_numeric(df.get("away_wins", 0), errors="coerce").fillna(0)
+    a_losses = pd.to_numeric(df.get("away_losses", 0), errors="coerce").fillna(0)
+    df["win_pct_diff"] = (h_wins / (h_wins + h_losses).clip(1)) - (a_wins / (a_wins + a_losses).clip(1))
+
+    # ── Form differential ──
+    df["form_diff"] = (
+        pd.to_numeric(df.get("home_form", 0), errors="coerce").fillna(0) -
+        pd.to_numeric(df.get("away_form", 0), errors="coerce").fillna(0)
+    )
+
+    # ── Tempo average ──
+    df["tempo_avg"] = (df["home_tempo"] + df["away_tempo"]) / 2
+
+    # ── Rest & travel ──
+    df["rest_diff"] = (
+        pd.to_numeric(df.get("home_days_rest", 2), errors="coerce").fillna(2) -
+        pd.to_numeric(df.get("away_days_rest", 2), errors="coerce").fillna(2)
+    )
+    df["away_travel"] = pd.to_numeric(df.get("away_travel_dist", 0), errors="coerce").fillna(0)
+
+    # ── Turnover quality ──
+    df["to_margin_diff"] = df["away_turnovers"] - df["home_turnovers"]
+    df["steals_to_h"] = df["home_steals"] / df["home_turnovers"].clip(0.5)
+    df["steals_to_a"] = df["away_steals"] / df["away_turnovers"].clip(0.5)
+    df["steals_to_diff"] = df["steals_to_h"] - df["steals_to_a"]
 
     feature_cols = [
-        "pred_home_score", "pred_away_score",
-        "home_net_rtg", "away_net_rtg",
-        "net_rtg_diff", "score_diff_pred",
-        "total_pred", "home_fav",
-        "win_pct_home", "ou_gap",
+        # Heuristic signal
+        "score_diff_pred", "win_pct_home", "ou_gap",
+        # Net rating (primary signal)
+        "net_rtg_diff",
+        # Offensive differentials
+        "ppg_diff", "fgpct_diff", "threepct_diff", "ftpct_diff",
+        # Four factors
+        "orb_pct_diff", "fta_rate_diff", "ato_ratio_diff",
+        # Defensive differentials
+        "opp_ppg_diff", "opp_fgpct_diff", "opp_threepct_diff",
+        "steals_diff", "blocks_diff",
+        # Turnover quality
+        "to_margin_diff", "steals_to_diff",
+        # Context
+        "win_pct_diff", "form_diff", "tempo_avg",
+        "rest_diff", "away_travel",
     ]
+
     return df[feature_cols].fillna(0)
 
 def train_nba():
-    rows = sb_get("nba_predictions",
-                  "result_entered=eq.true&actual_home_score=not.is.null&select=*")
-    if len(rows) < 10:
-        return {"error": "Not enough NBA data", "n": len(rows)}
+    """NBA model training — stacking ensemble with isotonic calibration."""
+    import traceback as _tb
+    try:
+        rows = sb_get("nba_predictions",
+                      "result_entered=eq.true&actual_home_score=not.is.null&select=*")
+        if not rows or len(rows) < 10:
+            return {"error": "Not enough NBA data", "n": len(rows) if rows else 0}
 
-    df = pd.DataFrame(rows)
-    X  = nba_build_features(df)
-    y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
-    y_win    = (y_margin > 0).astype(int)
+        df = pd.DataFrame(rows)
+        X  = nba_build_features(df)
+        y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
+        y_win    = (y_margin > 0).astype(int)
 
-    scaler   = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+        scaler   = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        n = len(df)
+        cv_folds = min(5, n)
 
-    reg = GradientBoostingRegressor(n_estimators=100, max_depth=3,
-                                     learning_rate=0.1, random_state=42)
-    reg.fit(X_scaled, y_margin)
-    reg_cv = cross_val_score(reg, X_scaled, y_margin,
-                              cv=min(5, len(df)), scoring="neg_mean_absolute_error")
+        if n >= 200:
+            # ── Stacking Ensemble (matches MLB/NCAA architecture) ──
+            gbm = GradientBoostingRegressor(
+                n_estimators=150, max_depth=4,
+                learning_rate=0.06, subsample=0.8,
+                min_samples_leaf=20, random_state=42,
+            )
+            rf_reg = RandomForestRegressor(
+                n_estimators=100, max_depth=6,
+                min_samples_leaf=15, max_features=0.7,
+                random_state=42, n_jobs=1,
+            )
+            ridge = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
 
-    clf = CalibratedClassifierCV(
-        LogisticRegression(max_iter=1000), cv=min(5, len(df))
-    )
-    clf.fit(X_scaled, y_win)
+            print("  NBA: Training stacking ensemble (GBM + RF + Ridge)...")
+            oof_gbm  = cross_val_predict(gbm, X_scaled, y_margin, cv=cv_folds)
+            oof_rf   = cross_val_predict(rf_reg, X_scaled, y_margin, cv=cv_folds)
+            oof_ridge = cross_val_predict(ridge, X_scaled, y_margin, cv=cv_folds)
 
-    explainer = shap.TreeExplainer(reg)
+            gbm.fit(X_scaled, y_margin)
+            rf_reg.fit(X_scaled, y_margin)
+            ridge.fit(X_scaled, y_margin)
 
-    bundle = {
-        "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
-        "feature_cols": list(X.columns), "n_train": len(df),
-        "mae_cv": float(-reg_cv.mean()),
-        "trained_at": datetime.utcnow().isoformat(),
-    }
-    save_model("nba", bundle)
-    return {"status": "trained", "n_train": len(df),
-            "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns)}
+            meta_X = np.column_stack([oof_gbm, oof_rf, oof_ridge])
+            meta_reg = Ridge(alpha=1.0)
+            meta_reg.fit(meta_X, y_margin)
+
+            reg = StackedRegressor([gbm, rf_reg, ridge], meta_reg, scaler)
+            reg_cv = cross_val_score(gbm, X_scaled, y_margin,
+                                      cv=cv_folds, scoring="neg_mean_absolute_error")
+            explainer = shap.TreeExplainer(gbm)
+            model_type = "StackedEnsemble(GBM+RF+Ridge)"
+
+            meta_weights = meta_reg.coef_.round(4).tolist()
+            print(f"  NBA meta weights [GBM, RF, Ridge]: {meta_weights}")
+
+            # ── Bias correction ──
+            oof_meta = meta_reg.predict(meta_X)
+            bias_correction = float(np.mean(oof_meta - y_margin.values))
+            print(f"  NBA bias correction: {bias_correction:+.3f} pts")
+
+            # ── Stacked classifier ──
+            gbm_clf = GradientBoostingClassifier(
+                n_estimators=100, max_depth=3,
+                learning_rate=0.06, subsample=0.8,
+                min_samples_leaf=20, random_state=42,
+            )
+            rf_clf = RandomForestClassifier(
+                n_estimators=100, max_depth=6,
+                min_samples_leaf=15, max_features=0.7,
+                random_state=42, n_jobs=1,
+            )
+            lr_clf = LogisticRegression(max_iter=1000, C=1.0)
+
+            oof_gbm_p = cross_val_predict(gbm_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+            oof_rf_p  = cross_val_predict(rf_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+            oof_lr_p  = cross_val_predict(lr_clf, X_scaled, y_win, cv=cv_folds, method="predict_proba")[:, 1]
+
+            gbm_clf.fit(X_scaled, y_win)
+            rf_clf.fit(X_scaled, y_win)
+            lr_clf.fit(X_scaled, y_win)
+
+            meta_clf_X = np.column_stack([oof_gbm_p, oof_rf_p, oof_lr_p])
+            meta_lr = LogisticRegression(max_iter=1000, C=1.0)
+            meta_lr.fit(meta_clf_X, y_win)
+            clf = StackedClassifier([gbm_clf, rf_clf, lr_clf], meta_lr)
+
+            # ── Isotonic calibration on OOF classifier probs ──
+            oof_stacked_probs = meta_lr.predict_proba(meta_clf_X)[:, 1]
+            isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+            isotonic.fit(oof_stacked_probs, y_win.values)
+            print(f"  NBA isotonic calibration fitted on {len(oof_stacked_probs)} OOF samples")
+
+        else:
+            # Simple models for small data
+            reg = GradientBoostingRegressor(n_estimators=100, max_depth=3,
+                                             learning_rate=0.1, random_state=42)
+            reg.fit(X_scaled, y_margin)
+            reg_cv = cross_val_score(reg, X_scaled, y_margin,
+                                      cv=min(5, n), scoring="neg_mean_absolute_error")
+            clf = CalibratedClassifierCV(
+                LogisticRegression(max_iter=1000), cv=min(5, n)
+            )
+            clf.fit(X_scaled, y_win)
+            explainer = shap.TreeExplainer(reg)
+            model_type = "GBM"
+            bias_correction = 0.0
+            isotonic = None
+            meta_weights = []
+
+        bundle = {
+            "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
+            "feature_cols": list(X.columns), "n_train": n,
+            "mae_cv": float(-reg_cv.mean()), "model_type": model_type,
+            "trained_at": datetime.utcnow().isoformat(),
+            "bias_correction": bias_correction,
+            "isotonic": isotonic,
+            "meta_weights": meta_weights if n >= 200 else [],
+        }
+        save_model("nba", bundle)
+        return {"status": "trained", "n_train": n, "model_type": model_type,
+                "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns),
+                "bias_correction": round(bias_correction, 3),
+                "meta_weights": meta_weights if n >= 200 else []}
+
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__,
+                "traceback": _tb.format_exc()}
 
 def predict_nba(game: dict):
     bundle = load_model("nba")
     if not bundle:
         return {"error": "NBA model not trained — call /train/nba first"}
 
-    row = pd.DataFrame([{
-        "pred_home_score":  game.get("pred_home_score", 110),
-        "pred_away_score":  game.get("pred_away_score", 110),
-        "home_net_rtg":     game.get("home_net_rtg", 0),
-        "away_net_rtg":     game.get("away_net_rtg", 0),
-        "net_rtg_diff":     game.get("home_net_rtg", 0) - game.get("away_net_rtg", 0),
-        "score_diff_pred":  game.get("pred_home_score", 110) - game.get("pred_away_score", 110),
-        "total_pred":       game.get("pred_home_score", 110) + game.get("pred_away_score", 110),
-        "home_fav":         1 if game.get("model_ml_home", 0) < 0 else 0,
-        "win_pct_home":     game.get("win_pct_home", 0.5),
-        "ou_gap":           (game.get("pred_home_score", 110) + game.get("pred_away_score", 110))
-                            - game.get("market_ou_total", game.get("ou_total", 220)),
-    }])
+    # Build a single-row DataFrame with all features the model might need
+    row = pd.DataFrame([game])
+    # Ensure all expected columns exist with defaults
+    for col in bundle["feature_cols"]:
+        if col not in row.columns:
+            row[col] = 0.0
 
-    X_s      = bundle["scaler"].transform(row[bundle["feature_cols"]])
+    X = nba_build_features(row)
+    X_s = bundle["scaler"].transform(X[bundle["feature_cols"]])
+
     margin   = float(bundle["reg"].predict(X_s)[0])
+
+    # Apply bias correction if available
+    bias = bundle.get("bias_correction", 0.0)
+    if bias:
+        margin -= bias
+
     win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
+
+    # Apply isotonic calibration if available
+    isotonic = bundle.get("isotonic")
+    if isotonic is not None:
+        try:
+            win_prob = float(isotonic.predict([win_prob])[0])
+        except Exception:
+            pass
+
     shap_vals = bundle["explainer"].shap_values(X_s)
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[0]
     shap_out = [
-        {"feature": f, "shap": round(float(v), 4), "value": round(float(row[f].iloc[0]), 3)}
+        {"feature": f, "shap": round(float(v), 4), "value": round(float(X[f].iloc[0]), 3)}
         for f, v in zip(bundle["feature_cols"], shap_vals[0])
     ]
     shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
@@ -905,8 +1072,10 @@ def predict_nba(game: dict):
         "ml_win_prob_home": round(win_prob, 4),
         "ml_win_prob_away": round(1 - win_prob, 4),
         "shap": shap_out,
-        "model_meta": {"n_train": bundle["n_train"], "mae_cv": bundle["mae_cv"],
-                       "trained_at": bundle["trained_at"]},
+        "model_meta": {"n_train": bundle.get("n_train"), "mae_cv": bundle.get("mae_cv"),
+                       "trained_at": bundle.get("trained_at"),
+                       "model_type": bundle.get("model_type", "unknown"),
+                       "has_isotonic": isotonic is not None},
     }
 
 # ═══════════════════════════════════════════════════════════════
@@ -2534,58 +2703,120 @@ def clv_diagnostic():
     results = {}
     for sport, (table, label) in SPORT_TABLES.items():
         try:
-            # Check for CLV columns
+            # First query with only guaranteed columns to get graded games
             rows = sb_get(table,
-                          "result_entered=eq.true&select=game_id,market_spread_home,"
-                          "market_ou_total,opening_spread_home,closing_spread_home,"
-                          "opening_ou_total,closing_ou_total,spread_home,ou_total,"
-                          "win_pct_home,ml_correct&limit=5000")
+                          "result_entered=eq.true&select=*&limit=5000")
             if not rows:
-                results[sport] = {"status": "no_graded_games"}
+                results[sport] = {"status": "no_graded_games", "n": 0}
                 continue
 
             df = pd.DataFrame(rows)
             n_total = len(df)
 
-            # Check which CLV columns exist and have data
-            clv_cols = {
-                "market_spread_home": 0, "opening_spread_home": 0,
-                "closing_spread_home": 0, "market_ou_total": 0,
-                "opening_ou_total": 0, "closing_ou_total": 0,
-            }
-            for col in clv_cols:
+            # Check which CLV-relevant columns actually exist in the data
+            clv_cols = {}
+            for col in ["market_spread_home", "opening_spread_home", "closing_spread_home",
+                        "market_ou_total", "opening_ou_total", "closing_ou_total",
+                        "spread_home", "ou_total", "win_pct_home", "ml_correct"]:
                 if col in df.columns:
-                    non_null = df[col].dropna()
-                    clv_cols[col] = len(non_null)
+                    non_null = pd.to_numeric(df[col], errors="coerce").dropna()
+                    clv_cols[col] = int(len(non_null))
+                else:
+                    clv_cols[col] = 0
 
-            # Compute spread CLV if we have both model and closing lines
+            # Basic ML accuracy from available data
+            ml_acc = None
+            if "ml_correct" in df.columns:
+                ml_vals = df["ml_correct"].dropna()
+                if len(ml_vals) > 0:
+                    ml_acc = round(float(ml_vals.astype(float).mean()), 4)
+
+            # Compute spread CLV if we have both model and market spreads
             spread_clv = None
-            if "closing_spread_home" in df.columns and "spread_home" in df.columns:
-                has_both = df.dropna(subset=["closing_spread_home", "spread_home"])
-                if len(has_both) >= 10:
-                    model_spread = pd.to_numeric(has_both["spread_home"], errors="coerce")
-                    closing_spread = pd.to_numeric(has_both["closing_spread_home"], errors="coerce")
-                    valid = model_spread.notna() & closing_spread.notna()
-                    if valid.sum() >= 10:
-                        # CLV = how much the line moved toward our prediction
-                        # Positive CLV = market moved our direction (good sign)
-                        clv_values = (closing_spread - model_spread).abs() - (has_both.loc[valid, "market_spread_home"].astype(float) - model_spread[valid]).abs()
-                        spread_clv = {
-                            "n_games": int(valid.sum()),
-                            "avg_clv": round(float(clv_values.mean()), 3),
-                            "positive_clv_pct": round(float((clv_values > 0).mean()), 3),
-                        }
+            if clv_cols.get("spread_home", 0) > 0 and clv_cols.get("market_spread_home", 0) > 0:
+                model_spread = pd.to_numeric(df["spread_home"], errors="coerce")
+                market_spread = pd.to_numeric(df["market_spread_home"], errors="coerce")
+                valid = model_spread.notna() & market_spread.notna()
+                if valid.sum() >= 10:
+                    # Spread CLV = how far the model's spread differs from market
+                    # If model says -5.0 and market says -3.0, model is getting +2 pts
+                    diff = (model_spread[valid] - market_spread[valid])
+                    actual_margin = None
+                    if "actual_home_score" in df.columns and "actual_away_score" in df.columns:
+                        actual_margin = (
+                            pd.to_numeric(df.loc[valid, "actual_home_score"], errors="coerce") -
+                            pd.to_numeric(df.loc[valid, "actual_away_score"], errors="coerce")
+                        )
+                    spread_clv = {
+                        "n_games_with_both": int(valid.sum()),
+                        "avg_model_spread": round(float(model_spread[valid].mean()), 2),
+                        "avg_market_spread": round(float(market_spread[valid].mean()), 2),
+                        "avg_diff": round(float(diff.mean()), 3),
+                        "model_closer_to_result_pct": None,
+                    }
+                    if actual_margin is not None:
+                        model_err = (model_spread[valid] - actual_margin).abs()
+                        market_err = (market_spread[valid] - actual_margin).abs()
+                        both_valid = model_err.notna() & market_err.notna()
+                        if both_valid.sum() >= 10:
+                            model_closer = (model_err[both_valid] < market_err[both_valid]).mean()
+                            spread_clv["model_closer_to_result_pct"] = round(float(model_closer), 4)
+                            spread_clv["model_mae"] = round(float(model_err[both_valid].mean()), 2)
+                            spread_clv["market_mae"] = round(float(market_err[both_valid].mean()), 2)
+
+            # O/U analysis
+            ou_comparison = None
+            if clv_cols.get("ou_total", 0) > 0 and clv_cols.get("market_ou_total", 0) > 0:
+                model_ou = pd.to_numeric(df["ou_total"], errors="coerce")
+                market_ou = pd.to_numeric(df["market_ou_total"], errors="coerce")
+                valid = model_ou.notna() & market_ou.notna()
+                if valid.sum() >= 10:
+                    actual_total = None
+                    # Try to compute actual total
+                    for h_col, a_col in [("actual_home_score", "actual_away_score"),
+                                         ("actual_home_runs", "actual_away_runs")]:
+                        if h_col in df.columns and a_col in df.columns:
+                            actual_total = (
+                                pd.to_numeric(df.loc[valid, h_col], errors="coerce") +
+                                pd.to_numeric(df.loc[valid, a_col], errors="coerce")
+                            )
+                            break
+                    ou_comparison = {
+                        "n_games": int(valid.sum()),
+                        "avg_model_total": round(float(model_ou[valid].mean()), 2),
+                        "avg_market_total": round(float(market_ou[valid].mean()), 2),
+                    }
+                    if actual_total is not None:
+                        model_ou_err = (model_ou[valid] - actual_total).abs()
+                        market_ou_err = (market_ou[valid] - actual_total).abs()
+                        both_valid = model_ou_err.notna() & market_ou_err.notna()
+                        if both_valid.sum() >= 10:
+                            ou_comparison["model_mae"] = round(float(model_ou_err[both_valid].mean()), 2)
+                            ou_comparison["market_mae"] = round(float(market_ou_err[both_valid].mean()), 2)
+                            ou_comparison["model_closer_pct"] = round(
+                                float((model_ou_err[both_valid] < market_ou_err[both_valid]).mean()), 4
+                            )
+
+            # Pipeline health determination
+            has_closing = clv_cols.get("closing_spread_home", 0) > 0
+            has_market = clv_cols.get("market_spread_home", 0) > 0
+            has_model = clv_cols.get("spread_home", 0) > 0
+            health = ("ACTIVE" if has_closing else
+                      "WIRED" if has_market and has_model else
+                      "PARTIAL" if has_market or has_model else
+                      "NOT_WIRED")
 
             results[sport] = {
                 "n_graded_games": n_total,
-                "clv_column_coverage": clv_cols,
-                "spread_clv_summary": spread_clv,
-                "pipeline_health": "ACTIVE" if clv_cols.get("closing_spread_home", 0) > 0 else
-                                   "PARTIAL" if clv_cols.get("market_spread_home", 0) > 0 else
-                                   "NOT_WIRED",
+                "ml_accuracy": ml_acc,
+                "column_coverage": {k: v for k, v in clv_cols.items() if k not in ("ml_correct",)},
+                "spread_analysis": spread_clv,
+                "ou_analysis": ou_comparison,
+                "pipeline_health": health,
             }
         except Exception as e:
-            results[sport] = {"error": str(e)}
+            import traceback as _tb
+            results[sport] = {"error": str(e), "traceback": _tb.format_exc()}
 
     return jsonify(results)
 
