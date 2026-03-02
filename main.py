@@ -3398,8 +3398,10 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
 
     # ── POST-CONVERGENCE: Bayesian shrinkage ──
     avg_games = sum(len(lookup[t]["game_log"]) for t in team_ids) / len(team_ids)
-    SHRINK = 0.60 + 0.35 * avg_games / (avg_games + 8)
-    SHRINK = max(0.70, min(0.92, SHRINK))
+    # Base 0.63 (recalibrated for recency + opponent-rank weighting which
+    # compresses distribution ~3 pts vs unweighted iteration)
+    SHRINK = 0.63 + 0.35 * avg_games / (avg_games + 8)
+    SHRINK = max(0.70, min(0.95, SHRINK))
     final_oe_vals = [adj_oe[t] for t in team_ids]
     final_de_vals = [adj_de[t] for t in team_ids]
     oe_avg = sum(final_oe_vals) / len(final_oe_vals)
