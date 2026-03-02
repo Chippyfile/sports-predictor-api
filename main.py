@@ -3330,17 +3330,17 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
     # because KenPom applies additional Bayesian priors (regression to mean
     # based on sample size, conference strength, etc.) that compress extremes.
     #
-    # Dynamic shrinkage based on average games played:
-    #   Early season (10 games): more noise → shrink=0.79 (compress more)
-    #   Mid season (20 games):   moderate   → shrink=0.85
-    #   Late season (29 games):  reliable   → shrink=0.87 (compress less)
-    #   Postseason (35 games):   very stable→ shrink=0.89
+    # Calibrated WITH HCA=1.0 adjustment active.
+    # HCA compresses raw EM, so less shrinkage needed vs no-HCA version.
     #
-    # Formula: shrink = 0.60 + 0.35 * avg_games / (avg_games + 8)
-    # Calibrated against KenPom 2025-26 at 29 games → 0.874 (MAE=0.9)
+    # Formula: shrink = 0.73 + 0.23 * avg_games / (avg_games + 8)
+    #   At 10 games: 0.858 (more compression — noisy early data)
+    #   At 20 games: 0.894
+    #   At 29 games: 0.910 (calibrated against KenPom 2025-26)
+    #   At 35 games: 0.917 (less compression — earned late-season data)
     avg_games = sum(len(lookup[t]["game_log"]) for t in team_ids) / len(team_ids)
-    SHRINK = 0.60 + 0.35 * avg_games / (avg_games + 8)
-    SHRINK = max(0.70, min(0.92, SHRINK))  # clamp to reasonable range
+    SHRINK = 0.73 + 0.23 * avg_games / (avg_games + 8)
+    SHRINK = max(0.80, min(0.95, SHRINK))  # clamp
     final_oe_vals = [adj_oe[t] for t in team_ids]
     final_de_vals = [adj_de[t] for t in team_ids]
     oe_avg = sum(final_oe_vals) / len(final_oe_vals)
