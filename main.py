@@ -3361,7 +3361,6 @@ def route_debug_ncaa_teams():
     results = {}
 
     # Test 1: Try fetching a known team (Duke = 150)
-    print("Debug: fetching Duke (150)...")
     duke_raw = _espn_cbb_get("teams/150")
     results["duke_raw_keys"] = list(duke_raw.keys()) if duke_raw else "FAILED"
     if duke_raw:
@@ -3369,48 +3368,82 @@ def route_debug_ncaa_teams():
         results["duke_name"] = team.get("displayName", team.get("name", "???"))
         results["duke_id"] = team.get("id", "???")
 
-    # Test 2: Try fetching Duke schedule
+    # Test 2: Duke schedule — inspect competitor structure
     duke_sched = _espn_cbb_get("teams/150/schedule")
     if duke_sched:
         events = duke_sched.get("events", [])
         completed = [e for e in events if e.get("competitions", [{}])[0].get("status", {}).get("type", {}).get("completed")]
-        results["duke_schedule_events"] = len(events)
-        results["duke_completed_games"] = len(completed)
+        results["duke_total_events"] = len(events)
+        results["duke_completed"] = len(completed)
+
+        # Inspect first completed game's structure
+        if completed:
+            first_comp = completed[0].get("competitions", [{}])[0]
+            competitors = first_comp.get("competitors", [])
+            results["first_game_n_competitors"] = len(competitors)
+            comp_details = []
+            for c in competitors:
+                detail = {
+                    "keys": list(c.keys()),
+                    "score": c.get("score"),
+                    "homeAway": c.get("homeAway"),
+                }
+                t = c.get("team", {})
+                if isinstance(t, dict):
+                    detail["team_id"] = t.get("id")
+                    detail["team_name"] = t.get("displayName", t.get("shortDisplayName", "???"))
+                    detail["team_keys"] = list(t.keys())[:8]
+                else:
+                    detail["team_raw"] = str(t)[:100]
+                comp_details.append(detail)
+            results["first_game_competitors"] = comp_details
+
+            # Try parsing with our logic
+            team_comp, opp_comp = None, None
+            for c in competitors:
+                cid = str(c.get("team", {}).get("id", ""))
+                if cid == "150":
+                    team_comp = c
+                else:
+                    opp_comp = c
+            results["first_game_duke_found"] = team_comp is not None
+            results["first_game_opp_found"] = opp_comp is not None
+            if team_comp:
+                results["first_game_duke_score"] = team_comp.get("score")
+                results["first_game_duke_score_type"] = type(team_comp.get("score")).__name__
+            if opp_comp:
+                results["first_game_opp_score"] = opp_comp.get("score")
+                results["first_game_opp_id"] = str(opp_comp.get("team", {}).get("id", ""))
     else:
         results["duke_schedule"] = "FAILED"
 
-    # Test 3: Try conference group fetch
-    for group in [2, 8, 50]:
-        data = _espn_cbb_get(f"teams?limit=10&groups={group}")
-        if data:
-            results[f"group_{group}_keys"] = list(data.keys())
-            if "sports" in data:
-                for sport in data["sports"]:
-                    for league in sport.get("leagues", []):
-                        teams = league.get("teams", [])
-                        results[f"group_{group}_team_count"] = len(teams)
-                        if teams:
-                            t = teams[0].get("team", teams[0])
-                            results[f"group_{group}_first_team"] = t.get("displayName", "???")
-            elif "teams" in data:
-                results[f"group_{group}_team_count"] = len(data["teams"])
-        else:
-            results[f"group_{group}"] = "FAILED"
+    # Test 3: Conference group
+    data = _espn_cbb_get("teams?limit=50&groups=50")
+    if data:
+        results["group50_keys"] = list(data.keys())
+        if "sports" in data:
+            for sport in data["sports"]:
+                for league in sport.get("leagues", []):
+                    teams = league.get("teams", [])
+                    results["group50_count"] = len(teams)
+        elif "teams" in data:
+            results["group50_count"] = len(data["teams"])
 
-    # Test 4: Scoreboard
-    dt = (datetime.utcnow() - timedelta(days=1)).strftime("%Y%m%d")
-    sb = _espn_cbb_get(f"scoreboard?dates={dt}&limit=50")
-    if sb:
-        results["scoreboard_events"] = len(sb.get("events", []))
-    else:
-        results["scoreboard"] = "FAILED"
+    # Test 4: Try page param
+    data2 = _espn_cbb_get("teams?limit=50&groups=50&page=1")
+    if data2:
+        if "sports" in data2:
+            for sport in data2["sports"]:
+                for league in sport.get("leagues", []):
+                    results["group50_page1_count"] = len(league.get("teams", []))
 
-    # Test 5: Full team data for Duke
+    # Test 5: Full data fetch
     duke_full = _fetch_team_data_for_ratings("150")
     if duke_full:
         results["duke_full_ppg"] = duke_full["ppg"]
-        results["duke_full_tempo"] = duke_full["tempo"]
         results["duke_full_games"] = len(duke_full["game_log"])
+        if duke_full["game_log"]:
+            results["duke_first_game"] = duke_full["game_log"][0]
     else:
         results["duke_full"] = "FAILED"
 
