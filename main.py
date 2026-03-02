@@ -255,9 +255,10 @@ SEASON_CONSTANTS = {
     2022: {"lg_woba": 0.310, "woba_scale": 1.24, "lg_rpg": 4.28, "lg_fip": 4.01, "pa_pg": 37.6},
     2023: {"lg_woba": 0.318, "woba_scale": 1.21, "lg_rpg": 4.62, "lg_fip": 4.33, "pa_pg": 37.8},
     2024: {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8},
-    2025: {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8},
+    2025: {"lg_woba": 0.315, "woba_scale": 1.24, "lg_rpg": 4.30, "lg_fip": 4.10, "pa_pg": 37.8},
+    2026: {"lg_woba": 0.315, "woba_scale": 1.24, "lg_rpg": 4.30, "lg_fip": 4.10, "pa_pg": 37.8},
 }
-DEFAULT_CONSTANTS = {"lg_woba": 0.317, "woba_scale": 1.25, "lg_rpg": 4.38, "lg_fip": 4.17, "pa_pg": 37.8}
+DEFAULT_CONSTANTS = {"lg_woba": 0.315, "woba_scale": 1.24, "lg_rpg": 4.30, "lg_fip": 4.10, "pa_pg": 37.8}
 
 FIP_COEFF = 0.55
 HFA_RUNS = 0.16   # ~0.32 run total home advantage, split between offense/pitching
@@ -368,7 +369,7 @@ def mlb_build_features(df):
     else:
         df["lg_rpg"] = DEFAULT_CONSTANTS["lg_rpg"]
 
-    # ── Heuristic outputs (only from mlb_predictions rows, 0 for historical) ──
+    # ── Heuristic outputs (backfilled for historical, live for current season) ──
     for col, default in [("pred_home_runs", 0.0), ("pred_away_runs", 0.0),
                          ("win_pct_home", 0.5), ("ou_total", 9.0),
                          ("model_ml_home", 0)]:
@@ -413,7 +414,7 @@ def mlb_build_features(df):
         "lg_rpg",
         # Interaction features (Finding ML2)
         "fip_x_bullpen", "woba_x_park", "wind_x_fip",
-        # Heuristic signal (sparse — 0 for 95% of training data)
+        # Heuristic signal (now backfilled for all rows)
         "run_diff_pred", "has_heuristic",
     ]
 
@@ -448,18 +449,18 @@ def _mlb_merge_historical(current_df):
         if col in hist_df.columns:
             hist_df[col] = pd.to_numeric(hist_df[col], errors="coerce")
 
-    # Historical rows have no heuristic predictions — zero them out explicitly
-    # so has_heuristic=0 correctly flags them in the feature matrix.
-    #
-    # CRITICAL FIX (Finding #10): win_pct_home was previously set to home_win
-    # (1.0 if home won, 0.0 if lost) — this leaked the target variable directly
-    # into the feature matrix. Historical rows had no pre-game prediction, so
-    # the correct neutral value is 0.5 (no information).
-    hist_df["pred_home_runs"] = 0.0
-    hist_df["pred_away_runs"] = 0.0
-    hist_df["win_pct_home"]   = 0.5   # was: hist_df["home_win"].fillna(0.5) — DATA LEAK
-    hist_df["ou_total"]       = 0.0
-    hist_df["model_ml_home"]  = 0
+    # ── Heuristic backfill: compute real pre-game predictions ──
+    # Instead of win_pct_home=0.5, run the Python heuristic engine on each
+    # historical row. This gives the ML model realistic heuristic signal
+    # (run projections, win probabilities) for training, matching what the
+    # live JS engine produces for current-season games.
+    # Uses season-specific FanGraphs constants and date-aware leak regression.
+    print("  Backfilling heuristic predictions on historical rows...")
+    hist_df = backfill_heuristic(hist_df)
+    wp_std = hist_df["win_pct_home"].std()
+    print(f"  MLB heuristic backfill: {len(hist_df)} rows | "
+          f"win_pct std={wp_std:.3f}, range=[{hist_df['win_pct_home'].min():.3f}, "
+          f"{hist_df['win_pct_home'].max():.3f}]")
 
     # Combine
     combined = pd.concat([hist_df, current_df], ignore_index=True)
@@ -2340,6 +2341,254 @@ def route_model_info(sport):
         info["dispersion"] = load_model("mlb_dispersion")
     return jsonify(info)
 
+
+# ═══════════════════════════════════════════════════════════════
+# NBA CONFIDENCE & CALIBRATION DIAGNOSTICS
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/backtest/nba-confidence")
+def nba_confidence_calibration():
+    """NBA confidence/calibration analysis — mirrors NCAA version."""
+    rows = sb_get("nba_predictions",
+                  "result_entered=eq.true&actual_home_score=not.is.null&ml_correct=not.is.null"
+                  "&select=*&order=game_date.asc")
+    if not rows or len(rows) < 50:
+        return jsonify({"error": "Need 50+ graded NBA games", "n": len(rows) if rows else 0})
+
+    df = pd.DataFrame(rows)
+    df["win_pct_home"] = pd.to_numeric(df["win_pct_home"], errors="coerce").fillna(0.5)
+    df["ml_correct"] = df["ml_correct"].astype(bool)
+    df["confidence"] = df["confidence"].fillna("MEDIUM")
+
+    # Accuracy by confidence tier
+    tier_results = {}
+    for tier in ["LOW", "MEDIUM", "HIGH"]:
+        subset = df[df["confidence"] == tier]
+        if len(subset) > 0:
+            tier_results[tier] = {
+                "n_games": len(subset),
+                "accuracy": round(float(subset["ml_correct"].mean()), 4),
+                "avg_win_pct_margin": round(float(
+                    (subset["win_pct_home"].clip(0.5, 1.0) - 0.5).mean()
+                ), 4),
+            }
+
+    # Accuracy by win probability margin decile
+    df["conf_margin"] = (df["win_pct_home"] - 0.5).abs()
+    decile_results = []
+    thresholds = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50]
+    for j in range(len(thresholds) - 1):
+        lo, hi = thresholds[j], thresholds[j + 1]
+        subset = df[(df["conf_margin"] >= lo) & (df["conf_margin"] < hi)]
+        if len(subset) >= 5:
+            decile_results.append({
+                "margin_range": f"{lo:.2f}-{hi:.2f}",
+                "n_games": len(subset),
+                "accuracy": round(float(subset["ml_correct"].mean()), 4),
+                "expected_accuracy": round(0.5 + (lo + hi) / 2, 4),
+            })
+
+    # Cumulative: "If I only bet on games with margin >= X, what accuracy?"
+    cumulative = []
+    for threshold in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]:
+        subset = df[df["conf_margin"] >= threshold]
+        if len(subset) >= 5:
+            cumulative.append({
+                "min_margin": threshold,
+                "n_games": len(subset),
+                "accuracy": round(float(subset["ml_correct"].mean()), 4),
+                "pct_of_total": round(len(subset) / len(df), 4),
+            })
+
+    # Brier score
+    brier_overall = round(float(np.mean(
+        (df["win_pct_home"].clip(0.5, 0.97) - df["ml_correct"].astype(float)) ** 2
+    )), 4)
+
+    # Suggested thresholds
+    suggested_medium = suggested_high = None
+    for row in cumulative:
+        if row["accuracy"] >= 0.55 and suggested_medium is None:
+            suggested_medium = row["min_margin"]
+        if row["accuracy"] >= 0.65 and suggested_high is None:
+            suggested_high = row["min_margin"]
+
+    return jsonify({
+        "total_games": len(df),
+        "overall_accuracy": round(float(df["ml_correct"].mean()), 4),
+        "brier_score": brier_overall,
+        "by_tier": tier_results,
+        "by_margin_decile": decile_results,
+        "cumulative_threshold": cumulative,
+        "suggested_thresholds": {
+            "MEDIUM_min_margin": suggested_medium,
+            "HIGH_min_margin": suggested_high,
+        },
+    })
+
+
+@app.route("/debug/nba-calibration")
+def nba_calibration_diagnostic():
+    """NBA calibration deep dive — isotonic mapping and refit potential."""
+    rows = sb_get("nba_predictions",
+                  "result_entered=eq.true&actual_home_score=not.is.null"
+                  "&select=win_pct_home,ml_correct,confidence,actual_home_score,actual_away_score")
+    if not rows or len(rows) < 50:
+        return jsonify({"error": "Need 50+ graded NBA games", "n": len(rows) if rows else 0})
+
+    df = pd.DataFrame(rows)
+    df["win_pct_home"] = pd.to_numeric(df["win_pct_home"], errors="coerce").fillna(0.5)
+    df["actual_home_score"] = pd.to_numeric(df["actual_home_score"], errors="coerce")
+    df["actual_away_score"] = pd.to_numeric(df["actual_away_score"], errors="coerce")
+    df["home_win"] = (df["actual_home_score"] > df["actual_away_score"]).astype(int)
+    df["conf_margin"] = (df["win_pct_home"] - 0.5).abs()
+    df["ml_correct"] = df["ml_correct"].astype(bool)
+
+    # Calibration by confidence margin decile
+    thresholds = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50]
+    cal_deciles = []
+    for j in range(len(thresholds) - 1):
+        lo, hi = thresholds[j], thresholds[j + 1]
+        subset = df[(df["conf_margin"] >= lo) & (df["conf_margin"] < hi)]
+        if len(subset) >= 5:
+            actual_acc = float(subset["ml_correct"].mean())
+            expected_acc = 0.5 + (lo + hi) / 2
+            gap = actual_acc - expected_acc
+            cal_deciles.append({
+                "margin_range": f"{lo:.2f}-{hi:.2f}",
+                "n_games": len(subset),
+                "actual_accuracy": round(actual_acc, 4),
+                "expected_accuracy": round(expected_acc, 4),
+                "gap": round(gap, 4),
+                "miscalibrated": abs(gap) > 0.10,
+            })
+
+    # Current isotonic mapping
+    bundle = load_model("nba")
+    iso_info = {"status": "not_loaded"}
+    if bundle:
+        isotonic = bundle.get("isotonic")
+        if isotonic is not None:
+            try:
+                test_probs = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85]
+                mapped = isotonic.predict(test_probs)
+                iso_info = {
+                    "status": "fitted",
+                    "mapping": {f"{p:.2f}": round(float(m), 4) for p, m in zip(test_probs, mapped)},
+                }
+            except Exception:
+                iso_info = {"status": "fitted_but_error"}
+        else:
+            iso_info = {"status": "null"}
+
+    # Refit potential
+    refit_info = {}
+    if len(df) >= 50:
+        from sklearn.isotonic import IsotonicRegression as IR
+        refit_iso = IR(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+        refit_iso.fit(df["win_pct_home"].values, df["home_win"].values)
+        test_probs = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85]
+        mapped = refit_iso.predict(test_probs)
+        refit_info = {
+            "mapping": {f"{p:.2f}": round(float(m), 4) for p, m in zip(test_probs, mapped)},
+            "n_samples": len(df),
+        }
+
+    # Brier
+    brier = round(float(np.mean(
+        (df["win_pct_home"].clip(0.5, 0.97) - df["ml_correct"].astype(float)) ** 2
+    )), 4)
+
+    # Recommendations
+    recs = []
+    for d in cal_deciles:
+        if d["miscalibrated"]:
+            direction = "OVERCONFIDENT" if d["gap"] < 0 else "UNDERCONFIDENT"
+            recs.append(
+                f"Margin {d['margin_range']}: Model is {direction} "
+                f"(actual {d['actual_accuracy']:.1%} vs expected {d['expected_accuracy']:.1%})."
+            )
+
+    return jsonify({
+        "n_graded_games": len(df),
+        "overall_accuracy": round(float(df["ml_correct"].mean()), 4),
+        "brier_score": brier,
+        "calibration_by_decile": cal_deciles,
+        "current_isotonic": iso_info,
+        "refit_potential": refit_info,
+        "recommendations": recs,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
+# CLV (CLOSING LINE VALUE) DIAGNOSTICS
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/debug/clv")
+def clv_diagnostic():
+    """
+    Check CLV tracking pipeline health across all sports.
+    Reports how many games have opening/closing lines captured,
+    and basic CLV statistics for validated predictions.
+    """
+    results = {}
+    for sport, (table, label) in SPORT_TABLES.items():
+        try:
+            # Check for CLV columns
+            rows = sb_get(table,
+                          "result_entered=eq.true&select=game_id,market_spread_home,"
+                          "market_ou_total,opening_spread_home,closing_spread_home,"
+                          "opening_ou_total,closing_ou_total,spread_home,ou_total,"
+                          "win_pct_home,ml_correct&limit=5000")
+            if not rows:
+                results[sport] = {"status": "no_graded_games"}
+                continue
+
+            df = pd.DataFrame(rows)
+            n_total = len(df)
+
+            # Check which CLV columns exist and have data
+            clv_cols = {
+                "market_spread_home": 0, "opening_spread_home": 0,
+                "closing_spread_home": 0, "market_ou_total": 0,
+                "opening_ou_total": 0, "closing_ou_total": 0,
+            }
+            for col in clv_cols:
+                if col in df.columns:
+                    non_null = df[col].dropna()
+                    clv_cols[col] = len(non_null)
+
+            # Compute spread CLV if we have both model and closing lines
+            spread_clv = None
+            if "closing_spread_home" in df.columns and "spread_home" in df.columns:
+                has_both = df.dropna(subset=["closing_spread_home", "spread_home"])
+                if len(has_both) >= 10:
+                    model_spread = pd.to_numeric(has_both["spread_home"], errors="coerce")
+                    closing_spread = pd.to_numeric(has_both["closing_spread_home"], errors="coerce")
+                    valid = model_spread.notna() & closing_spread.notna()
+                    if valid.sum() >= 10:
+                        # CLV = how much the line moved toward our prediction
+                        # Positive CLV = market moved our direction (good sign)
+                        clv_values = (closing_spread - model_spread).abs() - (has_both.loc[valid, "market_spread_home"].astype(float) - model_spread[valid]).abs()
+                        spread_clv = {
+                            "n_games": int(valid.sum()),
+                            "avg_clv": round(float(clv_values.mean()), 3),
+                            "positive_clv_pct": round(float((clv_values > 0).mean()), 3),
+                        }
+
+            results[sport] = {
+                "n_graded_games": n_total,
+                "clv_column_coverage": clv_cols,
+                "spread_clv_summary": spread_clv,
+                "pipeline_health": "ACTIVE" if clv_cols.get("closing_spread_home", 0) > 0 else
+                                   "PARTIAL" if clv_cols.get("market_spread_home", 0) > 0 else
+                                   "NOT_WIRED",
+            }
+        except Exception as e:
+            results[sport] = {"error": str(e)}
+
+    return jsonify(results)
+
 # ══════════════════════════════════════════════════════════════════
 # PYTHON-SIDE HEURISTIC REPLAY (mirrors mlb.js logic)
 # Uses columns that ACTUALLY EXIST in mlb_historical:
@@ -2524,7 +2773,7 @@ def backfill_heuristic(df):
 # MLB BACKTESTING
 # ══════════════════════════════════════════════════════════════════
 
-@app.route("/backtest/mlb", methods=["POST"])
+@app.route("/backtest/mlb", methods=["GET", "POST"])
 def route_backtest_mlb():
     """
     Walk-forward backtest with heuristic backfill.
