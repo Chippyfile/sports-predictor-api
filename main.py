@@ -1163,6 +1163,155 @@ def _flush_ncaa_batch(rows):
         print(f"  UPSERT exception: {e}")
 
 
+def _ncaa_backfill_heuristic(df):
+    """
+    Replay a simplified ncaaUtils.js heuristic on historical rows.
+    Uses columns available from ncaa_historical enrichment:
+      home_adj_em, away_adj_em, home_ppg, away_ppg, home_opp_ppg, away_opp_ppg,
+      home_tempo, away_tempo, home_record_wins/losses, away_record_wins/losses,
+      home_rank, away_rank, neutral_site, home_conference, away_conference, game_date.
+
+    Mirrors the core ncaaPredictGame logic:
+      1. adjEM-based projected spread (KenPom additive formula)
+      2. Conference-aware HCA (neutral-site detection)
+      3. Win pct via logistic(spread / sigma)
+      4. Score projection from tempo × efficiency
+      5. Rank boost, record-based form, postseason context
+    """
+    df = df.copy()
+
+    # Conference ID → HCA mapping (ESPN conference IDs → HCA points)
+    # These are the conference IDs from ESPN's API
+    CONF_ID_HCA = {
+        "8": 3.8,   # Big 12
+        "23": 3.7,  # SEC
+        "7": 3.6,   # Big Ten
+        "2": 3.4,   # ACC
+        "4": 3.3,   # Big East
+        "21": 3.0,  # Pac-12
+        "44": 3.2,  # Mountain West
+        "62": 3.0,  # AAC
+        "26": 2.8,  # WCC
+        "3": 2.7,   # A-10
+        "18": 2.9,  # MVC
+        "40": 2.6,  # Sun Belt
+        "12": 2.8,  # MAC
+        "10": 2.5,  # CAA
+        "22": 2.3,  # Ivy
+    }
+    DEFAULT_HCA = 3.0
+    SIGMA = 16.0  # matches live system calibration
+
+    h_em = df["home_adj_em"].fillna(0).values
+    a_em = df["away_adj_em"].fillna(0).values
+    h_ppg = df["home_ppg"].fillna(70).values
+    a_ppg = df["away_ppg"].fillna(70).values
+    h_opp = df["home_opp_ppg"].fillna(70).values
+    a_opp = df["away_opp_ppg"].fillna(70).values
+    h_tempo = df["home_tempo"].fillna(68).values
+    a_tempo = df["away_tempo"].fillna(68).values
+    neutral = df["neutral_site"].fillna(False).values
+    h_conf = df["home_conference"].fillna("").astype(str).values
+    h_rank = df["home_rank"].fillna(200).values
+    a_rank = df["away_rank"].fillna(200).values
+    h_wins = df["home_record_wins"].fillna(0).values
+    h_losses = df["home_record_losses"].fillna(0).values
+    a_wins = df["away_record_wins"].fillna(0).values
+    a_losses = df["away_record_losses"].fillna(0).values
+
+    # Check if postseason column exists
+    is_post = df["is_postseason"].fillna(0).values if "is_postseason" in df.columns else np.zeros(len(df))
+
+    n = len(df)
+    pred_home_score = np.zeros(n)
+    pred_away_score = np.zeros(n)
+    win_pct_home = np.full(n, 0.5)
+    spread_home = np.zeros(n)
+
+    for i in range(n):
+        # ── 1. Efficiency-based projected scores ──
+        # KenPom additive: homeOE + awayDE - lgAvg
+        # If we don't have adj_oe/adj_de separately, derive from ppg/opp_ppg
+        possessions = (h_tempo[i] + a_tempo[i]) / 2
+        lg_avg = 70.0  # approximate NCAA scoring avg
+
+        # Simplified KenPom path using available data
+        home_oe = h_ppg[i] if h_ppg[i] > 0 else lg_avg
+        away_oe = a_ppg[i] if a_ppg[i] > 0 else lg_avg
+        home_de = h_opp[i] if h_opp[i] > 0 else lg_avg
+        away_de = a_opp[i] if a_opp[i] > 0 else lg_avg
+
+        # Score projection: (teamOE + oppDE) / 2, scaled by tempo
+        tempo_ratio = possessions / 68.0  # vs avg tempo
+        hs = ((home_oe + away_de) / 2) * tempo_ratio
+        asc = ((away_oe + home_de) / 2) * tempo_ratio
+
+        # ── 2. Home court advantage ──
+        if not neutral[i]:
+            hca = CONF_ID_HCA.get(str(h_conf[i]).strip(), DEFAULT_HCA)
+            hs += hca / 2
+            asc -= hca / 2
+
+        # ── 3. Rank boost (exponential, matches JS) ──
+        def rank_boost(rank):
+            return max(0, 1.2 * np.exp(-rank / 15)) if rank <= 50 else 0
+        hs += rank_boost(h_rank[i]) * 0.3
+        asc += rank_boost(a_rank[i]) * 0.3
+
+        # ── 4. Record-based form signal ──
+        h_games = h_wins[i] + h_losses[i]
+        a_games = a_wins[i] + a_losses[i]
+        if h_games >= 3:
+            h_wp = h_wins[i] / h_games
+            hs += (h_wp - 0.5) * 2.0  # ~2 pts swing for strong vs weak record
+        if a_games >= 3:
+            a_wp = a_wins[i] / a_games
+            asc += (a_wp - 0.5) * 2.0
+
+        # ── 5. Postseason / NCAA tournament compression ──
+        # Tournament games are closer (neutral site + high stakes = less blowouts)
+        if is_post[i]:
+            mid = (hs + asc) / 2
+            hs = mid + (hs - mid) * 0.90
+            asc = mid + (asc - mid) * 0.90
+
+        # ── 6. Safety clamp ──
+        hs = max(35, min(130, hs))
+        asc = max(35, min(130, asc))
+
+        # ── 7. Spread and win probability ──
+        spread = hs - asc
+        wp = 1.0 / (1.0 + 10.0 ** (-spread / SIGMA))
+        wp = max(0.03, min(0.97, wp))
+
+        pred_home_score[i] = round(hs, 1)
+        pred_away_score[i] = round(asc, 1)
+        win_pct_home[i] = round(wp, 4)
+        spread_home[i] = round(spread, 1)
+
+    df["pred_home_score"] = pred_home_score
+    df["pred_away_score"] = pred_away_score
+    df["win_pct_home"] = win_pct_home
+    df["spread_home"] = spread_home
+    df["ou_total"] = pred_home_score + pred_away_score
+    # Derive moneyline from win probability (matches JS formula)
+    df["model_ml_home"] = [
+        int(-round((wp / (1 - wp)) * 100)) if wp >= 0.5
+        else int(round(((1 - wp) / wp) * 100))
+        for wp in win_pct_home
+    ]
+
+    # Stats: how much differentiation did we get?
+    wp_std = np.std(win_pct_home)
+    wp_range = np.max(win_pct_home) - np.min(win_pct_home)
+    non_neutral = (win_pct_home != 0.5).sum()
+    print(f"  NCAA heuristic backfill: {n} rows | "
+          f"win_pct std={wp_std:.3f}, range=[{np.min(win_pct_home):.3f}, {np.max(win_pct_home):.3f}] | "
+          f"{non_neutral}/{n} have non-neutral predictions")
+
+    return df
+
+
 def _ncaa_merge_historical(current_df):
     """
     Fetch ncaa_historical (multi-season) and combine with current season
@@ -1193,12 +1342,63 @@ def _ncaa_merge_historical(current_df):
         if col in hist_df.columns:
             hist_df[col] = pd.to_numeric(hist_df[col], errors="coerce")
 
-    # Historical rows have no heuristic predictions - zero them out
-    hist_df["pred_home_score"] = 0.0
-    hist_df["pred_away_score"] = 0.0
-    hist_df["win_pct_home"] = 0.5  # No pre-game prediction available
-    hist_df["spread_home"] = 0.0
-    hist_df["ou_total"] = 0.0
+    # ── Heuristic backfill: replicate ncaaUtils.js prediction logic ──
+    # Instead of win_pct_home=0.5, compute real pre-game predictions from
+    # the enriched columns so the ML model trains on realistic signal.
+    hist_df = _ncaa_backfill_heuristic(hist_df)
+
+    # ── Column name alignment ──
+    # ncaa_historical uses home_record_wins/losses, feature builder expects home_wins/losses
+    if "home_record_wins" in hist_df.columns and "home_wins" not in hist_df.columns:
+        hist_df["home_wins"] = hist_df["home_record_wins"]
+    if "away_record_wins" in hist_df.columns and "away_wins" not in hist_df.columns:
+        hist_df["away_wins"] = hist_df["away_record_wins"]
+    if "home_record_losses" in hist_df.columns and "home_losses" not in hist_df.columns:
+        hist_df["home_losses"] = hist_df["home_record_losses"]
+    if "away_record_losses" in hist_df.columns and "away_losses" not in hist_df.columns:
+        hist_df["away_losses"] = hist_df["away_record_losses"]
+
+    # Default missing stat columns to neutral values so fillna(0) works correctly
+    # in ncaa_build_features. These columns exist in live predictions but not historical.
+    for col, default in [
+        ("home_fgpct", 0.44), ("away_fgpct", 0.44),
+        ("home_threepct", 0.34), ("away_threepct", 0.34),
+        ("home_orb_pct", 0.28), ("away_orb_pct", 0.28),
+        ("home_fta_rate", 0.34), ("away_fta_rate", 0.34),
+        ("home_ato_ratio", 1.2), ("away_ato_ratio", 1.2),
+        ("home_opp_fgpct", 0.44), ("away_opp_fgpct", 0.44),
+        ("home_opp_threepct", 0.33), ("away_opp_threepct", 0.33),
+        ("home_steals", 7.0), ("away_steals", 7.0),
+        ("home_blocks", 3.5), ("away_blocks", 3.5),
+        ("home_turnovers", 12.0), ("away_turnovers", 12.0),
+        ("home_sos", 0.0), ("away_sos", 0.0),
+        ("home_form", 0.0), ("away_form", 0.0),
+        ("home_rest_days", 3), ("away_rest_days", 3),
+    ]:
+        if col not in hist_df.columns:
+            hist_df[col] = default
+
+    # ── Tournament context from is_postseason flag ──
+    if "is_postseason" in hist_df.columns:
+        hist_df["is_ncaa_tournament"] = hist_df["is_postseason"].fillna(0).astype(int)
+    if "is_conference_tournament" not in hist_df.columns:
+        hist_df["is_conference_tournament"] = 0
+    if "is_bubble_game" not in hist_df.columns:
+        hist_df["is_bubble_game"] = 0
+    if "is_early_season" not in hist_df.columns:
+        # Early season = November games
+        if "game_date" in hist_df.columns:
+            gd = pd.to_datetime(hist_df["game_date"], errors="coerce")
+            hist_df["is_early_season"] = (gd.dt.month.isin([11, 12]) & (gd.dt.day <= 15)).astype(int)
+        else:
+            hist_df["is_early_season"] = 0
+    if "importance_multiplier" not in hist_df.columns:
+        hist_df["importance_multiplier"] = 1.0
+    # Injury columns (not available for historical)
+    for inj_col in ["injury_diff", "home_missing_starters", "away_missing_starters",
+                     "home_injury_penalty", "away_injury_penalty"]:
+        if inj_col not in hist_df.columns:
+            hist_df[inj_col] = 0
 
     if "home_team" not in hist_df.columns and "home_team_abbr" in hist_df.columns:
         hist_df["home_team"] = hist_df["home_team_abbr"]
