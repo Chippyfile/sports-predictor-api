@@ -1910,15 +1910,44 @@ def _histogram(arr, bins=20):
 def accuracy_report(sport_table, sport_label):
     rows = sb_get(sport_table,
                   "result_entered=eq.true&ml_correct=not.is.null"
-                  "&select=ml_correct,rl_correct,ou_correct,win_pct_home")
+                  "&select=ml_correct,rl_correct,ou_correct,win_pct_home,"
+                  "pred_home_runs,pred_away_runs,pred_home_score,pred_away_score,"
+                  "actual_home_runs,actual_away_runs,actual_home_score,actual_away_score,"
+                  "ou_total,market_ou_total")
     if not rows:
         return {"error": f"No completed {sport_label} games found"}
 
     df = pd.DataFrame(rows)
     ml_acc = df["ml_correct"].mean() if "ml_correct" in df else None
     rl_acc = df["rl_correct"].mean() if "rl_correct" in df else None
-    ou_df  = df[df["ou_correct"].notna()] if "ou_correct" in df else pd.DataFrame()
-    ou_acc = (ou_df["ou_correct"].isin(["OVER", "UNDER"])).mean() if len(ou_df) > 0 else None
+
+    # ── O/U accuracy: Compare model's predicted total vs actual total vs line ──
+    # FIX: Previous code just checked if ou_correct was "OVER"/"UNDER" (= not a push),
+    # which always showed ~99%. Now we properly check if model predicted the right direction.
+    ou_acc = None
+    ou_n = 0
+    # Determine actual and predicted score columns based on sport
+    act_h_col = "actual_home_runs" if "actual_home_runs" in df.columns else "actual_home_score"
+    act_a_col = "actual_away_runs" if "actual_away_runs" in df.columns else "actual_away_score"
+    pred_h_col = "pred_home_runs" if "pred_home_runs" in df.columns else "pred_home_score"
+    pred_a_col = "pred_away_runs" if "pred_away_runs" in df.columns else "pred_away_score"
+
+    if all(c in df.columns for c in [act_h_col, act_a_col, pred_h_col, pred_a_col]):
+        ou_line = df["market_ou_total"].fillna(df.get("ou_total", pd.Series(dtype=float)))
+        actual_total = pd.to_numeric(df[act_h_col], errors="coerce") + \
+                       pd.to_numeric(df[act_a_col], errors="coerce")
+        pred_total = pd.to_numeric(df[pred_h_col], errors="coerce") + \
+                     pd.to_numeric(df[pred_a_col], errors="coerce")
+
+        # Valid rows: have a line, actual total isn't exactly equal to line (not a push)
+        valid = ou_line.notna() & actual_total.notna() & pred_total.notna() & \
+                (actual_total != ou_line)
+        if valid.sum() > 0:
+            # Model predicted over if pred_total > line, under if pred_total < line
+            model_over = pred_total[valid] > ou_line[valid]
+            actual_over = actual_total[valid] > ou_line[valid]
+            ou_acc = float((model_over == actual_over).mean())
+            ou_n = int(valid.sum())
 
     # Brier score on win probability (calibration quality)
     brier = None
@@ -1936,6 +1965,7 @@ def accuracy_report(sport_table, sport_label):
         "ml_accuracy": round(float(ml_acc), 4) if ml_acc is not None else None,
         "rl_accuracy": round(float(rl_acc), 4) if rl_acc is not None else None,
         "ou_accuracy": round(float(ou_acc), 4) if ou_acc is not None else None,
+        "ou_n_games":  ou_n,
         "brier_score": brier,
         "brier_note":  "Lower is better. Random = 0.25. Perfect calibration approaches 0.",
     }
@@ -3727,6 +3757,77 @@ def route_compute_ncaa_efficiency():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
+@app.route("/debug/mlb-xwoba")
+def route_debug_mlb_xwoba():
+    """
+    Diagnostic: Check whether xwOBA (Statcast) data is flowing into predictions.
+    
+    Examines recent MLB prediction rows to determine:
+    1. How many rows have home_woba populated
+    2. Distribution of wOBA values (real xwOBA clusters ~0.280-0.380, 
+       OBP/SLG approximation clusters tighter around 0.310-0.330)
+    3. Whether values show real team differentiation or are all ~0.314 (default)
+    """
+    rows = sb_get(
+        "mlb_predictions",
+        "home_woba=not.is.null&select=game_date,home_team,away_team,"
+        "home_woba,away_woba,home_sp_fip,away_sp_fip,"
+        "park_factor,temp_f,wind_mph"
+        "&order=game_date.desc&limit=100"
+    )
+    if not rows:
+        return jsonify({"error": "No MLB predictions with wOBA data found"})
+
+    df = pd.DataFrame(rows)
+    hw = pd.to_numeric(df["home_woba"], errors="coerce").dropna()
+    aw = pd.to_numeric(df["away_woba"], errors="coerce").dropna()
+    all_woba = pd.concat([hw, aw])
+
+    # Check for signs of real Statcast data vs approximation
+    n_unique = all_woba.round(3).nunique()
+    at_default = ((all_woba - 0.314).abs() < 0.002).sum()
+    spread = float(all_woba.max() - all_woba.min())
+
+    # Real xwOBA: range ~0.060+, many unique values, few at exact default
+    # Approximation: range ~0.030, clusters around 0.310-0.330
+    # All defaults: range ~0, nearly all at 0.314
+    if spread < 0.005:
+        diagnosis = "ALL_DEFAULTS — Statcast pipeline is NOT flowing. All values ~0.314."
+    elif spread < 0.035 and n_unique < 15:
+        diagnosis = "LIKELY_APPROXIMATION — Values vary but range is narrow. Probably using OBP/SLG formula."
+    elif spread >= 0.035 and n_unique >= 15:
+        diagnosis = "LIKELY_REAL_XWOBA — Good spread and differentiation. Statcast pipeline appears active."
+    else:
+        diagnosis = "UNCERTAIN — Some variation but inconclusive."
+
+    # Also check if Statcast-specific features are present
+    fip_populated = pd.to_numeric(df.get("home_sp_fip", pd.Series(dtype=float)), errors="coerce").notna().sum()
+    park_populated = pd.to_numeric(df.get("park_factor", pd.Series(dtype=float)), errors="coerce").notna().sum()
+    temp_populated = pd.to_numeric(df.get("temp_f", pd.Series(dtype=float)), errors="coerce").notna().sum()
+
+    return jsonify({
+        "diagnosis": diagnosis,
+        "n_rows_checked": len(df),
+        "woba_stats": {
+            "mean": round(float(all_woba.mean()), 4),
+            "std": round(float(all_woba.std()), 4),
+            "min": round(float(all_woba.min()), 3),
+            "max": round(float(all_woba.max()), 3),
+            "spread": round(spread, 4),
+            "n_unique_values": int(n_unique),
+            "n_at_default_0.314": int(at_default),
+        },
+        "feature_coverage": {
+            "home_woba": int(hw.notna().sum()),
+            "away_woba": int(aw.notna().sum()),
+            "home_sp_fip": int(fip_populated),
+            "park_factor": int(park_populated),
+            "temp_f": int(temp_populated),
+        },
+        "sample_values": df[["game_date", "home_team", "away_team", "home_woba", "away_woba"]].head(10).to_dict(orient="records"),
+    })
+
+
 @app.route("/debug/ncaa-teams")
 def route_debug_ncaa_teams():
     """Debug: test team discovery and single team data fetch."""
@@ -3845,6 +3946,112 @@ def route_get_ncaa_team_rating(team_id):
 # Time-based expanding window: never trains on future data.
 # This is the HONEST accuracy measurement.
 # ═══════════════════════════════════════════════════════════════
+
+@app.route("/debug/ncaa-calibration")
+def ncaa_calibration_diagnostic():
+    """
+    Deep calibration diagnostic for NCAA predictions.
+    Shows raw vs calibrated probabilities, identifies systematic gaps,
+    and optionally refits isotonic calibration on current season data.
+    """
+    rows = sb_get("ncaa_predictions",
+                  "result_entered=eq.true&actual_home_score=not.is.null&ml_correct=not.is.null"
+                  "&select=*&order=game_date.asc")
+    if len(rows) < 50:
+        return jsonify({"error": "Need 50+ graded games", "n": len(rows)})
+
+    df = pd.DataFrame(rows)
+    df["win_pct_home"] = pd.to_numeric(df["win_pct_home"], errors="coerce").fillna(0.5)
+    df["ml_correct"] = df["ml_correct"].astype(bool).astype(int)
+    df["conf_margin"] = (df["win_pct_home"] - 0.5).abs()
+
+    # ── 1. Calibration by decile ──────────────────────────────
+    deciles = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50]
+    calibration = []
+    for i in range(len(deciles) - 1):
+        lo, hi = deciles[i], deciles[i + 1]
+        subset = df[(df["conf_margin"] >= lo) & (df["conf_margin"] < hi)]
+        if len(subset) > 0:
+            actual_acc = float(subset["ml_correct"].mean())
+            expected_acc = 0.5 + (lo + hi) / 2
+            gap = actual_acc - expected_acc
+            calibration.append({
+                "margin_range": f"{lo:.2f}-{hi:.2f}",
+                "n_games": len(subset),
+                "actual_accuracy": round(actual_acc, 4),
+                "expected_accuracy": round(expected_acc, 4),
+                "gap": round(gap, 4),
+                "miscalibrated": abs(gap) > 0.08,
+            })
+
+    # ── 2. Check isotonic calibration quality ─────────────────
+    bundle = load_model("ncaa")
+    iso_info = None
+    if bundle:
+        iso = bundle.get("isotonic")
+        if iso is not None:
+            # Test isotonic mapping at key points
+            test_probs = [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85]
+            mapped = iso.predict(test_probs)
+            iso_info = {
+                "status": "fitted",
+                "mapping": {f"{p:.2f}": round(float(m), 4) for p, m in zip(test_probs, mapped)},
+            }
+        else:
+            iso_info = {"status": "not_fitted"}
+
+    # ── 3. Recalibration potential ────────────────────────────
+    # If we refit isotonic on the current graded data, what would it look like?
+    refit_potential = None
+    if len(df) > 100:
+        try:
+            probs = df["win_pct_home"].values
+            actuals = df["ml_correct"].values
+            refit_iso = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
+            refit_iso.fit(probs, actuals)
+            test_probs = [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85]
+            mapped = refit_iso.predict(test_probs)
+            refit_potential = {
+                "n_samples": len(df),
+                "mapping": {f"{p:.2f}": round(float(m), 4) for p, m in zip(test_probs, mapped)},
+                "note": "This shows what isotonic would map if refitted on current graded data",
+            }
+        except Exception as e:
+            refit_potential = {"error": str(e)}
+
+    # ── 4. Recommendations ────────────────────────────────────
+    worst_gaps = sorted(calibration, key=lambda x: abs(x["gap"]), reverse=True)[:3]
+    recommendations = []
+    for g in worst_gaps:
+        if g["miscalibrated"]:
+            if g["gap"] < 0:
+                recommendations.append(
+                    f"Margin {g['margin_range']}: Model is OVERCONFIDENT "
+                    f"(actual {g['actual_accuracy']:.1%} vs expected {g['expected_accuracy']:.1%}). "
+                    f"Isotonic calibration should dampen probabilities in this range."
+                )
+            else:
+                recommendations.append(
+                    f"Margin {g['margin_range']}: Model is UNDERCONFIDENT "
+                    f"(actual {g['actual_accuracy']:.1%} vs expected {g['expected_accuracy']:.1%}). "
+                    f"Isotonic calibration should boost probabilities in this range."
+                )
+
+    if not recommendations:
+        recommendations.append("Calibration is within acceptable bounds across all deciles.")
+
+    return jsonify({
+        "n_graded_games": len(df),
+        "overall_accuracy": round(float(df["ml_correct"].mean()), 4),
+        "brier_score": round(float(brier_score_loss(
+            df["ml_correct"], df["win_pct_home"]
+        )), 4),
+        "calibration_by_decile": calibration,
+        "current_isotonic": iso_info,
+        "refit_potential": refit_potential,
+        "recommendations": recommendations,
+    })
+
 
 @app.route("/backtest/ncaa-walkforward")
 def ncaa_walk_forward():
