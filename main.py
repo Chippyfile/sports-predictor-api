@@ -3173,21 +3173,76 @@ def _fetch_team_data_for_ratings(team_id):
 
 def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0.01):
     """
-    Iterative KenPom-style efficiency computation with:
-    - Home court advantage adjustment (3.5 pts total, 1.75 per side)
-    - Per-game possession estimation from scoring
-    - Non-D1 opponent handling (floor rating)
-    - Post-iteration normalization
-    - Dynamic Bayesian shrinkage
+    Iterative KenPom-style efficiency computation with 5 enhancements:
+    1. Game recency weighting (recent games weighted more)
+    2. Opponent rank weighting (top-100 games count more)
+    3. Conference strength prior (WCC penalized, B10/SEC boosted)
+    4. Margin capping (blowouts capped at ±2 std devs)
+    5. Home/away efficiency splits (for spread prediction)
+    Plus: post-iteration normalization + dynamic Bayesian shrinkage
     """
+    import math
+
     lookup = {t["team_id"]: t for t in teams_data}
     team_ids = list(lookup.keys())
+    n_teams = len(team_ids)
+
+    # ── Conference strength mapping ──
+    # Historical conference quality tiers (adj_em shift applied post-convergence)
+    # Positive = boost, negative = penalty
+    # These are mild priors — they shift EM by 0.5-1.5 pts max
+    CONF_PRIOR = {
+        # Power conferences (slight boost for depth)
+        "SEC": 0.4, "Big Ten": 0.4, "Big 12": 0.3, "ACC": 0.2,
+        "Big East": 0.1,
+        # Strong mid-majors (no adjustment)
+        "American Athletic": 0.0, "Mountain West": 0.0, "Atlantic 10": 0.0,
+        "Missouri Valley": 0.0,
+        # Weaker conferences (penalty for inflated stats)
+        "West Coast": -0.8, "Colonial": -0.5, "Conference USA": -0.5,
+        "Sun Belt": -0.5, "Mid-American": -0.6, "Ohio Valley": -0.7,
+        "Big South": -0.8, "Southland": -0.8, "MEAC": -1.0, "SWAC": -1.0,
+        "Northeast": -0.9, "Patriot": -0.6, "Ivy": -0.4,
+        "Horizon": -0.5, "Summit": -0.7, "Big Sky": -0.6,
+        "WAC": -0.7, "ASUN": -0.5, "Big West": -0.6,
+        "CAA": -0.4, "Southern": -0.6, "America East": -0.7,
+        "Atlantic Sun": -0.5, "Metro Atlantic": -0.7, "MAAC": -0.7,
+    }
+
+    # ── Compute per-game efficiency std dev for margin capping ──
+    all_game_oes = []
+    for t in teams_data:
+        for g in t["game_log"]:
+            if g["opp_id"] in lookup:
+                opp = lookup[g["opp_id"]]
+                poss = (t["tempo"] + opp["tempo"]) / 2
+                if poss > 0:
+                    all_game_oes.append(g["my_score"] / poss * 100)
+    if all_game_oes:
+        oe_global_mean = sum(all_game_oes) / len(all_game_oes)
+        oe_global_std = (sum((x - oe_global_mean)**2 for x in all_game_oes) / len(all_game_oes)) ** 0.5
+    else:
+        oe_global_mean, oe_global_std = 109.7, 15.0
+    OE_CAP_LOW = oe_global_mean - 2.0 * oe_global_std
+    OE_CAP_HIGH = oe_global_mean + 2.0 * oe_global_std
+    print(f"  Margin cap: OE range [{OE_CAP_LOW:.1f}, {OE_CAP_HIGH:.1f}] (mean={oe_global_mean:.1f}, std={oe_global_std:.1f})")
+
+    # ── Recency weights: exponential decay ──
+    # Most recent game = 1.0, oldest game ≈ 0.7
+    # decay = 0.7^(1/n_games) per game from newest
+    RECENCY_FLOOR = 0.70  # oldest game gets 70% weight of newest
 
     # Iteration 0: raw values
     adj_oe = {tid: lookup[tid]["raw_oe"] for tid in team_ids}
     adj_de = {tid: lookup[tid]["raw_de"] for tid in team_ids}
     adj_ppg = {tid: lookup[tid]["ppg"] for tid in team_ids}
     adj_opp_ppg = {tid: lookup[tid]["opp_ppg"] for tid in team_ids}
+
+    # Home/away tracking (Fix #5)
+    home_oes = {tid: [] for tid in team_ids}
+    away_oes = {tid: [] for tid in team_ids}
+    home_des = {tid: [] for tid in team_ids}
+    away_des = {tid: [] for tid in team_ids}
 
     n_iters = 0
     for iteration in range(max_iterations):
@@ -3199,8 +3254,20 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
         lg_de = sum(all_de_v) / len(all_de_v) if all_de_v else 109.7
         lg_ppg = sum(lookup[t]["ppg"] for t in team_ids) / len(team_ids)
 
+        # Build current rankings for opponent-rank weighting
+        cur_em = {t: adj_oe[t] - adj_de[t] for t in team_ids}
+        sorted_by_em = sorted(team_ids, key=lambda t: cur_em[t], reverse=True)
+        rank_map = {t: i + 1 for i, t in enumerate(sorted_by_em)}
+
         new_oe, new_de, new_ppg, new_opp_ppg = {}, {}, {}, {}
         max_delta = 0.0
+
+        # Reset home/away tracking on last iteration
+        if iteration == max_iterations - 1 or iteration >= 6:
+            home_oes = {tid: [] for tid in team_ids}
+            away_oes = {tid: [] for tid in team_ids}
+            home_des = {tid: [] for tid in team_ids}
+            away_des = {tid: [] for tid in team_ids}
 
         for tid in team_ids:
             team = lookup[tid]
@@ -3211,12 +3278,11 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
                 new_opp_ppg[tid] = adj_opp_ppg[tid]
                 continue
 
-            g_oes, g_des, g_ppgs, g_opps = [], [], [], []
+            g_oes, g_des, g_ppgs, g_opps, g_weights = [], [], [], [], []
+            n_games = len(team["game_log"])
 
-            for game in team["game_log"]:
+            for game_idx, game in enumerate(team["game_log"]):
                 opp_id = game["opp_id"]
-                # Skip non-D1 opponents — including them with floor ratings
-                # deflates top teams because blowout wins get heavily adjusted down.
                 if opp_id not in lookup:
                     continue
 
@@ -3227,34 +3293,73 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
                 opp_def_ppg = adj_opp_ppg.get(opp_id, opp["opp_ppg"])
                 opp_off_ppg = adj_ppg.get(opp_id, opp["ppg"])
 
-                # Scores (no HCA adjustment — handled by shrinkage)
                 my_score = game["my_score"]
                 opp_score = game["opp_score"]
-
-                # Possession estimation: average of both teams' tempo
                 game_poss = (team["tempo"] + opp_tempo) / 2
-
                 if game_poss <= 0:
                     continue
 
-                # Per-game efficiency
+                # Per-game raw efficiency
                 game_oe_raw = my_score / game_poss * 100
                 game_de_raw = opp_score / game_poss * 100
 
-                # Opponent-adjust
-                g_oes.append(game_oe_raw * (lg_de / opp_de_r) if opp_de_r > 0 else game_oe_raw)
-                g_des.append(game_de_raw * (lg_oe / opp_oe_r) if opp_oe_r > 0 else game_de_raw)
+                # ── Fix #4: Margin capping ──
+                # Cap extreme efficiencies at ±2 std devs
+                game_oe_raw = max(OE_CAP_LOW, min(OE_CAP_HIGH, game_oe_raw))
+                game_de_raw = max(OE_CAP_LOW, min(OE_CAP_HIGH, game_de_raw))
 
-                # PPG-level adjustment (for O/U total formula)
+                # Opponent-adjust
+                adj_game_oe = game_oe_raw * (lg_de / opp_de_r) if opp_de_r > 0 else game_oe_raw
+                adj_game_de = game_de_raw * (lg_oe / opp_oe_r) if opp_oe_r > 0 else game_de_raw
+
+                # ── Fix #1: Recency weighting ──
+                # Games are in chronological order; later index = more recent
+                if n_games > 1:
+                    recency = RECENCY_FLOOR + (1.0 - RECENCY_FLOOR) * (game_idx / (n_games - 1))
+                else:
+                    recency = 1.0
+
+                # ── Fix #2: Opponent rank weighting ──
+                # Top-50 opponents: weight 1.3x, 50-100: 1.1x, 100-200: 1.0x, 200+: 0.85x
+                opp_rank = rank_map.get(opp_id, n_teams)
+                if opp_rank <= 50:
+                    rank_weight = 1.30
+                elif opp_rank <= 100:
+                    rank_weight = 1.15
+                elif opp_rank <= 200:
+                    rank_weight = 1.00
+                else:
+                    rank_weight = 0.85
+
+                # Combined weight
+                weight = recency * rank_weight
+
+                g_oes.append(adj_game_oe)
+                g_des.append(adj_game_de)
+                g_weights.append(weight)
+
+                # PPG-level adjustment
                 g_ppgs.append(my_score * (lg_ppg / opp_def_ppg) if opp_def_ppg > 0 else my_score)
                 g_opps.append(opp_score * (lg_ppg / opp_off_ppg) if opp_off_ppg > 0 else opp_score)
 
-            if g_oes:
-                nv_oe = sum(g_oes) / len(g_oes)
-                nv_de = sum(g_des) / len(g_des)
+                # ── Fix #5: Home/away tracking (last iteration only) ──
+                if iteration == max_iterations - 1 or iteration >= 6:
+                    is_home = game.get("is_home", False)
+                    if is_home:
+                        home_oes[tid].append(adj_game_oe)
+                        home_des[tid].append(adj_game_de)
+                    else:
+                        away_oes[tid].append(adj_game_oe)
+                        away_des[tid].append(adj_game_de)
+
+            if g_oes and sum(g_weights) > 0:
+                total_w = sum(g_weights)
+                nv_oe = sum(o * w for o, w in zip(g_oes, g_weights)) / total_w
+                nv_de = sum(d * w for d, w in zip(g_des, g_weights)) / total_w
                 max_delta = max(max_delta, abs(nv_oe - adj_oe[tid]), abs(nv_de - adj_de[tid]))
                 new_oe[tid] = nv_oe
                 new_de[tid] = nv_de
+                # PPG uses simple average (weights less critical for totals)
                 new_ppg[tid] = sum(g_ppgs) / len(g_ppgs)
                 new_opp_ppg[tid] = sum(g_opps) / len(g_opps)
             else:
@@ -3266,11 +3371,8 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
         adj_oe, adj_de = new_oe, new_de
         adj_ppg, adj_opp_ppg = new_ppg, new_opp_ppg
 
-        # ── NORMALIZATION (critical for KenPom parity) ──
-        # Re-center so league avg OE = league avg DE = target
-        # Without this, each iteration drifts and inflates extremes.
-        # KenPom uses ~109.7 as the league average; we derive it from data.
-        target_avg = 109.7  # KenPom-scale D1 league average
+        # ── NORMALIZATION ──
+        target_avg = 109.7
         cur_oe_vals = [adj_oe[t] for t in team_ids]
         cur_de_vals = [adj_de[t] for t in team_ids]
         cur_ppg_vals = [adj_ppg[t] for t in team_ids]
@@ -3289,22 +3391,15 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
             adj_ppg[tid] += ppg_shift
             adj_opp_ppg[tid] += opp_shift
 
-        print(f"  Iteration {n_iters}: max_delta={max_delta:.4f}, oe_mean={oe_mean:.1f}→{target_avg:.1f}, de_mean={de_mean:.1f}→{target_avg:.1f}")
+        print(f"  Iteration {n_iters}: max_delta={max_delta:.4f}, oe_mean={oe_mean:.1f}→{target_avg:.1f}")
         if max_delta < convergence_threshold:
             print(f"  Converged after {n_iters} iterations")
             break
 
     # ── POST-CONVERGENCE: Bayesian shrinkage ──
-    # Compresses deviations from the mean to match KenPom's distribution.
-    # Implicitly accounts for HCA variance, preseason priors, and
-    # conference strength effects that we don't model explicitly.
-    #
-    # Formula: shrink = 0.60 + 0.35 * avg_games / (avg_games + 8)
-    #   At 10 games: 0.794  At 20: 0.850  At 29: 0.874  At 35: 0.885
-    # Calibrated against KenPom 2025-26 at 29 games → EM MAE=1.5
     avg_games = sum(len(lookup[t]["game_log"]) for t in team_ids) / len(team_ids)
     SHRINK = 0.60 + 0.35 * avg_games / (avg_games + 8)
-    SHRINK = max(0.70, min(0.92, SHRINK))  # clamp
+    SHRINK = max(0.70, min(0.92, SHRINK))
     final_oe_vals = [adj_oe[t] for t in team_ids]
     final_de_vals = [adj_de[t] for t in team_ids]
     oe_avg = sum(final_oe_vals) / len(final_oe_vals)
@@ -3318,14 +3413,36 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
         adj_de[tid] = de_avg + (adj_de[tid] - de_avg) * SHRINK
         adj_ppg[tid] = ppg_avg + (adj_ppg[tid] - ppg_avg) * SHRINK
         adj_opp_ppg[tid] = opp_avg + (adj_opp_ppg[tid] - opp_avg) * SHRINK
-    print(f"  Bayesian shrinkage applied (factor={SHRINK})")
+    print(f"  Bayesian shrinkage applied (factor={SHRINK:.4f}, avg_games={avg_games:.1f})")
 
-    # Build results with rankings
+    # ── Fix #3: Conference strength prior ──
+    # Apply AFTER shrinkage so it doesn't get compressed.
+    # Mild shift: only affects EM by adjusting OE up and DE down (or vice versa)
+    conf_applied = 0
+    for tid in team_ids:
+        conf = lookup[tid].get("conference", "")
+        prior = CONF_PRIOR.get(conf, 0.0)
+        if prior != 0.0:
+            adj_oe[tid] += prior / 2   # half to offense boost
+            adj_de[tid] -= prior / 2   # half to defense boost (lower = better)
+            adj_ppg[tid] += prior / 4
+            adj_opp_ppg[tid] -= prior / 4
+            conf_applied += 1
+    print(f"  Conference priors applied to {conf_applied}/{n_teams} teams")
+
+    # Build results with rankings and home/away splits
     results = []
     for tid in team_ids:
         t = lookup[tid]
         em = adj_oe[tid] - adj_de[tid]
-        results.append({
+
+        # Home/away splits (Fix #5)
+        h_oe = sum(home_oes[tid]) / len(home_oes[tid]) if home_oes[tid] else None
+        a_oe = sum(away_oes[tid]) / len(away_oes[tid]) if away_oes[tid] else None
+        h_de = sum(home_des[tid]) / len(home_des[tid]) if home_des[tid] else None
+        a_de = sum(away_des[tid]) / len(away_des[tid]) if away_des[tid] else None
+
+        result = {
             "team_id": tid, "team_name": t["name"], "team_abbr": t["abbr"],
             "conference": t["conference"],
             "adj_oe": round(adj_oe[tid], 2), "adj_de": round(adj_de[tid], 2),
@@ -3337,7 +3454,16 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
             "sos": round(t["sos"], 4) if t["sos"] is not None else None,
             "wins": t["wins"], "losses": t["losses"],
             "games_used": len(t["game_log"]), "iterations": n_iters,
-        })
+        }
+        # Add home/away splits if available
+        if h_oe is not None:
+            result["home_oe"] = round(h_oe, 2)
+            result["home_de"] = round(h_de, 2) if h_de else None
+        if a_oe is not None:
+            result["away_oe"] = round(a_oe, 2)
+            result["away_de"] = round(a_de, 2) if a_de else None
+
+        results.append(result)
 
     results.sort(key=lambda x: x["adj_em"], reverse=True)
     for i, r in enumerate(results):
