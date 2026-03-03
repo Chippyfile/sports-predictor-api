@@ -28,6 +28,7 @@ from sports.nba import train_nba, predict_nba, nba_build_features
 from sports.ncaa import train_ncaa, predict_ncaa, ncaa_build_features
 from sports.nfl import train_nfl, predict_nfl, nfl_build_features
 from sports.ncaaf import train_ncaaf, predict_ncaaf, ncaaf_build_features
+from nba_backfill import backfill_nba_historical
 from monte_carlo import monte_carlo
 from cron import _active_sports, _log_training, _should_promote
 
@@ -384,3 +385,8 @@ def _once():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+@app.route("/backfill/nba-historical", methods=["POST"])
+def route_backfill_nba():
+    seasons = (request.get_json(force=True, silent=True) or {}).get("seasons", [2022, 2023, 2024, 2025])
+    return jsonify(backfill_nba_historical(seasons=seasons))
