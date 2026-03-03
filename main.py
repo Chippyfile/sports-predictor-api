@@ -30,6 +30,7 @@ from sports.nfl import train_nfl, predict_nfl, nfl_build_features
 from sports.ncaaf import train_ncaaf, predict_ncaaf, ncaaf_build_features
 from nba_backfill import backfill_nba_historical
 from quick_backtest import quick_backtest_nba, quick_backtest_ncaa, quick_backtest_mlb
+from season_holdout_backtest import season_holdout_nba, season_holdout_ncaa, season_holdout_mlb, season_holdout_all
 from monte_carlo import monte_carlo
 from cron import _active_sports, _log_training, _should_promote
 
@@ -401,3 +402,19 @@ def route_quick_mlb(): return jsonify(quick_backtest_mlb())
 @app.route("/backtest/quick/all")
 def route_quick_all():
     return jsonify({"mlb": quick_backtest_mlb(), "nba": quick_backtest_nba(), "ncaa": quick_backtest_ncaa()})
+
+@app.route("/backtest/holdout/nba")
+def route_holdout_nba():
+    s = int(request.args.get("season", 2025))
+    return jsonify(season_holdout_nba(test_season=s))
+@app.route("/backtest/holdout/ncaa")
+def route_holdout_ncaa():
+    s = int(request.args.get("season", 2026))
+    return jsonify(season_holdout_ncaa(test_season=s))
+@app.route("/backtest/holdout/mlb")
+def route_holdout_mlb():
+    s = int(request.args.get("season", 2024))
+    return jsonify(season_holdout_mlb(test_season=s))
+@app.route("/backtest/holdout/all")
+def route_holdout_all():
+    return jsonify(season_holdout_all())
