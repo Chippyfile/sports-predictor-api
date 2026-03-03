@@ -96,16 +96,59 @@ def nba_build_features(df):
 
     return df[feature_cols].fillna(0)
 
+
+def _nba_season_weight(season):
+    current = 2026
+    age = current - season
+    if age <= 0: return 1.0
+    if age == 1: return 1.0
+    if age == 2: return 0.9
+    if age == 3: return 0.8
+    if age == 4: return 0.7
+    if age == 5: return 0.6
+    return 0.5
+
+
+def _nba_merge_historical(current_df):
+    hist_rows = sb_get(
+        "nba_historical",
+        "is_outlier_season=eq.false&actual_home_score=not.is.null&select=*&order=season.desc&limit=50000"
+    )
+    if not hist_rows:
+        print("  WARNING: nba_historical empty -- current season only")
+        if current_df is not None and len(current_df) > 0:
+            return current_df, None, 0
+        return pd.DataFrame(), None, 0
+    hist_df = pd.DataFrame(hist_rows)
+    for col in hist_df.columns:
+        if col not in ['home_team', 'away_team', 'game_date', 'id', 'season', 'is_outlier_season', 'home_win', 'result_entered']:
+            hist_df[col] = pd.to_numeric(hist_df[col], errors='coerce')
+    if "season" in hist_df.columns:
+        hist_df["season_weight"] = hist_df["season"].apply(
+            lambda s: _nba_season_weight(int(s)) if pd.notna(s) else 0.5
+        )
+    if current_df is not None and len(current_df) > 0:
+        combined = pd.concat([hist_df, current_df], ignore_index=True)
+    else:
+        combined = hist_df
+    weights = combined["season_weight"].fillna(1.0).astype(float).values if "season_weight" in combined.columns else None
+    n_hist = len(hist_df)
+    n_curr = len(current_df) if current_df is not None else 0
+    print(f"  NBA corpus: {n_hist} historical + {n_curr} current = {n_hist + n_curr}")
+    return combined, weights, n_hist
+
 def train_nba():
     """NBA model training — stacking ensemble with isotonic calibration."""
     import traceback as _tb
     try:
         rows = sb_get("nba_predictions",
                       "result_entered=eq.true&actual_home_score=not.is.null&select=*")
-        if not rows or len(rows) < 10:
-            return {"error": "Not enough NBA data", "n": len(rows) if rows else 0}
+        current_df = pd.DataFrame(rows) if rows else pd.DataFrame()
 
-        df = pd.DataFrame(rows)
+        # Merge with historical corpus (2021-2025)
+        df, sample_weights, n_historical = _nba_merge_historical(current_df)
+        if len(df) < 10:
+            return {"error": "Not enough NBA data", "n": len(df), "n_current": len(current_df)}
         X  = nba_build_features(df)
         y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
         y_win    = (y_margin > 0).astype(int)
@@ -135,7 +178,7 @@ def train_nba():
             reg_models = {"gbm": gbm, "rf": rf_reg, "ridge": ridge}
             if HAS_XGB:
                 reg_models["xgb"] = xgb_reg
-            oof = _time_series_oof(reg_models, X_scaled, y_margin, df, n_splits=cv_folds)
+            oof = _time_series_oof(reg_models, X_scaled, y_margin, df, n_splits=cv_folds, weights=sample_weights)
             oof_gbm, oof_rf, oof_ridge = oof["gbm"], oof["rf"], oof["ridge"]
             gbm.fit(X_scaled, y_margin)
             rf_reg.fit(X_scaled, y_margin)
