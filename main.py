@@ -3332,8 +3332,9 @@ def heuristic_predict_row(row):
     # ── Team FIP impact (F-02 aligned: marginal, discounted) ──
     # Using discounted FIP (leak-adjusted) and 0.65 coefficient (reduced from 1.0
     # to avoid double-counting with wOBA-based run estimate)
-    ar += (home_fip_adj - lg_fip) * FIP_COEFF * 0.65
-    hr += (away_fip_adj - lg_fip) * FIP_COEFF * 0.65
+    # AUDIT FIX 1: Removed 0.65 - FIP_COEFF already correct
+    ar += (home_fip_adj - lg_fip) * FIP_COEFF
+    hr += (away_fip_adj - lg_fip) * FIP_COEFF
 
     # ── K/9 and BB/9 adjustments (using leak-adjusted values) ──
     lg_k9 = 8.5
