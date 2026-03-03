@@ -24,22 +24,22 @@ def quick_backtest_nba():
     X = nba_build_features(df)
 
     scaler = bundle.get("scaler")
-    stacked_reg = bundle.get("stacked_reg")
-    stacked_clf = bundle.get("stacked_clf")
+    reg = bundle.get("reg")
+    clf = bundle.get("clf")
     isotonic = bundle.get("isotonic")
 
-    if not scaler or not stacked_reg:
+    if not scaler or not reg:
         return {"error": "Model bundle incomplete"}
 
     X_scaled = scaler.transform(X)
-    pred_margin = stacked_reg.predict(X_scaled)
+    pred_margin = reg.predict(X_scaled)
 
     y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
     y_win = (y_margin > 0).astype(int)
 
     # Win predictions
-    if stacked_clf:
-        pred_wp = stacked_clf.predict_proba(X_scaled)[:, 1]
+    if clf:
+        pred_wp = clf.predict_proba(X_scaled)[:, 1]
         if isotonic:
             pred_wp = isotonic.predict(pred_wp)
         pred_wp = np.clip(pred_wp, 0.05, 0.95)
@@ -88,21 +88,21 @@ def quick_backtest_ncaa():
     X = ncaa_build_features(df)
 
     scaler = bundle.get("scaler")
-    stacked_reg = bundle.get("stacked_reg")
-    stacked_clf = bundle.get("stacked_clf")
+    reg = bundle.get("reg")
+    clf = bundle.get("clf")
     isotonic = bundle.get("isotonic")
 
-    if not scaler or not stacked_reg:
+    if not scaler or not reg:
         return {"error": "Model bundle incomplete"}
 
     X_scaled = scaler.transform(X)
-    pred_margin = stacked_reg.predict(X_scaled)
+    pred_margin = reg.predict(X_scaled)
 
     y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
     y_win = (y_margin > 0).astype(int)
 
-    if stacked_clf:
-        pred_wp = stacked_clf.predict_proba(X_scaled)[:, 1]
+    if clf:
+        pred_wp = clf.predict_proba(X_scaled)[:, 1]
         if isotonic:
             pred_wp = isotonic.predict(pred_wp)
         pred_wp = np.clip(pred_wp, 0.05, 0.95)
@@ -150,11 +150,11 @@ def quick_backtest_mlb():
     X = mlb_build_features(df)
 
     scaler = bundle.get("scaler")
-    stacked_reg = bundle.get("stacked_reg")
-    stacked_clf = bundle.get("stacked_clf")
+    reg = bundle.get("reg")
+    clf = bundle.get("clf")
     isotonic = bundle.get("isotonic")
 
-    if not scaler or not stacked_reg:
+    if not scaler or not reg:
         return {"error": "Model bundle incomplete"}
 
     feature_cols = bundle.get("feature_cols", [])
@@ -165,13 +165,13 @@ def quick_backtest_mlb():
     X = X[feature_cols]
 
     X_scaled = scaler.transform(X)
-    pred_margin = stacked_reg.predict(X_scaled)
+    pred_margin = reg.predict(X_scaled)
 
     y_margin = df["actual_home_runs"].astype(float) - df["actual_away_runs"].astype(float)
     y_win = (y_margin > 0).astype(int)
 
-    if stacked_clf:
-        pred_wp = stacked_clf.predict_proba(X_scaled)[:, 1]
+    if clf:
+        pred_wp = clf.predict_proba(X_scaled)[:, 1]
         if isotonic:
             pred_wp = isotonic.predict(pred_wp)
         pred_wp = np.clip(pred_wp, 0.15, 0.85)
