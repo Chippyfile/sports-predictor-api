@@ -22,7 +22,11 @@ from db import sb_get, save_model, load_model
 from ml_utils import HAS_XGB, accuracy_report
 
 # ── Import sport modules ──────────────────────────────────────
-from sports.mlb import train_mlb, predict_mlb, calibrate_mlb_dispersion
+from sports.mlb import (
+    train_mlb, predict_mlb, calibrate_mlb_dispersion,
+    mlb_build_features, _mlb_merge_historical, heuristic_predict_row, backfill_heuristic,
+    SEASON_CONSTANTS,
+)
 from sports.nba import train_nba, predict_nba, nba_build_features
 from sports.ncaa import train_ncaa, predict_ncaa, ncaa_build_features
 from sports.nfl import train_nfl, predict_nfl, nfl_build_features
@@ -299,7 +303,8 @@ def route_train_all_logged():
 from backtests import (
     route_backtest_mlb, route_backtest_nba, route_backtest_ncaa,
     route_model_info as _backtest_model_info,
-    nba_confidence_calibration, route_backtest_current_model,
+    nba_confidence_calibration, route_backtest_mlb_current,
+    ncaa_walk_forward, ncaa_confidence_calibration,
 )
 
 # Only register if they exist (graceful degradation)
@@ -309,7 +314,9 @@ _backtest_routes = {
     "/backtest/nba": (["GET", "POST"], "route_backtest_nba", route_backtest_nba),
     "/backtest/ncaa": (["POST"], "route_backtest_ncaa", route_backtest_ncaa),
     "/backtest/nba-confidence": (["GET"], "nba_confidence", nba_confidence_calibration),
-    "/backtest/mlb/current-model": (["POST"], "backtest_mlb_current", route_backtest_current_model),
+    "/backtest/mlb/current-model": (["POST"], "backtest_mlb_current", route_backtest_mlb_current),
+    "/backtest/ncaa-walkforward": (["GET"], "ncaa_walkforward", ncaa_walk_forward),
+    "/backtest/ncaa-confidence": (["GET"], "ncaa_confidence", ncaa_confidence_calibration),
 }
 for path, (methods, name, fn) in _backtest_routes.items():
     try:
