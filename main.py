@@ -1906,12 +1906,14 @@ def predict_ncaa(game: dict):
     else:
         win_prob = raw_win_prob
 
-    # AMPLIFICATION FIX: Clamp final win probability to [0.12, 0.88].
-    # Without this, the prob→moneyline formula (prob/(1-prob)*100) produces
-    # extreme moneylines: 0.775 → -344, 0.85 → -567, 0.90 → -900.
-    # College basketball rarely produces true win probabilities above ~85%
-    # even in massive mismatches (tournament 1 vs 16 seeds win ~1% of the time).
-    win_prob = max(0.12, min(0.88, win_prob))
+    # WIN PROBABILITY CAP: Clamp to [0.05, 0.95] to allow large spreads.
+    # Previous [0.12, 0.88] cap was too tight — it capped effective spreads
+    # at ~16 pts (at sigma=16), causing 22+ pt gaps vs Vegas on blowout games
+    # and generating false SPREADLEAN signals. NCAA regular season has genuine
+    # 95%+ probability games (top-10 vs sub-300 teams). The moneyline display
+    # cap (ML_CAP=800 in the frontend) handles extreme ML values separately.
+    # 0.95 → ML -1900, 0.05 → ML +1900 (capped at ±800 for display).
+    win_prob = max(0.05, min(0.95, win_prob))
 
     shap_vals = bundle["explainer"].shap_values(X_s)
     if isinstance(shap_vals, list):
@@ -4697,12 +4699,37 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
     opp_vals = [adj_opp_ppg[t] for t in team_ids]
     ppg_avg = sum(ppg_vals) / len(ppg_vals)
     opp_avg = sum(opp_vals) / len(opp_vals)
+
+    # FIX 2: Non-linear shrinkage for extreme teams (top/bottom 5%).
+    # Standard shrinkage compresses all teams equally toward the mean,
+    # which systematically underestimates blowout spreads by 5-6 pts.
+    # For teams in the top/bottom 5% of EM distribution, apply reduced
+    # shrinkage so their extreme ratings are preserved. This only affects
+    # ~18 teams on each tail (360 * 0.05) and leaves the middle 90% unchanged.
+    pre_shrink_em = {t: adj_oe[t] - adj_de[t] for t in team_ids}
+    em_values = sorted(pre_shrink_em.values())
+    n_teams_local = len(em_values)
+    em_p5 = em_values[max(0, int(n_teams_local * 0.05))]     # bottom 5% threshold
+    em_p95 = em_values[min(n_teams_local - 1, int(n_teams_local * 0.95))]  # top 5% threshold
+    extreme_count = 0
+
     for tid in team_ids:
-        adj_oe[tid] = oe_avg + (adj_oe[tid] - oe_avg) * SHRINK
-        adj_de[tid] = de_avg + (adj_de[tid] - de_avg) * SHRINK
-        adj_ppg[tid] = ppg_avg + (adj_ppg[tid] - ppg_avg) * SHRINK
-        adj_opp_ppg[tid] = opp_avg + (adj_opp_ppg[tid] - opp_avg) * SHRINK
-    print(f"  Bayesian shrinkage applied (factor={SHRINK:.4f}, avg_games={avg_games:.1f})")
+        team_em = pre_shrink_em[tid]
+        # Determine per-team shrinkage factor
+        if team_em >= em_p95 or team_em <= em_p5:
+            # Extreme teams: blend toward full SHRINK but retain more signal.
+            # effective_shrink = SHRINK + (1 - SHRINK) * 0.6 → keeps 60% of
+            # the gap that would otherwise be shrunk away.
+            # Example: SHRINK=0.92, extreme team gets 0.92 + 0.08*0.6 = 0.968
+            effective_shrink = SHRINK + (1 - SHRINK) * 0.6
+            extreme_count += 1
+        else:
+            effective_shrink = SHRINK
+        adj_oe[tid] = oe_avg + (adj_oe[tid] - oe_avg) * effective_shrink
+        adj_de[tid] = de_avg + (adj_de[tid] - de_avg) * effective_shrink
+        adj_ppg[tid] = ppg_avg + (adj_ppg[tid] - ppg_avg) * effective_shrink
+        adj_opp_ppg[tid] = opp_avg + (adj_opp_ppg[tid] - opp_avg) * effective_shrink
+    print(f"  Bayesian shrinkage applied (base={SHRINK:.4f}, avg_games={avg_games:.1f}, extreme_teams={extreme_count})")
 
     # ── Fix #3: Conference strength prior ──
     # Apply AFTER shrinkage so it doesn't get compressed.
