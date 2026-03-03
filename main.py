@@ -20,6 +20,7 @@ CORS(app)
 from config import SUPABASE_URL, SUPABASE_KEY, MODEL_DIR
 from db import sb_get, save_model, load_model
 from ml_utils import HAS_XGB, accuracy_report
+from ml_utils import StackedRegressor, StackedClassifier; import sys; sys.modules["__main__"].StackedRegressor = StackedRegressor; sys.modules["__main__"].StackedClassifier = StackedClassifier
 
 # ── Import sport modules ──────────────────────────────────────
 from sports.mlb import train_mlb, predict_mlb, calibrate_mlb_dispersion
