@@ -20,7 +20,11 @@ def _winsorized_mean(series, lower=0.05, upper=0.95):
     return float(s.clip(lo, hi).mean())
 
 
+_mlb_cache = None
 def compute_mlb_season_constants():
+    global _mlb_cache
+    if _mlb_cache is not None:
+        return _mlb_cache
     """
     Derive MLB league averages per season from mlb_historical.
     Returns dict like SEASON_CONSTANTS: {2024: {"lg_rpg": 4.38, ...}, ...}
@@ -95,6 +99,7 @@ def compute_mlb_season_constants():
         }
 
     n_seasons = len(constants)
+    _mlb_cache = constants  # Cache for subsequent calls
     print(f"  MLB dynamic constants: {n_seasons} seasons derived from {len(df)} games")
     for s in sorted(constants.keys()):
         c = constants[s]
@@ -103,7 +108,11 @@ def compute_mlb_season_constants():
     return constants
 
 
+_nba_cache = None
 def compute_nba_league_averages():
+    global _nba_cache
+    if _nba_cache is not None:
+        return _nba_cache
     """
     Derive NBA league averages from nba_historical for use as feature builder defaults.
     Returns dict of stat_name -> average value.
@@ -151,6 +160,7 @@ def compute_nba_league_averages():
             if len(combined) > 100:
                 averages[name] = round(_winsorized_mean(combined), 3)
 
+    _nba_cache = averages  # Cache for subsequent calls
     print(f"  NBA dynamic averages from {len(df)} historical games:")
     for k, v in sorted(averages.items()):
         print(f"    {k}: {v}")
