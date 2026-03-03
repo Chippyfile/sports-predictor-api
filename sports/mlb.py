@@ -663,3 +663,175 @@ def predict_mlb(game: dict):
 # ═══════════════════════════════════════════════════════════════
 # NBA MODEL
 # ═══════════════════════════════════════════════════════════════
+def heuristic_predict_row(row):
+    """
+    Replay the mlb.js v15 heuristic in Python using AVAILABLE historical columns.
+    Produces differentiated pred_home_runs / pred_away_runs per game.
+
+    F-03 FIX: Team FIP/K9/BB9 in mlb_historical are end-of-season aggregates, not
+    pre-game values. This creates a forward-looking data leak. We apply a 50%
+    regression-to-mean discount on all pitching stats to approximate mid-season
+    knowledge level. wOBA has the same issue but is less correlated with single-game
+    outcomes, so the leak is smaller.
+
+    Also aligned with JS engine fixes:
+      F-01: Pythagenpat uses league-RPG exponent (not per-matchup)
+      F-02: FIP applied as marginal (vs league FIP, discounted)
+      F-04: Updated wOBA fallback (not used here — historical has direct wOBA)
+    """
+    season = int(row.get("season", 2024))
+    sc = SEASON_CONSTANTS.get(season, DEFAULT_CONSTANTS)
+
+    # Available columns
+    home_woba = row.get("home_woba")
+    away_woba = row.get("away_woba")
+    home_fip  = row.get("home_fip")    # team FIP (not starter) — END OF SEASON
+    away_fip  = row.get("away_fip")
+    home_k9   = row.get("home_k9")
+    away_k9   = row.get("away_k9")
+    home_bb9  = row.get("home_bb9")
+    away_bb9  = row.get("away_bb9")
+    pf        = row.get("park_factor")
+    rest_h    = row.get("home_rest_days")
+    rest_a    = row.get("away_rest_days")
+    travel_h  = row.get("home_travel")
+    travel_a  = row.get("away_travel")
+
+    # Coerce to float with defaults
+    home_woba = float(home_woba) if home_woba is not None and not _isnan(home_woba) else sc["lg_woba"]
+    away_woba = float(away_woba) if away_woba is not None and not _isnan(away_woba) else sc["lg_woba"]
+    home_fip  = float(home_fip)  if home_fip  is not None and not _isnan(home_fip)  else sc["lg_fip"]
+    away_fip  = float(away_fip)  if away_fip  is not None and not _isnan(away_fip)  else sc["lg_fip"]
+    home_k9   = float(home_k9)   if home_k9   is not None and not _isnan(home_k9)   else 8.5
+    away_k9   = float(away_k9)   if away_k9   is not None and not _isnan(away_k9)   else 8.5
+    home_bb9  = float(home_bb9)  if home_bb9  is not None and not _isnan(home_bb9)  else 3.2
+    away_bb9  = float(away_bb9)  if away_bb9  is not None and not _isnan(away_bb9)  else 3.2
+    pf        = float(pf)        if pf        is not None and not _isnan(pf)        else 1.0
+    rest_h    = float(rest_h)    if rest_h    is not None and not _isnan(rest_h)     else 3.0
+    rest_a    = float(rest_a)    if rest_a    is not None and not _isnan(rest_a)     else 3.0
+    travel_h  = float(travel_h)  if travel_h  is not None and not _isnan(travel_h)  else 0.0
+    travel_a  = float(travel_a)  if travel_a  is not None and not _isnan(travel_a)  else 0.0
+
+    lg_woba = sc["lg_woba"]
+    woba_scale = sc["woba_scale"]
+    lg_rpg = sc["lg_rpg"]
+    lg_fip = sc["lg_fip"]
+    pa_pg = sc["pa_pg"]
+
+    # ═══════════════════════════════════════════════════════════════
+    # FIX S1: Game-date-aware regression (replaces flat 50% discount)
+    # ═══════════════════════════════════════════════════════════════
+    # End-of-season stats in mlb_historical contain future information.
+    # The leak magnitude varies by game date:
+    #   - April game: ~85% of season is future → heavy regression
+    #   - June game: ~60% is future → moderate regression
+    #   - September game: ~10% is future → light regression
+    # Formula: discount = games_before_date / total_season_games
+    # We approximate via game_date month if available, else use 50%.
+    game_date = row.get("game_date")
+    if game_date and isinstance(game_date, str) and len(game_date) >= 7:
+        try:
+            month = int(game_date[5:7])
+            day = int(game_date[8:10]) if len(game_date) >= 10 else 15
+            # MLB season: ~March 27 (game 1) → September 29 (game 162)
+            # Approximate games played by month using cumulative schedule
+            GAMES_BY_MONTH_END = {3: 5, 4: 30, 5: 56, 6: 81, 7: 105, 8: 133, 9: 162, 10: 162}
+            games_before = GAMES_BY_MONTH_END.get(month - 1, 0)
+            games_in_month = GAMES_BY_MONTH_END.get(month, 162) - games_before
+            games_so_far = games_before + games_in_month * (day / 30.0)
+            LEAK_DISCOUNT = max(0.15, min(0.85, games_so_far / 162.0))
+        except (ValueError, TypeError):
+            LEAK_DISCOUNT = 0.50  # fallback
+    else:
+        LEAK_DISCOUNT = 0.50  # no date info → use original midpoint
+
+    home_fip_adj = lg_fip + (home_fip - lg_fip) * LEAK_DISCOUNT
+    away_fip_adj = lg_fip + (away_fip - lg_fip) * LEAK_DISCOUNT
+    home_k9_adj  = 8.5 + (home_k9 - 8.5) * LEAK_DISCOUNT
+    away_k9_adj  = 8.5 + (away_k9 - 8.5) * LEAK_DISCOUNT
+    home_bb9_adj = 3.2 + (home_bb9 - 3.2) * LEAK_DISCOUNT
+    away_bb9_adj = 3.2 + (away_bb9 - 3.2) * LEAK_DISCOUNT
+    # Also regress wOBA (same leak, previously missed)
+    home_woba_adj = lg_woba + (home_woba - lg_woba) * LEAK_DISCOUNT
+    away_woba_adj = lg_woba + (away_woba - lg_woba) * LEAK_DISCOUNT
+
+    # ── wOBA → Runs (FanGraphs method) — now using regressed wOBA (S1 fix) ──
+    hr = lg_rpg + ((home_woba_adj - lg_woba) / woba_scale) * pa_pg
+    ar = lg_rpg + ((away_woba_adj - lg_woba) / woba_scale) * pa_pg
+
+    # ── Team FIP impact (F-02 aligned: marginal, discounted) ──
+    # Using discounted FIP (leak-adjusted) and 0.65 coefficient (reduced from 1.0
+    # to avoid double-counting with wOBA-based run estimate)
+    # AUDIT FIX 1: Removed 0.65 - FIP_COEFF already correct
+    ar += (home_fip_adj - lg_fip) * FIP_COEFF
+    hr += (away_fip_adj - lg_fip) * FIP_COEFF
+
+    # ── K/9 and BB/9 adjustments (using leak-adjusted values) ──
+    lg_k9 = 8.5
+    lg_bb9 = 3.2
+    ar -= (home_k9_adj - lg_k9) * 0.04
+    ar += (home_bb9_adj - lg_bb9) * 0.06
+    hr -= (away_k9_adj - lg_k9) * 0.04
+    hr += (away_bb9_adj - lg_bb9) * 0.06
+
+    # ── Park factor ──
+    pf = max(0.86, min(1.28, pf))
+    hr *= pf
+    ar *= pf
+
+    # ── Home field advantage ──
+    hr += HFA_RUNS
+    ar -= HFA_RUNS
+
+    # ── Rest/travel adjustments ──
+    if rest_h == 0:
+        hr -= 0.15
+    if rest_a == 0:
+        ar -= 0.15
+    if travel_a > 1500:
+        ar -= 0.08
+
+    # ── Clamp ──
+    hr = max(2.0, min(9.0, hr))
+    ar = max(2.0, min(9.0, ar))
+
+    # ── Pythagenpat (F-01 aligned: fixed league-RPG exponent) ──
+    league_rpg = 2 * lg_rpg  # league-wide total RPG
+    exp = max(1.60, min(2.10, league_rpg ** 0.287))
+    win_pct = (hr ** exp) / (hr ** exp + ar ** exp)
+    win_pct = max(0.15, min(0.85, win_pct))
+
+    model_ml = int(-round((win_pct / (1 - win_pct)) * 100) if win_pct >= 0.5
+                    else round(((1 - win_pct) / win_pct) * 100))
+
+    return {
+        "pred_home_runs": round(hr, 3),
+        "pred_away_runs": round(ar, 3),
+        "win_pct_home": round(win_pct, 4),
+        "ou_total": round(hr + ar, 1),
+        "model_ml_home": model_ml,
+    }
+
+
+def _isnan(v):
+    """Check if value is NaN (works for float and numpy)."""
+    try:
+        return v != v  # NaN != NaN
+    except (TypeError, ValueError):
+        return False
+
+
+def backfill_heuristic(df):
+    """Apply heuristic_predict_row to every row, filling pred columns."""
+    preds = df.apply(lambda r: pd.Series(heuristic_predict_row(r)), axis=1)
+    df = df.copy()
+    df["pred_home_runs"] = preds["pred_home_runs"].astype(float)
+    df["pred_away_runs"] = preds["pred_away_runs"].astype(float)
+    df["win_pct_home"]   = preds["win_pct_home"].astype(float)
+    df["ou_total"]       = preds["ou_total"].astype(float)
+    df["model_ml_home"]  = preds["model_ml_home"].astype(int)
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════
+# MLB BACKTESTING
