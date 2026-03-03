@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.stats import nbinom
-from sports.mlb import _get_mlb_k, MLB_NEGBIN_K_DEFAULT
+from sports.mlb import _get_mlb_k
+MLB_NEGBIN_K_DEFAULT = 0.60
 
 def _negbin_draw(rng, mu, k, n):
     """

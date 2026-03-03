@@ -1,3 +1,4 @@
+MLB_NEGBIN_K_DEFAULT = 0.60
 SEASON_CONSTANTS = {
     2015: {"lg_woba": 0.313, "woba_scale": 1.24, "lg_rpg": 4.25, "lg_fip": 3.97, "pa_pg": 38.0},
     2016: {"lg_woba": 0.318, "woba_scale": 1.21, "lg_rpg": 4.48, "lg_fip": 4.19, "pa_pg": 38.0},
