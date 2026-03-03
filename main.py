@@ -29,6 +29,7 @@ from sports.ncaa import train_ncaa, predict_ncaa, ncaa_build_features
 from sports.nfl import train_nfl, predict_nfl, nfl_build_features
 from sports.ncaaf import train_ncaaf, predict_ncaaf, ncaaf_build_features
 from nba_backfill import backfill_nba_historical
+from quick_backtest import quick_backtest_nba, quick_backtest_ncaa, quick_backtest_mlb
 from monte_carlo import monte_carlo
 from cron import _active_sports, _log_training, _should_promote
 
@@ -390,3 +391,13 @@ if __name__ == "__main__":
 def route_backfill_nba():
     seasons = (request.get_json(force=True, silent=True) or {}).get("seasons", [2022, 2023, 2024, 2025])
     return jsonify(backfill_nba_historical(seasons=seasons))
+
+@app.route("/backtest/quick/nba")
+def route_quick_nba(): return jsonify(quick_backtest_nba())
+@app.route("/backtest/quick/ncaa")
+def route_quick_ncaa(): return jsonify(quick_backtest_ncaa())
+@app.route("/backtest/quick/mlb")
+def route_quick_mlb(): return jsonify(quick_backtest_mlb())
+@app.route("/backtest/quick/all")
+def route_quick_all():
+    return jsonify({"mlb": quick_backtest_mlb(), "nba": quick_backtest_nba(), "ncaa": quick_backtest_ncaa()})
