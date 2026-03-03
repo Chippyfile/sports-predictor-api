@@ -459,14 +459,23 @@ def compute_kenpom_ratings(teams_data, max_iterations=8, convergence_threshold=0
     # compresses distribution ~3 pts vs unweighted iteration)
     SHRINK = 0.63 + 0.35 * avg_games / (avg_games + 8)
     SHRINK = max(0.70, min(0.95, SHRINK))
+    # Winsorized league averages for shrinkage targets (5th/95th percentile)
+    # Prevents extreme outlier teams from distorting the shrinkage anchor
+    def _winsorized_avg(vals):
+        arr = np.array(vals)
+        if len(arr) < 20:
+            return float(arr.mean())
+        lo, hi = np.percentile(arr, 5), np.percentile(arr, 95)
+        return float(np.clip(arr, lo, hi).mean())
+
     final_oe_vals = [adj_oe[t] for t in team_ids]
     final_de_vals = [adj_de[t] for t in team_ids]
-    oe_avg = sum(final_oe_vals) / len(final_oe_vals)
-    de_avg = sum(final_de_vals) / len(final_de_vals)
+    oe_avg = _winsorized_avg(final_oe_vals)
+    de_avg = _winsorized_avg(final_de_vals)
     ppg_vals = [adj_ppg[t] for t in team_ids]
     opp_vals = [adj_opp_ppg[t] for t in team_ids]
-    ppg_avg = sum(ppg_vals) / len(ppg_vals)
-    opp_avg = sum(opp_vals) / len(opp_vals)
+    ppg_avg = _winsorized_avg(ppg_vals)
+    opp_avg = _winsorized_avg(opp_vals)
 
     # FIX 2: Non-linear shrinkage for extreme teams (top/bottom 5%).
     # Standard shrinkage compresses all teams equally toward the mean,

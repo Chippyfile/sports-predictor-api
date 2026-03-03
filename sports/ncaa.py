@@ -385,7 +385,13 @@ def _ncaa_backfill_heuristic(df):
         # KenPom additive: homeOE + awayDE - lgAvg
         # If we don't have adj_oe/adj_de separately, derive from ppg/opp_ppg
         possessions = (h_tempo[i] + a_tempo[i]) / 2
-        lg_avg = 70.0  # approximate NCAA scoring avg
+        # Derive league average from actual team PPG data (winsorized)
+        _all_ppg = np.concatenate([h_ppg[h_ppg > 0], a_ppg[a_ppg > 0]])
+        if len(_all_ppg) > 20:
+            _lo, _hi = np.percentile(_all_ppg, 5), np.percentile(_all_ppg, 95)
+            lg_avg = float(np.mean(np.clip(_all_ppg, _lo, _hi)))
+        else:
+            lg_avg = 70.0  # fallback
 
         # Simplified KenPom path using available data
         home_oe = h_ppg[i] if h_ppg[i] > 0 else lg_avg

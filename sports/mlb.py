@@ -37,9 +37,15 @@ def _fit_negbin_k(run_series):
     to a series of run totals using method of moments.
     NegBin variance = μ + μ²/k  →  k = μ² / (variance - μ)
     Returns k clamped to [0.30, 1.20] for stability.
+    Winsorized at 5th/95th percentile to exclude blowouts.
     """
-    mu  = run_series.mean()
-    var = run_series.var()
+    s = run_series.dropna()
+    if len(s) < 20:
+        mu, var = s.mean(), s.var()
+    else:
+        lo, hi = s.quantile(0.05), s.quantile(0.95)
+        s = s.clip(lo, hi)
+        mu, var = s.mean(), s.var()
     if var <= mu or mu <= 0:
         return MLB_NEGBIN_K_DEFAULT
     k = (mu ** 2) / (var - mu)
