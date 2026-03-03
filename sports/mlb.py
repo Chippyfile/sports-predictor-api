@@ -367,6 +367,7 @@ def train_mlb():
             y_margin = y_margin.loc[keep_idx].reset_index(drop=True)
             y_win = y_win.loc[keep_idx].reset_index(drop=True)
             fit_weights = fit_weights[keep_idx.values] if hasattr(keep_idx, 'values') else fit_weights[-MAX_TRAIN:]
+            df = df.loc[keep_idx].reset_index(drop=True)
             n = len(X)
             print(f"  Capped training data: {len(df)} -> {n} rows (Railway timeout protection)")
 
