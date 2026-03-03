@@ -15,9 +15,9 @@ def sb_get(table, params=""):
     
     while True:
         # Add range headers for pagination
-        headers["Range"] = f"{offset}-{offset + limit - 1}"
-        
-        url = f"{SUPABASE_URL}/rest/v1/{table}?{params}"
+        sep = "&" if params else ""
+
+        url = f"{SUPABASE_URL}/rest/v1/{table}?{params}{sep}limit={limit}&offset={offset}"
         print(f"Fetching from Supabase: {url} (rows {offset}-{offset + limit - 1})")
         
         try:
