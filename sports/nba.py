@@ -88,6 +88,15 @@ def nba_build_features(df):
     df["steals_to_a"] = df["away_steals"] / df["away_turnovers"].clip(0.5)
     df["steals_to_diff"] = df["steals_to_h"] - df["steals_to_a"]
 
+    # ── Market line features (strongest public predictor) ──
+    df["market_spread"] = pd.to_numeric(df.get("market_spread_home", 0), errors="coerce").fillna(0)
+    df["market_total"] = pd.to_numeric(
+        df.get("market_ou_total", df.get("ou_total", 0)), errors="coerce"
+    ).fillna(0)
+    df["has_market"] = ((df["market_spread"] != 0) | (df["market_total"] != 0)).astype(int)
+    # Spread difference: model prediction vs market line (positive = model more bullish on home)
+    df["spread_vs_market"] = df["score_diff_pred"] - df["market_spread"]
+
     feature_cols = [
         # Heuristic signal
         "score_diff_pred", "win_pct_home", "ou_gap",
@@ -105,6 +114,8 @@ def nba_build_features(df):
         # Context
         "win_pct_diff", "form_diff", "tempo_avg",
         "rest_diff", "away_travel",
+        # Market line signal (Vegas spread is strongest public predictor)
+        "market_spread", "market_total", "spread_vs_market", "has_market",
     ]
 
     return df[feature_cols].fillna(0)

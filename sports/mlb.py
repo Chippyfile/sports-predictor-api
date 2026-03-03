@@ -251,6 +251,14 @@ def mlb_build_features(df):
     #
     # Expected impact: +1-1.5% accuracy from reduced multicollinearity,
     # more stable stacking ensemble, better generalization.
+    # ── Market line features ──
+    df["market_spread"] = pd.to_numeric(df.get("market_spread_home", 0), errors="coerce").fillna(0)
+    df["market_total"] = pd.to_numeric(
+        df.get("market_ou_total", df.get("ou_total", 0)), errors="coerce"
+    ).fillna(0)
+    df["has_market"] = ((df["market_spread"] != 0) | (df["market_total"] != 0)).astype(int)
+    df["spread_vs_market"] = df["run_diff_pred"] - df["market_spread"]
+
     feature_cols = [
         # Offensive differential (primary signal)
         "woba_diff",
@@ -274,6 +282,8 @@ def mlb_build_features(df):
         "run_diff_pred", "has_heuristic",
         # Enhancement: Platoon, starter spread, lineup confirmation
         "platoon_diff", "sp_fip_spread", "both_lineups_confirmed",
+        # Market line signal
+        "market_spread", "market_total", "spread_vs_market", "has_market",
     ]
 
     return df[feature_cols].fillna(0)

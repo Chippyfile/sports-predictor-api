@@ -250,6 +250,15 @@ def ncaa_build_features(df):
     df["is_bubble"] = df["is_bubble_game"]
     df["is_early"] = df["is_early_season"]
     df["importance"] = pd.to_numeric(df["importance_multiplier"], errors="coerce").fillna(1.0)
+
+    # ── Market line features ──
+    df["market_spread"] = pd.to_numeric(df.get("market_spread_home", 0), errors="coerce").fillna(0)
+    df["market_total"] = pd.to_numeric(
+        df.get("market_ou_total", df.get("ou_total", 0)), errors="coerce"
+    ).fillna(0)
+    df["has_market"] = ((df["market_spread"] != 0) | (df["market_total"] != 0)).astype(int)
+    _ncaa_pred_spread = pd.to_numeric(df.get("spread_home", 0), errors="coerce").fillna(0)
+    df["spread_vs_market"] = _ncaa_pred_spread - df["market_spread"]
     # tourney_x_em, early_x_form REMOVED (AUDIT P4) — correlated with components
 
     feature_cols = [
@@ -269,6 +278,8 @@ def ncaa_build_features(df):
         "is_conf_game", "season_phase",
         # R5: Schedule fatigue
         "rest_diff", "either_b2b",
+        # Market line signal
+        "market_spread", "market_total", "spread_vs_market", "has_market",
         # AUDIT P4: ppg_x_sos, em_x_conf, injury_x_em, tourney_x_em, early_x_form REMOVED
         # P1-INJ: Injury signal (components only, no interaction)
         "injury_diff", "starters_diff", "any_injury_flag",
