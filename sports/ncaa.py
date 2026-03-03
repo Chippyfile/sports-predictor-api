@@ -1,3 +1,76 @@
+_NCAA_CONF_HCA = {
+    "Big 12": 3.8, "Southeastern Conference": 3.7, "SEC": 3.7,
+    "Big Ten": 3.6, "Big Ten Conference": 3.6,
+    "Atlantic Coast Conference": 3.4, "ACC": 3.4,
+    "Big East": 3.3, "Big East Conference": 3.3,
+    "Pac-12": 3.0, "Pac-12 Conference": 3.0,
+    "Mountain West Conference": 3.2, "Mountain West": 3.2,
+    "American Athletic Conference": 3.0, "AAC": 3.0,
+    "West Coast Conference": 2.8, "WCC": 2.8,
+    "Atlantic 10 Conference": 2.7, "A-10": 2.7,
+    "Missouri Valley Conference": 2.9, "MVC": 2.9,
+}
+
+def ncaa_build_features(df):
+    df = df.copy()
+
+    # ── Raw team stats (with defaults for missing data) ──
+    raw_cols = {
+        "home_ppg": 75.0, "away_ppg": 75.0,
+        "home_opp_ppg": 72.0, "away_opp_ppg": 72.0,
+        "home_fgpct": 0.455, "away_fgpct": 0.455,
+        "home_threepct": 0.340, "away_threepct": 0.340,
+        "home_ftpct": 0.720, "away_ftpct": 0.720,
+        "home_assists": 14.0, "away_assists": 14.0,
+        "home_turnovers": 12.0, "away_turnovers": 12.0,
+        "home_tempo": 68.0, "away_tempo": 68.0,
+        "home_orb_pct": 0.28, "away_orb_pct": 0.28,
+        "home_fta_rate": 0.34, "away_fta_rate": 0.34,
+        "home_ato_ratio": 1.2, "away_ato_ratio": 1.2,
+        "home_opp_fgpct": 0.430, "away_opp_fgpct": 0.430,
+        "home_opp_threepct": 0.330, "away_opp_threepct": 0.330,
+        "home_steals": 7.0, "away_steals": 7.0,
+        "home_blocks": 3.5, "away_blocks": 3.5,
+        "home_wins": 10, "away_wins": 10,
+        "home_losses": 5, "away_losses": 5,
+        "home_form": 0.0, "away_form": 0.0,
+        "home_sos": 0.500, "away_sos": 0.500,
+        "home_rank": 200, "away_rank": 200,
+        "home_rest_days": 3, "away_rest_days": 3,
+        # v18 P1-INJ: Injury columns
+        "home_injury_penalty": 0.0, "away_injury_penalty": 0.0,
+        "injury_diff": 0.0,
+        "home_missing_starters": 0, "away_missing_starters": 0,
+        # v18 P1-CTX: Tournament context columns
+        "is_conference_tournament": 0, "is_ncaa_tournament": 0,
+        "is_bubble_game": 0, "is_early_season": 0,
+        "importance_multiplier": 1.0,
+    }
+    for col, default in raw_cols.items():
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
+        else:
+            df[col] = default
+
+    # ── AUDIT P1: Flag potentially leaked ratings ──
+    # If rating_synced_at > 24h after game_date, adj_em may contain post-game data.
+    if "rating_synced_at" in df.columns and "game_date" in df.columns:
+        try:
+            synced = pd.to_datetime(df["rating_synced_at"], errors="coerce")
+            game_dt = pd.to_datetime(df["game_date"], errors="coerce")
+            df["rating_leak_flag"] = ((synced - game_dt).dt.total_seconds() > 86400).astype(int)
+            n_leaked = int(df["rating_leak_flag"].sum())
+            if n_leaked > 0:
+                print(f"  ⚠️ AUDIT: {n_leaked}/{len(df)} rows have ratings synced >24h after game date")
+        except:
+            df["rating_leak_flag"] = 0
+    else:
+        df["rating_leak_flag"] = 0
+
+    # ── R1 FIX: Decompose adj_em_diff into neutral component + HCA component ──
+    # The raw adj_em_diff contains HCA baked in (from home PPG). Separate them
+    # so the ML can learn their independent weights instead of double-counting.
+    raw_em_diff = df["home_adj_em"].fillna(0) - df["away_adj_em"].fillna(0)
 import numpy as np, pandas as pd, traceback as _tb, shap, requests, time as _time
 from datetime import datetime
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, GradientBoostingClassifier, RandomForestClassifier
