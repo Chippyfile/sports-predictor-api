@@ -309,6 +309,12 @@ def mlb_build_features(df):
         "away_sp_ip":       5.5,
         "home_def_oaa":     0.0,
         "away_def_oaa":     0.0,
+        # Enhancement: Platoon splits (wOBA delta from L/R matchup)
+        "home_platoon_delta": 0.0,
+        "away_platoon_delta": 0.0,
+        # Enhancement: Lineup confirmation flags
+        "home_lineup_confirmed": 0.0,
+        "away_lineup_confirmed": 0.0,
     }
     for col, default in raw_cols.items():
         if col in df.columns:
@@ -351,6 +357,20 @@ def mlb_build_features(df):
     df["away_bp_exposure"] = np.maximum(0, 9.0 - df["away_sp_ip"]) * (df["away_bullpen_era"] / 4.10)
     df["bp_exposure_diff"] = df["home_bp_exposure"] - df["away_bp_exposure"]
     df["def_oaa_diff"]     = df["home_def_oaa"] - df["away_def_oaa"]
+
+    # ── Enhancement: Platoon advantage differential ──
+    # Positive = home team has larger platoon advantage vs opposing starter
+    df["platoon_diff"] = df["home_platoon_delta"] - df["away_platoon_delta"]
+
+    # ── Enhancement: Starter FIP spread (absolute gap between starters) ──
+    # Ace vs #5 starter creates high confidence regardless of direction
+    # This captures matchup lopsidedness that fip_diff's sign obscures
+    df["sp_fip_spread"] = (df["home_starter_fip"] - df["away_starter_fip"]).abs()
+
+    # ── Enhancement: Lineup confirmation (both lineups confirmed = more reliable prediction) ──
+    df["both_lineups_confirmed"] = (
+        (df["home_lineup_confirmed"] == 1) & (df["away_lineup_confirmed"] == 1)
+    ).astype(int)
 
     # ── FIX ML2: Interaction features (capture non-linear relationships) ──
     # starter_quality × bullpen_quality: short-start ace with bad bullpen is different
@@ -416,6 +436,8 @@ def mlb_build_features(df):
         "fip_x_bullpen", "woba_x_park", "wind_x_fip",
         # Heuristic signal (now backfilled for all rows)
         "run_diff_pred", "has_heuristic",
+        # Enhancement: Platoon, starter spread, lineup confirmation
+        "platoon_diff", "sp_fip_spread", "both_lineups_confirmed",
     ]
 
     return df[feature_cols].fillna(0)
@@ -700,6 +722,12 @@ def predict_mlb(game: dict):
     home_def_oaa = float(game.get("home_def_oaa", 0.0))
     away_def_oaa = float(game.get("away_def_oaa", 0.0))
 
+    # Enhancement: Platoon splits and lineup confirmation
+    home_platoon_delta = float(game.get("home_platoon_delta", 0.0))
+    away_platoon_delta = float(game.get("away_platoon_delta", 0.0))
+    home_lineup_confirmed = int(game.get("home_lineup_confirmed", 0))
+    away_lineup_confirmed = int(game.get("away_lineup_confirmed", 0))
+
     # SP FIP known flag
     has_sp_fip = 1 if (home_sp_fip != 4.25 and away_sp_fip != 4.25) else 0
 
@@ -744,6 +772,10 @@ def predict_mlb(game: dict):
         # Heuristic signal
         "run_diff_pred": ph - pa,
         "has_heuristic": 1 if ph > 0 or pa > 0 else 0,
+        # Enhancement: Platoon, starter spread, lineup confirmation
+        "platoon_diff": home_platoon_delta - away_platoon_delta,
+        "sp_fip_spread": abs(home_starter_fip - away_starter_fip),
+        "both_lineups_confirmed": 1 if (home_lineup_confirmed and away_lineup_confirmed) else 0,
     }
 
     # Create DataFrame with only the features the model expects
