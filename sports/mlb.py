@@ -22,7 +22,7 @@ from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, G
 from sklearn.linear_model import RidgeCV, LogisticRegression, ElasticNetCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.isotonic import IsotonicRegression
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score, cross_val_predict
 from sklearn.calibration import CalibratedClassifierCV
 from scipy.stats import nbinom
 from db import sb_get, save_model, load_model
