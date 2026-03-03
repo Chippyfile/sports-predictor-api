@@ -148,11 +148,7 @@ def _histogram(arr, bins=20):
 
 def accuracy_report(sport_table, sport_label):
     rows = sb_get(sport_table,
-                  "result_entered=eq.true&ml_correct=not.is.null"
-                  "&select=ml_correct,rl_correct,ou_correct,win_pct_home,"
-                  "pred_home_runs,pred_away_runs,pred_home_score,pred_away_score,"
-                  "actual_home_runs,actual_away_runs,actual_home_score,actual_away_score,"
-                  "ou_total,market_ou_total")
+                  "result_entered=eq.true&ml_correct=not.is.null&select=*")
     if not rows:
         return {"error": f"No completed {sport_label} games found"}
 
