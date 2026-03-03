@@ -26,6 +26,7 @@ from sklearn.model_selection import cross_val_score, cross_val_predict
 from sklearn.calibration import CalibratedClassifierCV
 from scipy.stats import nbinom
 from db import sb_get, save_model, load_model
+from dynamic_constants import compute_mlb_season_constants, MLB_DEFAULT_CONSTANTS
 from ml_utils import HAS_XGB, _time_series_oof, _time_series_oof_proba, StackedRegressor, StackedClassifier
 if HAS_XGB:
     from xgboost import XGBRegressor, XGBClassifier
@@ -203,10 +204,18 @@ def mlb_build_features(df):
 
     # ── League run environment context ──
     if "season" in df.columns:
-        df["lg_rpg"] = df["season"].map(
-            lambda s: SEASON_CONSTANTS.get(int(s), DEFAULT_CONSTANTS)["lg_rpg"]
-            if pd.notna(s) else DEFAULT_CONSTANTS["lg_rpg"]
-        )
+        # Dynamic league averages (derived from historical data at training time)
+        _dyn = getattr(mlb_build_features, "_dynamic_constants", None)
+        if _dyn:
+            df["lg_rpg"] = df["season"].map(
+                lambda s: _dyn.get(int(s), DEFAULT_CONSTANTS)["lg_rpg"]
+                if pd.notna(s) else DEFAULT_CONSTANTS["lg_rpg"]
+            )
+        else:
+            df["lg_rpg"] = df["season"].map(
+                lambda s: SEASON_CONSTANTS.get(int(s), DEFAULT_CONSTANTS)["lg_rpg"]
+                if pd.notna(s) else DEFAULT_CONSTANTS["lg_rpg"]
+            )
     else:
         df["lg_rpg"] = DEFAULT_CONSTANTS["lg_rpg"]
 

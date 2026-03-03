@@ -7,6 +7,7 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import cross_val_score, cross_val_predict
 from sklearn.calibration import CalibratedClassifierCV
 from db import sb_get, save_model, load_model
+from dynamic_constants import compute_nba_league_averages, NBA_DEFAULT_AVERAGES
 from ml_utils import HAS_XGB, _time_series_oof, _time_series_oof_proba, StackedRegressor, StackedClassifier
 if HAS_XGB:
     from xgboost import XGBRegressor, XGBClassifier
@@ -33,12 +34,24 @@ def nba_build_features(df):
     df["net_rtg_diff"] = df["home_net_rtg"] - df["away_net_rtg"]
 
     # ── Raw stat differentials (from nbaSync 30+ columns) ──
+    # Dynamic league averages (derived from nba_historical, falls back to static)
+    _nba_avgs = getattr(nba_build_features, "_league_averages", NBA_DEFAULT_AVERAGES)
     for col_base, default in [
-        ("ppg", 110), ("opp_ppg", 110), ("fgpct", 0.46), ("threepct", 0.36),
-        ("ftpct", 0.77), ("assists", 25), ("turnovers", 14), ("tempo", 100),
-        ("orb_pct", 0.25), ("fta_rate", 0.28), ("ato_ratio", 1.7),
-        ("opp_fgpct", 0.46), ("opp_threepct", 0.35),
-        ("steals", 7.5), ("blocks", 5.0),
+        ("ppg", _nba_avgs.get("ppg", 110)),
+        ("opp_ppg", _nba_avgs.get("opp_ppg", 110)),
+        ("fgpct", _nba_avgs.get("fgpct", 0.46)),
+        ("threepct", _nba_avgs.get("threepct", 0.36)),
+        ("ftpct", _nba_avgs.get("ftpct", 0.77)),
+        ("assists", _nba_avgs.get("assists", 25)),
+        ("turnovers", _nba_avgs.get("turnovers", 14)),
+        ("tempo", _nba_avgs.get("tempo", 100)),
+        ("orb_pct", _nba_avgs.get("orb_pct", 0.25)),
+        ("fta_rate", _nba_avgs.get("fta_rate", 0.28)),
+        ("ato_ratio", _nba_avgs.get("ato_ratio", 1.7)),
+        ("opp_fgpct", _nba_avgs.get("fgpct", 0.46)),
+        ("opp_threepct", _nba_avgs.get("threepct", 0.35)),
+        ("steals", _nba_avgs.get("steals", 7.5)),
+        ("blocks", _nba_avgs.get("blocks", 5.0)),
     ]:
         h_col = f"home_{col_base}"
         a_col = f"away_{col_base}"
@@ -149,6 +162,15 @@ def train_nba():
         df, sample_weights, n_historical = _nba_merge_historical(current_df)
         if len(df) < 10:
             return {"error": "Not enough NBA data", "n": len(df), "n_current": len(current_df)}
+        # Derive league averages from historical data
+        try:
+            _nba_lg = compute_nba_league_averages()
+            if _nba_lg:
+                nba_build_features._league_averages = _nba_lg
+                print(f"  Using dynamic NBA averages ({len(_nba_lg)} stats)")
+        except Exception as e:
+            print(f"  Dynamic NBA averages failed ({e}), using static")
+
         X  = nba_build_features(df)
         y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
         y_win    = (y_margin > 0).astype(int)
