@@ -356,7 +356,7 @@ def train_mlb():
 
         # ── FIX 1: Cap training data to prevent Railway timeout ──
         # With 14k+ rows, 6x cross_val_predict exceeds Railway CPU budget.
-        MAX_TRAIN = 12000
+        MAX_TRAIN = 10000
         n = len(df)
         if n > MAX_TRAIN:
             if "season_weight" in df.columns:
