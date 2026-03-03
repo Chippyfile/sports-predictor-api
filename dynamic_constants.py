@@ -2,8 +2,22 @@
 Dynamic league averages derived from historical data.
 Replaces hardcoded constants where possible.
 """
+import numpy as np
 import pandas as pd
 from db import sb_get
+
+
+def _winsorized_mean(series, lower=0.05, upper=0.95):
+    """
+    Winsorized mean: cap outliers at percentile bounds instead of removing.
+    More robust than raw mean for league averages (blowouts, rain-shortened, etc.)
+    """
+    s = series.dropna()
+    if len(s) < 20:
+        return float(s.mean()) if len(s) > 0 else None
+    lo = s.quantile(lower)
+    hi = s.quantile(upper)
+    return float(s.clip(lo, hi).mean())
 
 
 def compute_mlb_season_constants():
@@ -52,16 +66,16 @@ def compute_mlb_season_constants():
     constants = {}
     for season, grp in df.groupby("season"):
         season = int(season)
-        # lg_rpg: average runs per team per game
+        # lg_rpg: average runs per team per game (winsorized to exclude blowouts)
         all_runs = pd.concat([grp["actual_home_runs"], grp["actual_away_runs"]])
-        lg_rpg = round(float(all_runs.mean()), 2)
+        lg_rpg = round(_winsorized_mean(all_runs), 2)
 
         # lg_woba: average of all team wOBA values (proxy for league wOBA)
         all_woba = pd.concat([
             grp["home_woba"].dropna(),
             grp["away_woba"].dropna()
         ])
-        lg_woba = round(float(all_woba.mean()), 3) if len(all_woba) > 50 else None
+        lg_woba = round(_winsorized_mean(all_woba), 3) if len(all_woba) > 50 else None
 
         # lg_fip: average of all SP FIP values
         all_fip = pd.concat([
@@ -70,7 +84,7 @@ def compute_mlb_season_constants():
         ])
         # Filter out sentinel values (4.25 = missing)
         all_fip = all_fip[all_fip != 4.25]
-        lg_fip = round(float(all_fip.mean()), 2) if len(all_fip) > 50 else None
+        lg_fip = round(_winsorized_mean(all_fip), 2) if len(all_fip) > 50 else None
 
         constants[season] = {
             "lg_rpg": lg_rpg,
@@ -135,7 +149,7 @@ def compute_nba_league_averages():
         if h_col in df.columns and a_col in df.columns:
             combined = pd.concat([df[h_col].dropna(), df[a_col].dropna()])
             if len(combined) > 100:
-                averages[name] = round(float(combined.mean()), 3)
+                averages[name] = round(_winsorized_mean(combined), 3)
 
     print(f"  NBA dynamic averages from {len(df)} historical games:")
     for k, v in sorted(averages.items()):

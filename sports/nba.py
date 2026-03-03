@@ -171,6 +171,15 @@ def train_nba():
         except Exception as e:
             print(f"  Dynamic NBA averages failed ({e}), using static")
 
+        # Derive league averages from historical data
+        try:
+            _nba_lg = compute_nba_league_averages()
+            if _nba_lg:
+                nba_build_features._league_averages = _nba_lg
+                print(f"  Using dynamic NBA averages ({len(_nba_lg)} stats)")
+        except Exception as e:
+            print(f"  Dynamic NBA averages failed ({e}), using static")
+
         X  = nba_build_features(df)
         y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
         y_win    = (y_margin > 0).astype(int)
