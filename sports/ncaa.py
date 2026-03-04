@@ -1,7 +1,7 @@
 import numpy as np, pandas as pd, traceback as _tb, shap, requests, time as _time
 from datetime import datetime
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, GradientBoostingClassifier, RandomForestClassifier
-from sklearn.linear_model import RidgeCV, LogisticRegression, Ridge, ElasticNetCV
+from sklearn.linear_model import RidgeCV, LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import cross_val_score, cross_val_predict
@@ -9,9 +9,14 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import mean_absolute_error, brier_score_loss
 from db import sb_get, save_model, load_model
 from config import SUPABASE_URL, SUPABASE_KEY
-from ml_utils import HAS_XGB, _time_series_oof, _time_series_oof_proba, StackedRegressor, StackedClassifier
+from ml_utils import HAS_XGB, _time_series_oof, StackedRegressor, StackedClassifier
 if HAS_XGB:
     from xgboost import XGBRegressor, XGBClassifier
+try:
+    from catboost import CatBoostRegressor
+    HAS_CAT = True
+except ImportError:
+    HAS_CAT = False
 
 # Conference HCA mapping — used by ncaa_build_features R1 fix and _ncaa_backfill_heuristic
 _NCAA_CONF_HCA = {
@@ -578,7 +583,7 @@ def train_ncaa():
         n = len(df)
 
         # Cap training data for Railway timeout protection
-        MAX_TRAIN = 12000
+        MAX_TRAIN = 12000  # Railway timeout protection; set 99999 for local
         if n > MAX_TRAIN:
             if "season_weight" in df.columns:
                 keep_idx = df["season_weight"].fillna(0.5).nlargest(MAX_TRAIN).index
@@ -593,52 +598,61 @@ def train_ncaa():
             n = MAX_TRAIN
             print(f"  NCAA: Capped to {n} rows for Railway timeout protection")
 
-        cv_folds = min(5, n)
+        cv_folds = min(5, n)  # 5 for Railway; set 10 for local
         fit_weights = sample_weights if sample_weights is not None else np.ones(n)
 
         if n >= 200:
-            # ── R7: Stacking with ElasticNet replacing Ridge for diversity ──
-            gbm = GradientBoostingRegressor(
-                n_estimators=150, max_depth=4,
-                learning_rate=0.06, subsample=0.8,
-                min_samples_leaf=20, random_state=42,
-            )
+            # ── Stacking ensemble at 160 estimators (sweep-optimized) ──
             rf_reg = RandomForestRegressor(
-                n_estimators=100, max_depth=6,
+                n_estimators=160, max_depth=6,
                 min_samples_leaf=15, max_features=0.7,
-                random_state=42, n_jobs=1,
+                random_state=42, n_jobs=1,  # Railway: single core; set -1 for local
             )
-            # R7 FIX: ElasticNet replaces Ridge — L1 component adds feature selection
-            enet = ElasticNetCV(l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
-                                alphas=[0.01, 0.1, 1.0, 5.0],
-                                cv=cv_folds, random_state=42)
+            if HAS_XGB:
+                xgb_reg = XGBRegressor(n_estimators=160, max_depth=4, learning_rate=0.06, subsample=0.8, colsample_bytree=0.8, min_child_weight=20, random_state=42, tree_method="hist", verbosity=0)
+            if HAS_CAT:
+                cat_reg = CatBoostRegressor(iterations=160, depth=4, learning_rate=0.06, subsample=0.8, min_data_in_leaf=20, random_seed=42, verbose=0)
 
-            if HAS_XGB:
-                xgb_reg = XGBRegressor(n_estimators=120, max_depth=4, learning_rate=0.06, subsample=0.8, colsample_bytree=0.8, min_child_weight=20, random_state=42, tree_method="hist", verbosity=0)
-            print(f"  NCAAB: Training stacking ensemble (ts-cv, {'XGB+' if HAS_XGB else ''}GBM+RF+ENet)...")
-            reg_models = {"gbm": gbm, "rf": rf_reg, "enet": enet}
-            if HAS_XGB:
-                reg_models["xgb"] = xgb_reg
+            ensemble_parts = []
+            if HAS_XGB: ensemble_parts.append('XGB')
+            if HAS_CAT: ensemble_parts.append('CAT')
+            ensemble_parts.append('RF')
+            ensemble_label = '+'.join(ensemble_parts)
+            print(f"  NCAAB: Training stacking ensemble on {n} rows (ts-cv, {ensemble_label}, 160 est)...")
+
+            reg_models = {"rf": rf_reg}
+            if HAS_XGB: reg_models["xgb"] = xgb_reg
+            if HAS_CAT: reg_models["cat"] = cat_reg
+
             oof = _time_series_oof(reg_models, X_scaled, y_margin, df, n_splits=cv_folds, weights=fit_weights)
-            oof_gbm, oof_rf, oof_enet = oof["gbm"], oof["rf"], oof["enet"]
-            gbm.fit(X_scaled, y_margin, sample_weight=fit_weights)
+            oof_rf = oof["rf"]
+
             rf_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
-            enet.fit(X_scaled, y_margin)
-            if HAS_XGB:
-                xgb_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
-            if HAS_XGB:
-                meta_X = np.column_stack([oof_gbm, oof_rf, oof_enet, oof["xgb"]])
-            else:
-                meta_X = np.column_stack([oof_gbm, oof_rf, oof_enet])
+            if HAS_XGB: xgb_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
+            if HAS_CAT: cat_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
+
+            oof_cols = [oof_rf]
+            if HAS_XGB: oof_cols.append(oof["xgb"])
+            if HAS_CAT: oof_cols.append(oof["cat"])
+            meta_X = np.column_stack(oof_cols)
             meta_reg = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
             meta_reg.fit(meta_X, y_margin)
-            reg = StackedRegressor([gbm, rf_reg, enet] + ([xgb_reg] if HAS_XGB else []), meta_reg, scaler)
-            reg_cv = cross_val_score(gbm, X_scaled, y_margin, cv=cv_folds, scoring="neg_mean_absolute_error")
-            explainer = shap.TreeExplainer(xgb_reg if HAS_XGB else gbm)
-            model_type = "StackedEnsemble_v3_TSCV" + ("_XGB" if HAS_XGB else "")
+
+            # Bias correction from OOF residuals
+            oof_meta = meta_reg.predict(meta_X)
+            bias_correction = float(np.mean(oof_meta - y_margin.values))
+            print(f"  NCAAB bias correction: {bias_correction:+.3f} pts (will be subtracted from predictions)")
+
+            base_regs = [rf_reg]
+            if HAS_XGB: base_regs.append(xgb_reg)
+            if HAS_CAT: base_regs.append(cat_reg)
+            reg = StackedRegressor(base_regs, meta_reg, scaler)
+            reg_cv_mae = float(np.mean(np.abs(oof_meta - y_margin.values)))
+            print(f"  NCAAB stacked OOF MAE: {reg_cv_mae:.3f}")
+            explainer = shap.TreeExplainer(xgb_reg if HAS_XGB else rf_reg)
+            model_type = "StackedEnsemble_v4_TSCV"
             meta_weights = meta_reg.coef_.round(4).tolist()
             print(f"  NCAAB meta weights: {meta_weights}")
-            print(f"  ElasticNet selected: l1_ratio={enet.l1_ratio_}, alpha={enet.alpha_:.4f}")
 
             # ── R6 FIX: Compute bias correction from OOF residuals ──
             oof_meta = meta_reg.predict(meta_X)
@@ -700,6 +714,7 @@ def train_ncaa():
             reg.fit(X_scaled, y_margin)
             reg_cv = cross_val_score(reg, X_scaled, y_margin,
                                       cv=min(5, len(df)), scoring="neg_mean_absolute_error")
+            reg_cv_mae = float(-reg_cv.mean())
             clf = CalibratedClassifierCV(
                 LogisticRegression(max_iter=1000), cv=min(5, len(df))
             )
@@ -714,7 +729,7 @@ def train_ncaa():
         bundle = {
             "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
             "feature_cols": list(X.columns), "n_train": len(df),
-            "mae_cv": float(-reg_cv.mean()), "model_type": model_type,
+            "mae_cv": reg_cv_mae, "model_type": model_type,
             "trained_at": datetime.utcnow().isoformat(),
             # R6: Bias correction
             "bias_correction": bias_correction,
@@ -728,7 +743,7 @@ def train_ncaa():
                 "n_historical": n_historical,
                 "n_current": n_current,
                 "isotonic_source": f"current_season ({n_current_oof} OOF samples)" if n >= 200 and n_current_oof >= 50 else "all_data",
-                "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns),
+                "mae_cv": round(reg_cv_mae, 3), "features": list(X.columns),
                 "bias_correction": round(bias_correction, 3),
                 "meta_weights": meta_weights}
 
