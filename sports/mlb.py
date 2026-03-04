@@ -381,7 +381,7 @@ def train_mlb():
 
         # ── FIX 1: Cap training data to prevent Railway timeout ──
         # With 14k+ rows, 6x cross_val_predict exceeds Railway CPU budget.
-        MAX_TRAIN = 50000  # Raised for local training (was 10000 for Railway)
+        MAX_TRAIN = 6000  # Railway CPU budget — ~4 min with XGB+GBM+RF+ENet, 2-fold CV
         n = len(df)
         if n > MAX_TRAIN:
             if "season_weight" in df.columns:
@@ -398,7 +398,7 @@ def train_mlb():
 
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
-        cv_folds = min(3, n)
+        cv_folds = 2  # Railway CPU budget — 3 folds x 4 models x 6k rows = timeout
 
         if n >= 200:
             # ── FIX 2: Lighter stacking ensemble ─────────────────
