@@ -68,8 +68,18 @@ def index():
 
 @app.route("/health")
 def health():
-    trained = [s for s in ["mlb", "nba", "ncaa", "nfl", "ncaaf"] if load_model(s)]
-    disp = load_model("mlb_dispersion")
+    trained = []
+    for s in ["mlb", "nba", "ncaa", "nfl", "ncaaf"]:
+        try:
+            if load_model(s):
+                trained.append(s)
+        except Exception:
+            pass  # stale or incompatible pkl — skip, don't crash
+    disp = None
+    try:
+        disp = load_model("mlb_dispersion")
+    except Exception:
+        pass
     return jsonify({
         "status": "healthy",
         "trained_models": trained,
@@ -160,7 +170,10 @@ def route_accuracy_all():
 
 @app.route("/model-info/<sport>")
 def route_model_info(sport):
-    bundle = load_model(sport.lower())
+    try:
+        bundle = load_model(sport.lower())
+    except Exception:
+        bundle = None
     if not bundle:
         return jsonify({"error": f"{sport} model not trained yet"})
     info = {
@@ -172,7 +185,10 @@ def route_model_info(sport):
         "features": bundle.get("feature_cols"),
     }
     if sport.lower() == "mlb":
-        info["dispersion"] = load_model("mlb_dispersion")
+        try:
+            info["dispersion"] = load_model("mlb_dispersion")
+        except Exception:
+            info["dispersion"] = None
     return jsonify(info)
 
 
@@ -248,7 +264,10 @@ def route_cron_status():
     from db import load_model
     models_status = {}
     for sport in ["mlb", "nba", "ncaa", "nfl", "ncaaf"]:
-        bundle = load_model(sport)
+        try:
+            bundle = load_model(sport)
+        except Exception:
+            bundle = None
         if bundle:
             trained_at = bundle.get("trained_at", "")
             try:
