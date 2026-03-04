@@ -114,6 +114,70 @@ def route_train_all():
         "nfl": train_nfl(), "ncaaf": train_ncaaf(),
     })
 
+
+# ═══════════════════════════════════════════════════════════════
+# ROUTES — Async Training (bypasses proxy timeout)
+# POST /train/async/<sport>  — returns immediately, trains in background
+# POST /train/async/all      — queues all sports sequentially
+# GET  /train/async/status   — check progress
+# ═══════════════════════════════════════════════════════════════
+
+import threading
+
+_async_status = {}  # sport -> {"status": "running"|"done"|"error", "result": ..., "started_at": ...}
+
+def _run_async(sport, fn):
+    _async_status[sport] = {"status": "running", "started_at": datetime.utcnow().isoformat()}
+    try:
+        result = fn()
+        _async_status[sport] = {
+            "status": "done",
+            "result": result,
+            "started_at": _async_status[sport]["started_at"],
+            "finished_at": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        _async_status[sport] = {
+            "status": "error",
+            "error": str(e),
+            "started_at": _async_status[sport]["started_at"],
+            "finished_at": datetime.utcnow().isoformat(),
+        }
+
+@app.route("/train/async/<sport>", methods=["POST"])
+def route_train_async(sport):
+    fns = {"mlb": train_mlb, "nba": train_nba, "ncaa": train_ncaa,
+           "nfl": train_nfl, "ncaaf": train_ncaaf}
+    fn = fns.get(sport.lower())
+    if not fn:
+        return jsonify({"error": f"Unknown sport: {sport}"}), 400
+    if _async_status.get(sport, {}).get("status") == "running":
+        return jsonify({"status": "already_running", "sport": sport})
+    t = threading.Thread(target=_run_async, args=(sport, fn), daemon=True)
+    t.start()
+    return jsonify({"status": "started", "sport": sport, "check": f"/train/async/status"})
+
+@app.route("/train/async/all", methods=["POST"])
+def route_train_async_all():
+    fns = {"mlb": train_mlb, "nba": train_nba, "ncaa": train_ncaa,
+           "nfl": train_nfl, "ncaaf": train_ncaaf}
+    def _run_all():
+        for sport, fn in fns.items():
+            _run_async(sport, fn)
+    already_running = [s for s, v in _async_status.items() if v.get("status") == "running"]
+    if already_running:
+        return jsonify({"status": "already_running", "sports": already_running})
+    t = threading.Thread(target=_run_all, daemon=True)
+    t.start()
+    return jsonify({"status": "started", "sports": list(fns.keys()), "check": "/train/async/status"})
+
+@app.route("/train/async/status")
+def route_train_async_status():
+    return jsonify({
+        "jobs": _async_status,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+
 @app.route("/calibrate/mlb", methods=["POST"])
 def route_calibrate_mlb():
     return jsonify(calibrate_mlb_dispersion())
