@@ -1,16 +1,21 @@
 import numpy as np, pandas as pd, traceback as _tb, shap
 from datetime import datetime
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, RandomForestClassifier, GradientBoostingClassifier
-from sklearn.linear_model import RidgeCV, LogisticRegression, Ridge
+from sklearn.linear_model import RidgeCV, LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import cross_val_score, cross_val_predict
 from sklearn.calibration import CalibratedClassifierCV
 from db import sb_get, save_model, load_model
 from dynamic_constants import compute_nba_league_averages, NBA_DEFAULT_AVERAGES
-from ml_utils import HAS_XGB, _time_series_oof, _time_series_oof_proba, StackedRegressor, StackedClassifier
+from ml_utils import HAS_XGB, _time_series_oof, StackedRegressor, StackedClassifier
 if HAS_XGB:
     from xgboost import XGBRegressor, XGBClassifier
+try:
+    from catboost import CatBoostRegressor
+    HAS_CAT = True
+except ImportError:
+    HAS_CAT = False
 
 def nba_build_features(df):
     """
@@ -182,24 +187,6 @@ def train_nba():
         except Exception as e:
             print(f"  Dynamic NBA averages failed ({e}), using static")
 
-        # Derive league averages from historical data
-        try:
-            _nba_lg = compute_nba_league_averages()
-            if _nba_lg:
-                nba_build_features._league_averages = _nba_lg
-                print(f"  Using dynamic NBA averages ({len(_nba_lg)} stats)")
-        except Exception as e:
-            print(f"  Dynamic NBA averages failed ({e}), using static")
-
-        # Derive league averages from historical data
-        try:
-            _nba_lg = compute_nba_league_averages()
-            if _nba_lg:
-                nba_build_features._league_averages = _nba_lg
-                print(f"  Using dynamic NBA averages ({len(_nba_lg)} stats)")
-        except Exception as e:
-            print(f"  Dynamic NBA averages failed ({e}), using static")
-
         X  = nba_build_features(df)
         y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
         y_win    = (y_margin > 0).astype(int)
@@ -207,50 +194,61 @@ def train_nba():
         scaler   = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         n = len(df)
-        cv_folds = min(5, n)
+        cv_folds = min(5, n)  # 5 for Railway; set 10 for local
 
         if n >= 200:
-            # ── Stacking Ensemble (matches MLB/NCAA architecture) ──
-            gbm = GradientBoostingRegressor(
-                n_estimators=150, max_depth=4,
-                learning_rate=0.06, subsample=0.8,
-                min_samples_leaf=20, random_state=42,
-            )
+            # ── Stacking ensemble: XGB+CAT+RF at 50 est (sweep-optimized) ──
             rf_reg = RandomForestRegressor(
-                n_estimators=100, max_depth=6,
+                n_estimators=50, max_depth=6,
                 min_samples_leaf=15, max_features=0.7,
-                random_state=42, n_jobs=1,
+                random_state=42, n_jobs=1,  # Railway: single core; set -1 for local
             )
-            ridge = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
+            if HAS_XGB:
+                xgb_reg = XGBRegressor(n_estimators=50, max_depth=4, learning_rate=0.06, subsample=0.8, colsample_bytree=0.8, min_child_weight=20, random_state=42, tree_method="hist", verbosity=0)
+            if HAS_CAT:
+                cat_reg = CatBoostRegressor(iterations=50, depth=4, learning_rate=0.06, subsample=0.8, min_data_in_leaf=20, random_seed=42, verbose=0)
 
-            if HAS_XGB:
-                xgb_reg = XGBRegressor(n_estimators=120, max_depth=4, learning_rate=0.06, subsample=0.8, colsample_bytree=0.8, min_child_weight=20, random_state=42, tree_method="hist", verbosity=0)
-            print(f"  NBA: Training stacking ensemble (ts-cv, {'XGB+' if HAS_XGB else ''}GBM+RF+Ridge)...")
-            reg_models = {"gbm": gbm, "rf": rf_reg, "ridge": ridge}
-            if HAS_XGB:
-                reg_models["xgb"] = xgb_reg
+            ensemble_parts = []
+            if HAS_XGB: ensemble_parts.append('XGB')
+            if HAS_CAT: ensemble_parts.append('CAT')
+            ensemble_parts.append('RF')
+            ensemble_label = '+'.join(ensemble_parts)
+            print(f"  NBA: Training stacking ensemble on {n} rows (ts-cv, {ensemble_label}, 50 est)...")
+
+            reg_models = {"rf": rf_reg}
+            if HAS_XGB: reg_models["xgb"] = xgb_reg
+            if HAS_CAT: reg_models["cat"] = cat_reg
+
             oof = _time_series_oof(reg_models, X_scaled, y_margin, df, n_splits=cv_folds, weights=sample_weights)
-            oof_gbm, oof_rf, oof_ridge = oof["gbm"], oof["rf"], oof["ridge"]
-            gbm.fit(X_scaled, y_margin)
+            oof_rf = oof["rf"]
+
             rf_reg.fit(X_scaled, y_margin)
-            ridge.fit(X_scaled, y_margin)
-            if HAS_XGB:
-                xgb_reg.fit(X_scaled, y_margin)
-            if HAS_XGB:
-                meta_X = np.column_stack([oof_gbm, oof_rf, oof_ridge, oof["xgb"]])
-            else:
-                meta_X = np.column_stack([oof_gbm, oof_rf, oof_ridge])
-            meta_reg = Ridge(alpha=1.0)
+            if HAS_XGB: xgb_reg.fit(X_scaled, y_margin)
+            if HAS_CAT: cat_reg.fit(X_scaled, y_margin)
+
+            oof_cols = [oof_rf]
+            if HAS_XGB: oof_cols.append(oof["xgb"])
+            if HAS_CAT: oof_cols.append(oof["cat"])
+            meta_X = np.column_stack(oof_cols)
+            meta_reg = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
             meta_reg.fit(meta_X, y_margin)
-            reg = StackedRegressor([gbm, rf_reg, ridge] + ([xgb_reg] if HAS_XGB else []), meta_reg, scaler)
-            reg_cv = cross_val_score(gbm, X_scaled, y_margin, cv=cv_folds, scoring="neg_mean_absolute_error")
-            explainer = shap.TreeExplainer(xgb_reg if HAS_XGB else gbm)
-            model_type = "StackedEnsemble_v3_TSCV" + ("_XGB" if HAS_XGB else "")
+
+            base_regs = [rf_reg]
+            if HAS_XGB: base_regs.append(xgb_reg)
+            if HAS_CAT: base_regs.append(cat_reg)
+            reg = StackedRegressor(base_regs, meta_reg, scaler)
+
+            # True stacked OOF MAE
+            oof_meta = meta_reg.predict(meta_X)
+            reg_cv_mae = float(np.mean(np.abs(oof_meta - y_margin.values)))
+            print(f"  NBA stacked OOF MAE: {reg_cv_mae:.3f}")
+
+            explainer = shap.TreeExplainer(xgb_reg if HAS_XGB else rf_reg)
+            model_type = "StackedEnsemble_v4_TSCV"
             meta_weights = meta_reg.coef_.round(4).tolist()
             print(f"  NBA meta weights: {meta_weights}")
 
             # ── Bias correction ──
-            oof_meta = meta_reg.predict(meta_X)
             bias_correction = float(np.mean(oof_meta - y_margin.values))
             print(f"  NBA bias correction: {bias_correction:+.3f} pts")
 
@@ -293,6 +291,7 @@ def train_nba():
             reg.fit(X_scaled, y_margin)
             reg_cv = cross_val_score(reg, X_scaled, y_margin,
                                       cv=min(5, n), scoring="neg_mean_absolute_error")
+            reg_cv_mae = float(-reg_cv.mean())
             clf = CalibratedClassifierCV(
                 LogisticRegression(max_iter=1000), cv=min(5, n)
             )
@@ -306,7 +305,7 @@ def train_nba():
         bundle = {
             "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
             "feature_cols": list(X.columns), "n_train": n,
-            "mae_cv": float(-reg_cv.mean()), "model_type": model_type,
+            "mae_cv": reg_cv_mae, "model_type": model_type,
             "trained_at": datetime.utcnow().isoformat(),
             "bias_correction": bias_correction,
             "isotonic": isotonic,
@@ -314,7 +313,7 @@ def train_nba():
         }
         save_model("nba", bundle)
         return {"status": "trained", "n_train": n, "model_type": model_type,
-                "mae_cv": round(float(-reg_cv.mean()), 3), "features": list(X.columns),
+                "mae_cv": round(reg_cv_mae, 3), "features": list(X.columns),
                 "bias_correction": round(bias_correction, 3),
                 "meta_weights": meta_weights if n >= 200 else []}
 

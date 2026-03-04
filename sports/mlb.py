@@ -28,8 +28,8 @@ PARK_HFA = {
 }
 import numpy as np, pandas as pd, traceback as _tb, shap
 from datetime import datetime
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, GradientBoostingClassifier
-from sklearn.linear_model import RidgeCV, LogisticRegression, ElasticNetCV
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingClassifier
+from sklearn.linear_model import RidgeCV, LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import cross_val_score, cross_val_predict
@@ -37,9 +37,12 @@ from sklearn.calibration import CalibratedClassifierCV
 from scipy.stats import nbinom
 from db import sb_get, save_model, load_model
 from dynamic_constants import compute_mlb_season_constants, MLB_DEFAULT_CONSTANTS
-from ml_utils import HAS_XGB, _time_series_oof, _time_series_oof_proba, StackedRegressor, StackedClassifier
-if HAS_XGB:
-    from xgboost import XGBRegressor, XGBClassifier
+from ml_utils import _time_series_oof, StackedClassifier
+try:
+    from catboost import CatBoostRegressor
+    HAS_CAT = True
+except ImportError:
+    HAS_CAT = False
 
 def _fit_negbin_k(run_series):
     """
@@ -391,7 +394,7 @@ def train_mlb():
 
         # ── FIX 1: Cap training data to prevent Railway timeout ──
         # With 14k+ rows, 6x cross_val_predict exceeds Railway CPU budget.
-        MAX_TRAIN = 6000  # Railway CPU budget — ~4 min with XGB+GBM+RF+ENet, 2-fold CV
+        MAX_TRAIN = 99999  # RF-only is fast enough for full data even on Railway
         n = len(df)
         if n > MAX_TRAIN:
             if "season_weight" in df.columns:
@@ -408,73 +411,61 @@ def train_mlb():
 
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
-        cv_folds = 2  # Railway CPU budget — 3 folds x 4 models x 6k rows = timeout
+        cv_folds = 5  # 5 for Railway; set 10 for local runs
 
         if n >= 200:
-            # ── FIX 2: Lighter stacking ensemble ─────────────────
-            # 60 estimators (was 150/100), shallower trees — saves ~50% time
-            gbm = GradientBoostingRegressor(
-                n_estimators=60, max_depth=3,
-                learning_rate=0.08, subsample=0.8,
-                min_samples_leaf=20, random_state=42,
-            )
-            rf_reg = RandomForestRegressor(
-                n_estimators=60, max_depth=5,
-                min_samples_leaf=15, max_features=0.7,
-                random_state=42, n_jobs=1,
-            )
-            enet = ElasticNetCV(
-                l1_ratio=[0.1, 0.5, 0.9],
-                alphas=[0.01, 0.1, 1.0],
-                cv=cv_folds, random_state=42,
-            )
-
-            # AUDIT: XGBoost added to ensemble when available
-            if HAS_XGB:
-                xgb_reg = XGBRegressor(
-                    n_estimators=80, max_depth=3, learning_rate=0.08,
-                    subsample=0.8, colsample_bytree=0.8,
-                    min_child_weight=20, random_state=42,
-                    tree_method="hist", verbosity=0,
+            # ── CatBoost solo at 50 estimators (sweep-optimized) ──
+            if HAS_CAT:
+                cat_reg = CatBoostRegressor(
+                    iterations=50, depth=4, learning_rate=0.06,
+                    subsample=0.8, min_data_in_leaf=20,
+                    random_seed=42, verbose=0,
                 )
-            print(f"  MLB: Training stacking ensemble on {n} rows (ts-cv, {'XGB+' if HAS_XGB else ''}GBM+RF+ENet)...")
-            reg_models = {"gbm": gbm, "rf": rf_reg, "enet": enet}
-            if HAS_XGB:
-                reg_models["xgb"] = xgb_reg
-            oof = _time_series_oof(reg_models, X_scaled, y_margin, df, n_splits=cv_folds, weights=fit_weights)
-            oof_gbm = oof["gbm"]
-            oof_rf = oof["rf"]
-            oof_enet = oof["enet"]
+                print(f"  MLB: Training CatBoost solo on {n} rows (ts-cv, 50 est)...")
+                reg_models = {"cat": cat_reg}
+                oof = _time_series_oof(reg_models, X_scaled, y_margin, df, n_splits=cv_folds, weights=fit_weights)
+                oof_cat = oof["cat"]
 
-            gbm.fit(X_scaled, y_margin, sample_weight=fit_weights)
-            rf_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
-            enet.fit(X_scaled, y_margin)  # ElasticNet: no sample_weight
-            if HAS_XGB:
-                xgb_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
+                cat_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
 
-            if HAS_XGB:
-                meta_X = np.column_stack([oof_gbm, oof_rf, oof_enet, oof["xgb"]])
+                # Bias correction from OOF residuals
+                bias_correction = float(np.mean(oof_cat - y_margin.values if hasattr(y_margin, 'values') else oof_cat - y_margin))
+                print(f"  MLB bias correction: {bias_correction:+.3f} runs")
+
+                reg = cat_reg
+                reg_cv_mae = float(np.mean(np.abs(oof_cat - y_margin.values if hasattr(y_margin, 'values') else oof_cat - y_margin)))
+                print(f"  MLB OOF MAE: {reg_cv_mae:.3f}")
+
+                explainer = shap.TreeExplainer(cat_reg)
+                model_type = "CatBoost_v5"
             else:
-                meta_X = np.column_stack([oof_gbm, oof_rf, oof_enet])
-            meta_reg = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0])
-            meta_reg.fit(meta_X, y_margin)
+                # Fallback: RF if CatBoost not available
+                rf_reg = RandomForestRegressor(
+                    n_estimators=85, max_depth=6,
+                    min_samples_leaf=15, max_features=0.7,
+                    random_state=42, n_jobs=1,
+                )
+                print(f"  MLB: Training RF fallback on {n} rows (ts-cv, 85 est)...")
+                reg_models = {"rf": rf_reg}
+                oof = _time_series_oof(reg_models, X_scaled, y_margin, df, n_splits=cv_folds, weights=fit_weights)
+                oof_rf = oof["rf"]
 
-            # Bias correction from OOF residuals
-            oof_meta = meta_reg.predict(meta_X)
-            bias_correction = float(np.mean(oof_meta - y_margin.values if hasattr(y_margin, 'values') else oof_meta - y_margin))
-            print(f"  MLB bias correction: {bias_correction:+.3f} runs")
+                rf_reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
 
-            reg = StackedRegressor([gbm, rf_reg, enet] + ([xgb_reg] if HAS_XGB else []), meta_reg, scaler)
-            reg_cv = cross_val_score(gbm, X_scaled, y_margin,
-                                      cv=cv_folds, scoring="neg_mean_absolute_error")
+                bias_correction = float(np.mean(oof_rf - y_margin.values if hasattr(y_margin, 'values') else oof_rf - y_margin))
+                print(f"  MLB bias correction: {bias_correction:+.3f} runs")
 
-            explainer = shap.TreeExplainer(xgb_reg if HAS_XGB else gbm)
-            model_type = "StackedEnsemble_v3_TSCV" + ("_XGB" if HAS_XGB else "")
+                reg = rf_reg
+                reg_cv_mae = float(np.mean(np.abs(oof_rf - y_margin.values if hasattr(y_margin, 'values') else oof_rf - y_margin)))
+                print(f"  MLB OOF MAE: {reg_cv_mae:.3f}")
+
+                explainer = shap.TreeExplainer(rf_reg)
+                model_type = "RF_v4_fallback"
 
             # ── FIX 3: Lighter classifier (GBM + LR, skip RF) ───
             # RF classifier adds ~30% training time with minimal gain
             gbm_clf = GradientBoostingClassifier(
-                n_estimators=60, max_depth=3,
+                n_estimators=200, max_depth=3,
                 learning_rate=0.06, subsample=0.8,
                 min_samples_leaf=20, random_state=42,
             )
@@ -497,13 +488,14 @@ def train_mlb():
             isotonic = IsotonicRegression(y_min=0.02, y_max=0.98, out_of_bounds="clip")
             isotonic.fit(oof_stacked_probs, y_win.values if hasattr(y_win, 'values') else y_win)
             print(f"  MLB isotonic calibration fitted on {len(oof_stacked_probs)} OOF samples")
-            print(f"  Stacking meta weights (reg): {meta_reg.coef_.round(3)}")
+            print(f"  MLB model: {model_type}, bias correction: {bias_correction:+.3f}")
 
         else:
             reg = RidgeCV(alphas=[0.1, 1.0, 5.0, 10.0], cv=cv_folds)
             reg.fit(X_scaled, y_margin, sample_weight=fit_weights)
             reg_cv = cross_val_score(reg, X_scaled, y_margin,
                                       cv=cv_folds, scoring="neg_mean_absolute_error")
+            reg_cv_mae = float(-reg_cv.mean())
             explainer = shap.LinearExplainer(reg, X_scaled, feature_perturbation="interventional")
             model_type = "Ridge"
             clf = CalibratedClassifierCV(
@@ -522,7 +514,7 @@ def train_mlb():
             "n_train": n,
             "n_historical": len(df) - len(current_df),
             "n_current": len(current_df),
-            "mae_cv": float(-reg_cv.mean()),
+            "mae_cv": reg_cv_mae,
             "trained_at": datetime.utcnow().isoformat(),
             "model_type": model_type,
             "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
@@ -539,7 +531,7 @@ def train_mlb():
             "n_train": n,
             "n_historical": len(df) - len(current_df),
             "n_current": len(current_df),
-            "mae_cv": round(float(-reg_cv.mean()), 3),
+            "mae_cv": round(reg_cv_mae, 3),
             "alpha": float(reg.alpha_) if hasattr(reg, "alpha_") else None,
             "features": list(X.columns),
             "dispersion": disp,
