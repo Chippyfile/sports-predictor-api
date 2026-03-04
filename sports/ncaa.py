@@ -258,10 +258,13 @@ def ncaa_build_features(df):
     ).fillna(0)
     df["has_market"] = ((df["market_spread"] != 0) | (df["market_total"] != 0)).astype(int)
     _ncaa_pred_spread = pd.to_numeric(df["spread_home"] if "spread_home" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
-    # BUGFIX: Zero out spread_vs_market when no market line exists (has_market=0).
-    # Without this, spread_vs_market = pred_spread - 0 = pred_spread, which
-    # double-counts the spread signal and inflates win probability to 90%+.
-    df["spread_vs_market"] = (_ncaa_pred_spread - df["market_spread"]) * df["has_market"]
+    # BUGFIX 1: Sign alignment — model spread is +positive when home wins (e.g. +7.8),
+    # but market_spread_home is -negative when home is favored (e.g. -7.5, Vegas convention).
+    # Negate market so both point the same direction before subtracting.
+    # Wrong: spread_vs_market = 7.8 - (-7.5) = +15.3 → massively inflates home win prob
+    # Fixed: spread_vs_market = 7.8 - (+7.5) = +0.3 → correct small model disagreement
+    # BUGFIX 2: Zero out when no market line (has_market=0) to prevent pred_spread leaking in.
+    df["spread_vs_market"] = (_ncaa_pred_spread + df["market_spread"]) * df["has_market"]
     # tourney_x_em, early_x_form REMOVED (AUDIT P4) — correlated with components
 
     feature_cols = [
