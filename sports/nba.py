@@ -327,12 +327,42 @@ def predict_nba(game: dict):
     if not bundle:
         return {"error": "NBA model not trained — call /train/nba first"}
 
-    # Build a single-row DataFrame with all features the model might need
-    row = pd.DataFrame([game])
-    # Ensure all expected columns exist with defaults
-    for col in bundle["feature_cols"]:
-        if col not in row.columns:
-            row[col] = 0.0
+    # Build a single-row DataFrame with all features the model might need.
+    # FIX (v22): nba_build_features uses df.get("home_ppg", default) etc.
+    # When a column is missing, df.get() returns the scalar default instead
+    # of a Series, and the subsequent .fillna() crashes with AttributeError.
+    # Solution: pre-populate ALL raw stat columns that the feature builder
+    # reads so df.get() always returns a Series, not a scalar.
+    _RAW_DEFAULTS = {
+        "pred_home_score": 110, "pred_away_score": 110,
+        "home_net_rtg": 0, "away_net_rtg": 0,
+        "win_pct_home": 0.5, "ou_total": 220,
+        "model_ml_home": 0, "market_ou_total": 220,
+        "market_spread_home": 0,
+        "home_ppg": 110, "away_ppg": 110,
+        "home_opp_ppg": 110, "away_opp_ppg": 110,
+        "home_fgpct": 0.46, "away_fgpct": 0.46,
+        "home_threepct": 0.36, "away_threepct": 0.36,
+        "home_ftpct": 0.77, "away_ftpct": 0.77,
+        "home_assists": 25, "away_assists": 25,
+        "home_turnovers": 14, "away_turnovers": 14,
+        "home_tempo": 100, "away_tempo": 100,
+        "home_orb_pct": 0.25, "away_orb_pct": 0.25,
+        "home_fta_rate": 0.28, "away_fta_rate": 0.28,
+        "home_ato_ratio": 1.7, "away_ato_ratio": 1.7,
+        "home_opp_fgpct": 0.46, "away_opp_fgpct": 0.46,
+        "home_opp_threepct": 0.35, "away_opp_threepct": 0.35,
+        "home_steals": 7.5, "away_steals": 7.5,
+        "home_blocks": 5.0, "away_blocks": 5.0,
+        "home_wins": 20, "away_wins": 20,
+        "home_losses": 20, "away_losses": 20,
+        "home_form": 0, "away_form": 0,
+        "home_days_rest": 2, "away_days_rest": 2,
+        "away_travel_dist": 0,
+    }
+    # Merge: game values override defaults
+    merged = {**_RAW_DEFAULTS, **game}
+    row = pd.DataFrame([merged])
 
     X = nba_build_features(row)
     X_s = bundle["scaler"].transform(X[bundle["feature_cols"]])
@@ -357,9 +387,11 @@ def predict_nba(game: dict):
     shap_vals = bundle["explainer"].shap_values(X_s)
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[0]
+    # Handle both 1D (single sample) and 2D arrays
+    sv = shap_vals[0] if len(shap_vals.shape) > 1 else shap_vals
     shap_out = [
         {"feature": f, "shap": round(float(v), 4), "value": round(float(X[f].iloc[0]), 3)}
-        for f, v in zip(bundle["feature_cols"], shap_vals[0])
+        for f, v in zip(bundle["feature_cols"], sv)
     ]
     shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
 
