@@ -195,7 +195,13 @@ def route_predict(sport):
     fn = fns.get(sport.lower())
     if not fn:
         return jsonify({"error": f"Unknown sport: {sport}"}), 400
-    return jsonify(fn(game))
+    try:
+        return jsonify(fn(game))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[predict/{sport}] ERROR: {tb}")
+        return jsonify({"error": str(e), "traceback": tb}), 500
 
 @app.route("/monte-carlo", methods=["POST"])
 def route_monte_carlo():
