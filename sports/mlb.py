@@ -640,7 +640,18 @@ def predict_mlb(game: dict):
         "platoon_diff": home_platoon_delta - away_platoon_delta,
         "sp_fip_spread": abs(home_starter_fip - away_starter_fip),
         "both_lineups_confirmed": 1 if (home_lineup_confirmed and away_lineup_confirmed) else 0,
+        # Market features — use incoming odds if available, else 0
+        "market_spread": float(game.get("market_spread_home") or game.get("market_spread") or 0),
+        "market_total": float(game.get("market_ou_total") or game.get("market_total") or game.get("ou_total") or 0),
+        "has_market": 1 if (game.get("market_spread_home") or game.get("market_ou_total")) else 0,
     }
+    # Derived market feature (after run_diff_pred and market_spread are set)
+    row_data["spread_vs_market"] = row_data["run_diff_pred"] - row_data["market_spread"]
+
+    # Gracefully handle any feature the model expects but row_data is missing
+    for col in bundle.get("feature_cols", []):
+        if col not in row_data:
+            row_data[col] = 0.0
 
     # Create DataFrame with only the features the model expects
     row = pd.DataFrame([{k: row_data[k] for k in bundle["feature_cols"]}])
