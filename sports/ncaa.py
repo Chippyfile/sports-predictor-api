@@ -252,12 +252,12 @@ def ncaa_build_features(df):
     df["importance"] = pd.to_numeric(df["importance_multiplier"], errors="coerce").fillna(1.0)
 
     # ── Market line features ──
-    df["market_spread"] = pd.to_numeric(df.get("market_spread_home", 0), errors="coerce").fillna(0)
+    df["market_spread"] = pd.to_numeric(df["market_spread_home"] if "market_spread_home" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
     df["market_total"] = pd.to_numeric(
-        df.get("market_ou_total", df.get("ou_total", 0)), errors="coerce"
+        df["market_ou_total"] if "market_ou_total" in df.columns else (df["ou_total"] if "ou_total" in df.columns else pd.Series(0, index=df.index)), errors="coerce"
     ).fillna(0)
     df["has_market"] = ((df["market_spread"] != 0) | (df["market_total"] != 0)).astype(int)
-    _ncaa_pred_spread = pd.to_numeric(df.get("spread_home", 0), errors="coerce").fillna(0)
+    _ncaa_pred_spread = pd.to_numeric(df["spread_home"] if "spread_home" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
     df["spread_vs_market"] = _ncaa_pred_spread - df["market_spread"]
     # tourney_x_em, early_x_form REMOVED (AUDIT P4) — correlated with components
 
