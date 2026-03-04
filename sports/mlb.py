@@ -252,9 +252,9 @@ def mlb_build_features(df):
     # Expected impact: +1-1.5% accuracy from reduced multicollinearity,
     # more stable stacking ensemble, better generalization.
     # ── Market line features ──
-    df["market_spread"] = pd.to_numeric(df.get("market_spread_home", 0), errors="coerce").fillna(0)
+    df["market_spread"] = pd.to_numeric(df["market_spread_home"] if "market_spread_home" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
     df["market_total"] = pd.to_numeric(
-        df.get("market_ou_total", df.get("ou_total", 0)), errors="coerce"
+        df["market_ou_total"] if "market_ou_total" in df.columns else (df["ou_total"] if "ou_total" in df.columns else pd.Series(0, index=df.index)), errors="coerce"
     ).fillna(0)
     df["has_market"] = ((df["market_spread"] != 0) | (df["market_total"] != 0)).astype(int)
     df["spread_vs_market"] = df["run_diff_pred"] - df["market_spread"]
@@ -381,7 +381,7 @@ def train_mlb():
 
         # ── FIX 1: Cap training data to prevent Railway timeout ──
         # With 14k+ rows, 6x cross_val_predict exceeds Railway CPU budget.
-        MAX_TRAIN = 10000
+        MAX_TRAIN = 50000  # Raised for local training (was 10000 for Railway)
         n = len(df)
         if n > MAX_TRAIN:
             if "season_weight" in df.columns:

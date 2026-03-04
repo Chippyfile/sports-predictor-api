@@ -25,7 +25,7 @@ def nba_build_features(df):
     df["home_fav"]        = (pd.to_numeric(df.get("model_ml_home", 0), errors="coerce").fillna(0) < 0).astype(int)
     df["win_pct_home"]    = pd.to_numeric(df.get("win_pct_home", 0.5), errors="coerce").fillna(0.5)
     df["ou_gap"]          = df["total_pred"] - pd.to_numeric(
-        df.get("market_ou_total", df.get("ou_total", 220)), errors="coerce"
+        df["market_ou_total"] if "market_ou_total" in df.columns else (df["ou_total"] if "ou_total" in df.columns else pd.Series(220, index=df.index)), errors="coerce"
     ).fillna(220)
 
     # ── Net rating ──
@@ -89,9 +89,9 @@ def nba_build_features(df):
     df["steals_to_diff"] = df["steals_to_h"] - df["steals_to_a"]
 
     # ── Market line features (strongest public predictor) ──
-    df["market_spread"] = pd.to_numeric(df.get("market_spread_home", 0), errors="coerce").fillna(0)
+    df["market_spread"] = pd.to_numeric(df["market_spread_home"] if "market_spread_home" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
     df["market_total"] = pd.to_numeric(
-        df.get("market_ou_total", df.get("ou_total", 0)), errors="coerce"
+        df["market_ou_total"] if "market_ou_total" in df.columns else (df["ou_total"] if "ou_total" in df.columns else pd.Series(0, index=df.index)), errors="coerce"
     ).fillna(0)
     df["has_market"] = ((df["market_spread"] != 0) | (df["market_total"] != 0)).astype(int)
     # Spread difference: model prediction vs market line (positive = model more bullish on home)
