@@ -429,7 +429,12 @@ def route_ncaa_efficiency():
 @app.route("/ratings/ncaa")
 def route_ncaa_ratings():
     rows = sb_get("ncaa_team_ratings", "order=adj_em.desc&limit=400")
-    return jsonify(rows)
+    # Ensure rank_adj_em exists (compute from sort order if missing)
+    for i, r in enumerate(rows):
+        if r.get("rank_adj_em") is None:
+            r["rank_adj_em"] = i + 1
+    updated_at = rows[0].get("updated_at", "") if rows else ""
+    return jsonify({"ratings": rows, "updated_at": updated_at})
 
 @app.route("/ratings/ncaa/<team_id>")
 def route_ncaa_team_rating(team_id):

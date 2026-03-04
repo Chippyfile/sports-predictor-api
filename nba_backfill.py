@@ -2,6 +2,12 @@
 NBA Historical Backfill — adds to sports/nba.py
 Fetches game results from ESPN scoreboard API for 2021-2025 seasons.
 Inserts into nba_historical table in Supabase.
+
+AUDIT C2 FIX (v17): Two-pass approach for leak-free features.
+Pass 1: Collect all completed games for the season to build cumulative game logs.
+Pass 2: For each game, compute W/L record and form score using ONLY games
+completed before that date. Previously used end-of-season stats for all games
+(November game had April's win-loss record = massive data leak for ML training).
 """
 
 # ESPN NBA team IDs
@@ -132,6 +138,67 @@ def backfill_nba_historical(seasons=None, batch_size=50):
             _time.sleep(0.25)  # Rate limit
         print(f"    Got stats for {len(team_stats)}/30 teams")
 
+        # ── AUDIT C2 FIX: Build cumulative W/L + form per team per date ──
+        # Old approach used end-of-season stats for EVERY game = data leak.
+        # win_pct_diff and form_score were most leaky — a November game was
+        # using April win-loss records. Now we do two passes:
+        # Pass 1: Collect all completed games to build game logs
+        # Pass 2: For each game, compute cumulative W/L from ONLY prior games.
+        print(f"    Pass 1: Collecting all games for cumulative W/L tracking...")
+        all_season_games = []
+        scan_date = start_date
+        while scan_date <= end_date:
+            ds = scan_date.strftime("%Y%m%d")
+            sb_data = _espn_nba_scoreboard(ds)
+            _time.sleep(0.15)
+            if sb_data and "events" in sb_data:
+                for ev in sb_data["events"]:
+                    comp = ev.get("competitions", [{}])[0]
+                    status = comp.get("status", {}).get("type", {})
+                    if not status.get("completed"):
+                        continue
+                    competitors = comp.get("competitors", [])
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+                    if not home or not away:
+                        continue
+                    h_abbr = _map_nba_abbr(home.get("team", {}).get("abbreviation", ""))
+                    a_abbr = _map_nba_abbr(away.get("team", {}).get("abbreviation", ""))
+                    h_score = int(home.get("score", 0))
+                    a_score = int(away.get("score", 0))
+                    if h_score == 0 and a_score == 0:
+                        continue
+                    all_season_games.append({
+                        "date": scan_date.strftime("%Y-%m-%d"),
+                        "home": h_abbr, "away": a_abbr,
+                        "home_score": h_score, "away_score": a_score,
+                    })
+            scan_date += timedelta(days=1)
+        print(f"    Collected {len(all_season_games)} completed games")
+
+        # Build chronological game log per team
+        all_season_games.sort(key=lambda g: g["date"])
+        team_game_log = {abbr: [] for abbr in NBA_ESPN_IDS}
+        for sg in all_season_games:
+            h_won = sg["home_score"] > sg["away_score"]
+            team_game_log[sg["home"]].append({"date": sg["date"], "won": h_won})
+            team_game_log[sg["away"]].append({"date": sg["date"], "won": not h_won})
+
+        def _cumulative_at_date(abbr, game_date_str):
+            """Return (wins, losses, form_score) using only games BEFORE game_date_str."""
+            log = team_game_log.get(abbr, [])
+            prior = [g for g in log if g["date"] < game_date_str]
+            wins = sum(1 for g in prior if g["won"])
+            losses = len(prior) - wins
+            last5 = prior[-5:]
+            if not last5:
+                return wins, losses, 0.0
+            form = sum((1 if g["won"] else -1) * (i + 1) for i, g in enumerate(last5)) / 15.0
+            return wins, losses, round(form, 4)
+
+        print(f"    Pass 2: Building predictions with leak-free features...")
+        # ── END AUDIT C2 FIX ─────────────────────────────────────────
+
         # Iterate through each day of the season
         current = start_date
         games_batch = []
@@ -168,6 +235,13 @@ def backfill_nba_historical(seasons=None, batch_size=50):
 
                 h_stats = team_stats.get(home_abbr, {})
                 a_stats = team_stats.get(away_abbr, {})
+
+                # AUDIT C2 FIX: Cumulative W/L and form as of game date (not end-of-season)
+                game_date_str = current.strftime("%Y-%m-%d")
+                h_cum_w, h_cum_l, h_form = _cumulative_at_date(home_abbr, game_date_str)
+                a_cum_w, a_cum_l, a_form = _cumulative_at_date(away_abbr, game_date_str)
+                h_wpct = h_cum_w / max(h_cum_w + h_cum_l, 1)
+                a_wpct = a_cum_w / max(a_cum_w + a_cum_l, 1)
 
                 # Compute derived features
                 h_fga = h_stats.get("ppg", 112) / max(h_stats.get("fgpct", 0.471), 0.3)
@@ -228,7 +302,19 @@ def backfill_nba_historical(seasons=None, batch_size=50):
                     "away_net_rtg": round(a_off_rtg - a_def_rtg, 1),
                     "pred_home_score": round(h_stats.get("ppg", 112), 1),
                     "pred_away_score": round(a_stats.get("ppg", 112), 1),
-                    "win_pct_home": 0.55,  # simple HCA default
+                    # ── AUDIT C2 FIX: Cumulative W/L (leak-free) ──
+                    # Was: win_pct_home=0.55 (useless HCA default)
+                    # Now: compute from actual W/L record UP TO this game date
+                    "home_wins": h_cum_w,
+                    "home_losses": h_cum_l,
+                    "away_wins": a_cum_w,
+                    "away_losses": a_cum_l,
+                    "home_form": h_form,
+                    "away_form": a_form,
+                    "win_pct_home": round(
+                        0.5 + (h_wpct - a_wpct) / 2 + 0.025,  # HCA = +2.5% baseline
+                        4
+                    ) if (h_cum_w + h_cum_l >= 5 and a_cum_w + a_cum_l >= 5) else 0.55,
                     "season_weight": season_weight,
                     "is_outlier_season": False,
                 }
