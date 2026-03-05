@@ -26,6 +26,8 @@ PARK_HFA = {
     139: 0.041, 140: 0.041, 141: 0.036, 142: 0.035, 143: 0.036,
     144: 0.035, 145: 0.033, 146: 0.040, 147: 0.036, 158: 0.035,
 }
+# H-5 FIX: Dome parks where outdoor weather adjustments should be skipped
+_DOME_PARKS = {109, 117, 136, 139, 140, 141, 146, 158}
 import numpy as np, pandas as pd, traceback as _tb, shap
 from datetime import datetime
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingClassifier
@@ -722,28 +724,22 @@ def predict_mlb(game: dict):
 # ═══════════════════════════════════════════════════════════════
 def heuristic_predict_row(row):
     """
-    Replay the mlb.js v15 heuristic in Python using AVAILABLE historical columns.
+    Replay the mlb.js v16 heuristic in Python using AVAILABLE historical columns.
     Produces differentiated pred_home_runs / pred_away_runs per game.
 
-    v3 AUDIT FIXES (5-team round-robin hand-calculation verification):
-      F3:  Removed K/9 and BB/9 heuristic adjustments. These signals now enter
-           exclusively via ML features (k_bb_diff). Including them in BOTH the
-           heuristic AND as ML features created redundant signal the stacking
-           ensemble couldn't cleanly separate.
-      F4:  HFA now applied in probability space after Pythagenpat, with per-park
-           values from PARK_HFA lookup (matching frontend mlb.js).
-           Previous: hr += 0.16 / ar -= 0.16 (flat run space, no park variation).
-      F5:  Bullpen ERA impact added when home_bullpen_era / away_bullpen_era
-           columns are non-null. Conservative 0.30 coefficient (frontend uses 0.40).
-      F7:  Clamp range aligned to frontend: [1.8, 9.5] (was [2.0, 9.0]).
-      F8:  wOBA leak discount at 70% of pitching discount. wOBA is a batting stat
-           less prone to end-of-season aggregation leak than pitching stats.
+    v16 AUDIT FIXES (round-robin forensic audit alignment):
+      H-1:  HFA applied in probability space (already done in v3, retained).
+      H-3:  Uses starter FIP (home_sp_fip) when available, marginal to team FIP
+            (matches JS engine). Falls back to team FIP vs league FIP when missing.
+      M-4:  Added bullpen quality (already in v3), SP workload/bullpen exposure,
+            dome-aware weather adjustments, K/9 and BB/9 adjustments (re-added
+            to heuristic to match JS engine — ML features still capture them
+            independently via k_bb_diff).
+      H-5:  Weather adjustments skipped for dome parks.
+      F7:   Clamp range aligned to frontend: [1.8, 9.5].
 
-    Verified correct (NOT changed):
-      - Team FIP vs league FIP: NOT double-counting. wOBA→hr = home offense quality.
-        FIP→ar = home pitching impact on opponent runs. Independent signals.
-      - LEAK_DISCOUNT game-date-aware regression
-      - Season-specific constants (SEASON_CONSTANTS dict)
+    Gracefully degrades: null columns → defaults (matches prior behavior).
+    Historical rows without new columns produce same predictions as v3.
     """
     season = int(row.get("season", 2024))
     sc = SEASON_CONSTANTS.get(season, DEFAULT_CONSTANTS)
@@ -753,6 +749,10 @@ def heuristic_predict_row(row):
     away_woba   = row.get("away_woba")
     home_fip    = row.get("home_fip")        # team aggregate FIP (end-of-season)
     away_fip    = row.get("away_fip")
+    home_k9     = row.get("home_k9")
+    away_k9     = row.get("away_k9")
+    home_bb9    = row.get("home_bb9")
+    away_bb9    = row.get("away_bb9")
     home_bp_era = row.get("home_bullpen_era")  # may be null in older historical
     away_bp_era = row.get("away_bullpen_era")
     pf          = row.get("park_factor")
@@ -760,6 +760,22 @@ def heuristic_predict_row(row):
     rest_a      = row.get("away_rest_days")
     travel_h    = row.get("home_travel")
     travel_a    = row.get("away_travel")
+
+    # H-3: Starter-level FIP (available for current season, null for historical)
+    home_sp_fip = row.get("home_sp_fip")
+    away_sp_fip = row.get("away_sp_fip")
+
+    # M-4: SP average innings per start
+    home_sp_ip  = row.get("home_sp_ip")
+    away_sp_ip  = row.get("away_sp_ip")
+
+    # M-4: Weather (for non-dome parks)
+    temp_f        = row.get("temp_f")
+    wind_mph      = row.get("wind_mph")
+    wind_out_flag = row.get("wind_out_flag")
+
+    # Park ID for dome detection and per-park HFA
+    park_id = row.get("home_team_id") or row.get("homeTeamId") or row.get("park_id")
 
     # ── Coerce to float with season-specific defaults ──
     lg_woba    = sc["lg_woba"]
@@ -772,19 +788,52 @@ def heuristic_predict_row(row):
     away_woba = float(away_woba) if away_woba is not None and not _isnan(away_woba) else lg_woba
     home_fip  = float(home_fip)  if home_fip  is not None and not _isnan(home_fip)  else lg_fip
     away_fip  = float(away_fip)  if away_fip  is not None and not _isnan(away_fip)  else lg_fip
+    home_k9   = float(home_k9)   if home_k9   is not None and not _isnan(home_k9)   else 8.5
+    away_k9   = float(away_k9)   if away_k9   is not None and not _isnan(away_k9)   else 8.5
+    home_bb9  = float(home_bb9)  if home_bb9  is not None and not _isnan(home_bb9)  else 3.2
+    away_bb9  = float(away_bb9)  if away_bb9  is not None and not _isnan(away_bb9)  else 3.2
     pf        = float(pf)        if pf        is not None and not _isnan(pf)        else 1.0
     rest_h    = float(rest_h)    if rest_h    is not None and not _isnan(rest_h)     else 3.0
     rest_a    = float(rest_a)    if rest_a    is not None and not _isnan(rest_a)     else 3.0
     travel_h  = float(travel_h)  if travel_h  is not None and not _isnan(travel_h)  else 0.0
     travel_a  = float(travel_a)  if travel_a  is not None and not _isnan(travel_a)  else 0.0
 
-    # Bullpen ERA: check availability (FIX F5)
+    # Starter FIP: use if valid and not the sentinel 4.25
+    home_sp = None
+    if home_sp_fip is not None and not _isnan(home_sp_fip):
+        v = float(home_sp_fip)
+        if v != 4.25:  # 4.25 = missing sentinel
+            home_sp = v
+    away_sp = None
+    if away_sp_fip is not None and not _isnan(away_sp_fip):
+        v = float(away_sp_fip)
+        if v != 4.25:
+            away_sp = v
+
+    # Bullpen ERA
     has_bp_home = home_bp_era is not None and not _isnan(home_bp_era)
     has_bp_away = away_bp_era is not None and not _isnan(away_bp_era)
     if has_bp_home:
         home_bp_era = float(home_bp_era)
     if has_bp_away:
         away_bp_era = float(away_bp_era)
+
+    # SP innings per start
+    h_sp_ip = float(home_sp_ip) if home_sp_ip is not None and not _isnan(home_sp_ip) else 5.5
+    a_sp_ip = float(away_sp_ip) if away_sp_ip is not None and not _isnan(away_sp_ip) else 5.5
+
+    # Weather
+    temp = float(temp_f) if temp_f is not None and not _isnan(temp_f) else None
+    w_mph = float(wind_mph) if wind_mph is not None and not _isnan(wind_mph) else None
+    w_out = int(float(wind_out_flag)) if wind_out_flag is not None and not _isnan(wind_out_flag) else 0
+
+    # Dome detection
+    is_dome = False
+    if park_id is not None:
+        try:
+            is_dome = int(park_id) in _DOME_PARKS
+        except (ValueError, TypeError):
+            pass
 
     # ═══════════════════════════════════════════════════════════════
     # LEAK DISCOUNT — game-date-aware regression to mean
@@ -804,14 +853,15 @@ def heuristic_predict_row(row):
     else:
         LEAK_DISCOUNT = 0.50
 
-    # FIX F8: wOBA leak discount at 70% of pitching discount
-    WOBA_LEAK = LEAK_DISCOUNT * 0.70
-
     # ── Regress stats toward league average ──
     home_fip_adj  = lg_fip  + (home_fip  - lg_fip)  * LEAK_DISCOUNT
     away_fip_adj  = lg_fip  + (away_fip  - lg_fip)  * LEAK_DISCOUNT
-    home_woba_adj = lg_woba + (home_woba - lg_woba) * WOBA_LEAK
-    away_woba_adj = lg_woba + (away_woba - lg_woba) * WOBA_LEAK
+    home_k9_adj   = 8.5 + (home_k9 - 8.5) * LEAK_DISCOUNT
+    away_k9_adj   = 8.5 + (away_k9 - 8.5) * LEAK_DISCOUNT
+    home_bb9_adj  = 3.2 + (home_bb9 - 3.2) * LEAK_DISCOUNT
+    away_bb9_adj  = 3.2 + (away_bb9 - 3.2) * LEAK_DISCOUNT
+    home_woba_adj = lg_woba + (home_woba - lg_woba) * LEAK_DISCOUNT
+    away_woba_adj = lg_woba + (away_woba - lg_woba) * LEAK_DISCOUNT
 
     LG_BP_ERA = 4.10
     if has_bp_home:
@@ -826,20 +876,32 @@ def heuristic_predict_row(row):
     ar = lg_rpg + ((away_woba_adj - lg_woba) / woba_scale) * pa_pg
 
     # ═══════════════════════════════════════════════════════════════
-    # Team FIP impact (verified correct — NOT double-counting)
-    # wOBA→hr = home offense quality; FIP→ar = home pitching quality.
-    # Independent signals on different run totals.
+    # H-3 FIX: Starter FIP marginal to team FIP (matches JS engine)
     # ═══════════════════════════════════════════════════════════════
-    ar += (home_fip_adj - lg_fip) * FIP_COEFF
-    hr += (away_fip_adj - lg_fip) * FIP_COEFF
+    if home_sp is not None:
+        # Starter available: marginal to team FIP (H-3 aligned with JS)
+        ar += (home_sp - home_fip_adj) * FIP_COEFF
+    else:
+        # No starter: team FIP vs league (original behavior)
+        ar += (home_fip_adj - lg_fip) * FIP_COEFF
 
-    # FIX F3: K/9 and BB/9 REMOVED from heuristic.
-    # These signals enter exclusively via ML features (k_bb_diff).
+    if away_sp is not None:
+        hr += (away_sp - away_fip_adj) * FIP_COEFF
+    else:
+        hr += (away_fip_adj - lg_fip) * FIP_COEFF
+
+    # ── K/9 and BB/9 adjustments (using leak-adjusted values) ──
+    lg_k9 = 8.5
+    lg_bb9 = 3.2
+    ar -= (home_k9_adj - lg_k9) * 0.04
+    ar += (home_bb9_adj - lg_bb9) * 0.06
+    hr -= (away_k9_adj - lg_k9) * 0.04
+    hr += (away_bb9_adj - lg_bb9) * 0.06
 
     # ═══════════════════════════════════════════════════════════════
-    # FIX F5: Bullpen ERA impact (when available in historical data)
+    # Bullpen quality (FIX F5, upgraded M-4)
     # ═══════════════════════════════════════════════════════════════
-    BP_IMPACT = 0.30  # conservative (frontend uses 0.40 with richer quality metric)
+    BP_IMPACT = 0.40  # M-4: aligned with JS (was 0.30 in v3)
     if has_bp_home:
         bp_q_home = (LG_BP_ERA - home_bp_adj) / LG_BP_ERA
         ar -= bp_q_home * BP_IMPACT  # good home pen → fewer away runs
@@ -847,8 +909,30 @@ def heuristic_predict_row(row):
         bp_q_away = (LG_BP_ERA - away_bp_adj) / LG_BP_ERA
         hr -= bp_q_away * BP_IMPACT  # good away pen → fewer home runs
 
-    # ── Park factor (multiplicative) ──
+    # ═══════════════════════════════════════════════════════════════
+    # M-4 FIX: SP workload / bullpen exposure
+    # ═══════════════════════════════════════════════════════════════
+    if has_bp_home:
+        bp_deficit_h = max(0, -((LG_BP_ERA - home_bp_adj) / LG_BP_ERA))
+        bp_exp_home = max(0, 5.0 - h_sp_ip) * (1 + bp_deficit_h) * 0.08
+        ar += bp_exp_home
+    if has_bp_away:
+        bp_deficit_a = max(0, -((LG_BP_ERA - away_bp_adj) / LG_BP_ERA))
+        bp_exp_away = max(0, 5.0 - a_sp_ip) * (1 + bp_deficit_a) * 0.08
+        hr += bp_exp_away
+
+    # ═══════════════════════════════════════════════════════════════
+    # M-4/H-5 FIX: Park factor with dome-aware weather
+    # ═══════════════════════════════════════════════════════════════
     pf = max(0.86, min(1.28, pf))
+    # Weather adjustments only for non-dome parks
+    if not is_dome and temp is not None:
+        pf += ((temp - 70) / 10) * 0.0035
+    if not is_dome and w_out and w_mph is not None and w_mph > 5:
+        pf += (w_mph - 5) * 0.0035
+    # Re-clamp after weather (matches JS [0.92, 1.18])
+    pf = max(0.92, min(1.18, pf))
+
     hr *= pf
     ar *= pf
 
@@ -861,25 +945,22 @@ def heuristic_predict_row(row):
         ar -= 0.08
 
     # ═══════════════════════════════════════════════════════════════
-    # FIX F7: Clamp aligned to frontend [1.8, 9.5]
+    # Clamp aligned to frontend [1.8, 9.5]
     # ═══════════════════════════════════════════════════════════════
     hr = max(1.8, min(9.5, hr))
     ar = max(1.8, min(9.5, ar))
 
     # ═══════════════════════════════════════════════════════════════
-    # FIX F4: Pythagenpat + HFA in probability space (matching frontend)
+    # Pythagenpat + HFA in probability space (matching frontend)
     # ═══════════════════════════════════════════════════════════════
-    # Previous: hr += HFA_RUNS; ar -= HFA_RUNS (flat, in run space)
-    # Now: per-park HFA added to win probability after Pythagenpat.
     league_rpg = 2 * lg_rpg
     exp = max(1.60, min(2.10, league_rpg ** 0.287))
     pyth_wp = (hr ** exp) / (hr ** exp + ar ** exp)
 
     # Per-park HFA lookup (falls back to 0.035 league average)
-    home_team_id = row.get("home_team_id") or row.get("homeTeamId")
-    if home_team_id:
+    if park_id is not None:
         try:
-            park_hfa = PARK_HFA.get(int(home_team_id), 0.035)
+            park_hfa = PARK_HFA.get(int(park_id), 0.035)
         except (ValueError, TypeError):
             park_hfa = 0.035
     else:

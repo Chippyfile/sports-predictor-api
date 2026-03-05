@@ -36,6 +36,32 @@ _NCAA_CONF_HCA = {
 def ncaa_build_features(df):
     df = df.copy()
 
+    # ── F6 FIX: Normalize conference column to support both ESPN IDs and full names ──
+    # Historical data may store ESPN numeric IDs ("8", "23"), current season stores full names.
+    # Map IDs to names so _NCAA_CONF_HCA lookup works consistently.
+    _ESPN_CONF_ID_TO_NAME = {
+        "8": "Big 12", "23": "Southeastern Conference", "7": "Big Ten",
+        "2": "Atlantic Coast Conference", "4": "Big East", "21": "Pac-12",
+        "44": "Mountain West Conference", "62": "American Athletic Conference",
+        "26": "West Coast Conference", "3": "Atlantic 10 Conference",
+        "18": "Missouri Valley Conference", "40": "Sun Belt", "12": "Mid-American",
+        "10": "Colonial Athletic Association", "22": "Ivy League",
+        "1": "America East", "46": "ASUN", "5": "Big Sky", "6": "Big South",
+        "9": "Big West", "11": "Conference USA", "13": "Horizon League",
+        "14": "Metro Atlantic Athletic", "16": "MEAC", "17": "Mountain West",
+        "19": "Northeast Conference", "20": "Ohio Valley", "24": "Southland",
+        "25": "Southern Conference", "27": "Summit League", "28": "SWAC",
+        "29": "WAC", "30": "Patriot League",
+    }
+    if "home_conference" in df.columns:
+        df["home_conference"] = df["home_conference"].fillna("").astype(str).apply(
+            lambda x: _ESPN_CONF_ID_TO_NAME.get(x.strip(), x.strip())
+        )
+    if "away_conference" in df.columns:
+        df["away_conference"] = df["away_conference"].fillna("").astype(str).apply(
+            lambda x: _ESPN_CONF_ID_TO_NAME.get(x.strip(), x.strip())
+        )
+
     # ── Raw team stats (with defaults for missing data) ──
     raw_cols = {
         "home_ppg": 75.0, "away_ppg": 75.0,
@@ -281,23 +307,20 @@ def _flush_ncaa_batch(rows):
 
 def _ncaa_backfill_heuristic(df):
     """
-    Replay a simplified ncaaUtils.js heuristic on historical rows.
-    Uses columns available from ncaa_historical enrichment:
-      home_adj_em, away_adj_em, home_ppg, away_ppg, home_opp_ppg, away_opp_ppg,
-      home_tempo, away_tempo, home_record_wins/losses, away_record_wins/losses,
-      home_rank, away_rank, neutral_site, home_conference, away_conference, game_date.
+    Replay ncaaUtils.js heuristic on historical rows — AUDIT v18 FIX.
 
-    Mirrors the core ncaaPredictGame logic:
-      1. adjEM-based projected spread (KenPom additive formula)
-      2. Conference-aware HCA (neutral-site detection)
-      3. Win pct via logistic(spread / sigma)
-      4. Score projection from tempo × efficiency
-      5. Rank boost, record-based form, postseason context
+    CRITICAL FIXES (from forensic audit):
+      F1: Score formula changed from averaging ((A+B)/2) to KenPom additive (A+B-lgAvg).
+          The averaging formula compressed ALL spreads by ~50% — a mathematical identity.
+      F2: Dynamic lg_avg now USED in the formula (was computed but ignored).
+      F4: Four Factors boost, defensive disruption, ball control, TS%, blowout scaling
+          all ported from JS frontend (were completely missing).
+      F5: Form signal upgraded from simple winPct to per-team scaled version with
+          formWeight proportional to games played (matches JS pattern).
     """
     df = df.copy()
 
     # Conference ID → HCA mapping (ESPN conference IDs → HCA points)
-    # These are the conference IDs from ESPN's API
     CONF_ID_HCA = {
         "8": 3.8,   # Big 12
         "23": 3.7,  # SEC
@@ -315,8 +338,30 @@ def _ncaa_backfill_heuristic(df):
         "10": 2.5,  # CAA
         "22": 2.3,  # Ivy
     }
+    # Also support full conference names (current-season data uses names, not IDs)
+    CONF_NAME_HCA = {
+        "Big 12": 3.8, "Southeastern Conference": 3.7, "SEC": 3.7,
+        "Big Ten": 3.6, "Big Ten Conference": 3.6,
+        "Atlantic Coast Conference": 3.4, "ACC": 3.4,
+        "Big East": 3.3, "Big East Conference": 3.3,
+        "Pac-12": 3.0, "Pac-12 Conference": 3.0,
+        "Mountain West Conference": 3.2, "Mountain West": 3.2,
+        "American Athletic Conference": 3.0, "AAC": 3.0,
+        "West Coast Conference": 2.8, "WCC": 2.8,
+        "Atlantic 10 Conference": 2.7, "A-10": 2.7,
+        "Missouri Valley Conference": 2.9, "MVC": 2.9,
+    }
     DEFAULT_HCA = 3.0
-    SIGMA = 16.0  # matches live system calibration
+    SIGMA = 16.0  # matches JS ncaaPredictGame calibration
+
+    def _lookup_hca(conf_val):
+        """Lookup HCA from either ESPN ID or conference name."""
+        s = str(conf_val).strip()
+        if s in CONF_ID_HCA:
+            return CONF_ID_HCA[s]
+        if s in CONF_NAME_HCA:
+            return CONF_NAME_HCA[s]
+        return DEFAULT_HCA
 
     h_em = df["home_adj_em"].fillna(0).values
     a_em = df["away_adj_em"].fillna(0).values
@@ -335,7 +380,27 @@ def _ncaa_backfill_heuristic(df):
     a_wins = df["away_record_wins"].fillna(0).values
     a_losses = df["away_record_losses"].fillna(0).values
 
-    # Check if postseason column exists
+    # F4: Additional stat arrays for Four Factors + defensive boost
+    h_fgpct = df["home_fgpct"].fillna(0.455).values if "home_fgpct" in df.columns else np.full(len(df), 0.455)
+    a_fgpct = df["away_fgpct"].fillna(0.455).values if "away_fgpct" in df.columns else np.full(len(df), 0.455)
+    h_threepct = df["home_threepct"].fillna(0.340).values if "home_threepct" in df.columns else np.full(len(df), 0.340)
+    a_threepct = df["away_threepct"].fillna(0.340).values if "away_threepct" in df.columns else np.full(len(df), 0.340)
+    h_turnovers = df["home_turnovers"].fillna(12.0).values if "home_turnovers" in df.columns else np.full(len(df), 12.0)
+    a_turnovers = df["away_turnovers"].fillna(12.0).values if "away_turnovers" in df.columns else np.full(len(df), 12.0)
+    h_orb_pct = df["home_orb_pct"].fillna(0.28).values if "home_orb_pct" in df.columns else np.full(len(df), 0.28)
+    a_orb_pct = df["away_orb_pct"].fillna(0.28).values if "away_orb_pct" in df.columns else np.full(len(df), 0.28)
+    h_fta_rate = df["home_fta_rate"].fillna(0.34).values if "home_fta_rate" in df.columns else np.full(len(df), 0.34)
+    a_fta_rate = df["away_fta_rate"].fillna(0.34).values if "away_fta_rate" in df.columns else np.full(len(df), 0.34)
+    h_steals = df["home_steals"].fillna(7.0).values if "home_steals" in df.columns else np.full(len(df), 7.0)
+    a_steals = df["away_steals"].fillna(7.0).values if "away_steals" in df.columns else np.full(len(df), 7.0)
+    h_blocks = df["home_blocks"].fillna(3.5).values if "home_blocks" in df.columns else np.full(len(df), 3.5)
+    a_blocks = df["away_blocks"].fillna(3.5).values if "away_blocks" in df.columns else np.full(len(df), 3.5)
+    h_ato = df["home_ato_ratio"].fillna(1.2).values if "home_ato_ratio" in df.columns else np.full(len(df), 1.2)
+    a_ato = df["away_ato_ratio"].fillna(1.2).values if "away_ato_ratio" in df.columns else np.full(len(df), 1.2)
+    # Defensive rebounds for opponent's matchup ORB%
+    h_defreb = df["home_def_reb"].fillna(24.5).values if "home_def_reb" in df.columns else np.full(len(df), 24.5)
+    a_defreb = df["away_def_reb"].fillna(24.5).values if "away_def_reb" in df.columns else np.full(len(df), 24.5)
+
     is_post = df["is_postseason"].fillna(0).values if "is_postseason" in df.columns else np.zeros(len(df))
 
     n = len(df)
@@ -344,33 +409,79 @@ def _ncaa_backfill_heuristic(df):
     win_pct_home = np.full(n, 0.5)
     spread_home = np.zeros(n)
 
+    # ── F2 FIX: Compute dynamic league average PPG (winsorized) ONCE outside loop ──
+    _all_ppg = np.concatenate([h_ppg[h_ppg > 0], a_ppg[a_ppg > 0]])
+    if len(_all_ppg) > 20:
+        _lo, _hi = np.percentile(_all_ppg, 5), np.percentile(_all_ppg, 95)
+        lg_avg_ppg = float(np.mean(np.clip(_all_ppg, _lo, _hi)))
+    else:
+        lg_avg_ppg = 72.5  # fallback NCAA average PPG
+
+    # League averages for Four Factors (can be derived dynamically in future)
+    LG_EFG = 0.502
+    LG_TO_PCT = 18.0
+    LG_ORB_PCT = 0.28
+    LG_FTA_RATE = 0.34
+    LG_AVG_TEMPO = 68.0
+
     for i in range(n):
-        # ── 1. Efficiency-based projected scores ──
-        # KenPom additive: homeOE + awayDE - lgAvg
-        # If we don't have adj_oe/adj_de separately, derive from ppg/opp_ppg
         possessions = (h_tempo[i] + a_tempo[i]) / 2
-        # Derive league average from actual team PPG data (winsorized)
-        _all_ppg = np.concatenate([h_ppg[h_ppg > 0], a_ppg[a_ppg > 0]])
-        if len(_all_ppg) > 20:
-            _lo, _hi = np.percentile(_all_ppg, 5), np.percentile(_all_ppg, 95)
-            lg_avg = float(np.mean(np.clip(_all_ppg, _lo, _hi)))
-        else:
-            lg_avg = 70.0  # fallback
+        tempo_ratio = possessions / LG_AVG_TEMPO
 
-        # Simplified KenPom path using available data
-        home_oe = h_ppg[i] if h_ppg[i] > 0 else lg_avg
-        away_oe = a_ppg[i] if a_ppg[i] > 0 else lg_avg
-        home_de = h_opp[i] if h_opp[i] > 0 else lg_avg
-        away_de = a_opp[i] if a_opp[i] > 0 else lg_avg
+        # ── F1 FIX: KenPom ADDITIVE formula ──
+        # BEFORE (wrong): hs = ((home_oe + away_de) / 2) * tempo_ratio
+        #   This averaging formula compresses ALL spreads by exactly 50%.
+        # AFTER (correct): hs = (home_oe + away_de - lg_avg) * tempo_ratio
+        home_oe = h_ppg[i] if h_ppg[i] > 0 else lg_avg_ppg
+        away_oe = a_ppg[i] if a_ppg[i] > 0 else lg_avg_ppg
+        home_de = h_opp[i] if h_opp[i] > 0 else lg_avg_ppg
+        away_de = a_opp[i] if a_opp[i] > 0 else lg_avg_ppg
 
-        # Score projection: (teamOE + oppDE) / 2, scaled by tempo
-        tempo_ratio = possessions / 68.0  # vs avg tempo
-        hs = ((home_oe + away_de) / 2) * tempo_ratio
-        asc = ((away_oe + home_de) / 2) * tempo_ratio
+        hs = (home_oe + away_de - lg_avg_ppg) * tempo_ratio
+        asc = (away_oe + home_de - lg_avg_ppg) * tempo_ratio
+
+        # ── F4: Four Factors boost (matches JS ncaaUtils.js) ──
+        tempo_scale = possessions / LG_AVG_TEMPO
+        three_rate = 0.38  # default NCAA 3PA rate
+
+        def _four_factors(fgpct, threepct, turnovers, tempo, orb_pct, fta_rate):
+            efg = fgpct + 0.5 * three_rate * threepct
+            efg_boost = (efg - LG_EFG) * 10.0       # F9: recalibrated to Dean Oliver 40% target
+
+            to_pct = (turnovers / tempo * 100) if tempo > 0 else LG_TO_PCT
+            to_boost = max(-2.5, min(2.5, (LG_TO_PCT - to_pct) * 0.08))  # F9: 0.09→0.08
+
+            orb_boost = (orb_pct - LG_ORB_PCT) * 4.0   # F9: 5.5→4.0
+            ftr_boost = (fta_rate - LG_FTA_RATE) * 2.5  # F9: 3.0→2.5
+
+            return (efg_boost + to_boost + orb_boost + ftr_boost) * tempo_scale
+
+        home_ff = _four_factors(h_fgpct[i], h_threepct[i], h_turnovers[i], h_tempo[i],
+                                h_orb_pct[i], h_fta_rate[i])
+        away_ff = _four_factors(a_fgpct[i], a_threepct[i], a_turnovers[i], a_tempo[i],
+                                a_orb_pct[i], a_fta_rate[i])
+
+        # ── F4: Defensive disruption boost (matches JS) ──
+        home_def = (h_steals[i] - 7.0) * 0.08 + (h_blocks[i] - 3.5) * 0.06
+        away_def = (a_steals[i] - 7.0) * 0.08 + (a_blocks[i] - 3.5) * 0.06
+
+        # ── F4: Ball control (ATO + turnover margin) ──
+        ato_boost = ((h_ato[i] - 1.2) - (a_ato[i] - 1.2)) * 0.5
+        to_margin_h = h_steals[i] - h_turnovers[i]
+        to_margin_a = a_steals[i] - a_turnovers[i]
+        to_margin_boost = (to_margin_h - to_margin_a) * 0.08
+
+        # ── F4: Blowout scaling (matches JS — emGap >= 15 ramps to 1.5×) ──
+        em_gap = abs(h_em[i] - a_em[i])
+        blowout_scale = min(1.5, 1.0 + (em_gap - 15) / 30) if em_gap >= 15 else 1.0
+
+        # Assemble scores with all components (matches JS ncaaPredictGame)
+        hs += home_ff * 0.35 * blowout_scale + home_def * 0.20 * blowout_scale + ato_boost * 0.5 + to_margin_boost * 0.5
+        asc += away_ff * 0.35 * blowout_scale + away_def * 0.20 * blowout_scale - ato_boost * 0.5 - to_margin_boost * 0.5
 
         # ── 2. Home court advantage ──
         if not neutral[i]:
-            hca = CONF_ID_HCA.get(str(h_conf[i]).strip(), DEFAULT_HCA)
+            hca = _lookup_hca(h_conf[i])
             hs += hca / 2
             asc -= hca / 2
 
@@ -380,28 +491,57 @@ def _ncaa_backfill_heuristic(df):
         hs += rank_boost(h_rank[i]) * 0.3
         asc += rank_boost(a_rank[i]) * 0.3
 
-        # ── 4. Record-based form signal ──
+        # ── F5 FIX: Per-team form signal with games-played scaling ──
+        # Matches JS pattern: formWeight scales from 0→0.10 based on sqrt(games/30)
+        # Applied as: (winPct - 0.5) * formWeight * 40.0 to approximate JS formScore * formWeight * 4.0
         h_games = h_wins[i] + h_losses[i]
         a_games = a_wins[i] + a_losses[i]
         if h_games >= 3:
             h_wp = h_wins[i] / h_games
-            hs += (h_wp - 0.5) * 2.0  # ~2 pts swing for strong vs weak record
+            h_form_weight = min(0.10, 0.10 * np.sqrt(min(h_games, 30) / 30))
+            hs += (h_wp - 0.5) * h_form_weight * 40.0
         if a_games >= 3:
             a_wp = a_wins[i] / a_games
-            asc += (a_wp - 0.5) * 2.0
+            a_form_weight = min(0.10, 0.10 * np.sqrt(min(a_games, 30) / 30))
+            asc += (a_wp - 0.5) * a_form_weight * 40.0
 
-        # ── 5. Postseason / NCAA tournament compression ──
-        # Tournament games are closer (neutral site + high stakes = less blowouts)
+        # ── v20 cross-sport FIX: True Shooting % (ALIGN-7, ported from NBA) ──
+        # TS% captures free throw conversion beyond what FTR measures.
+        # Weight at 0.05 to avoid overlap with eFG% in Four Factors.
+        NCAA_LG_TS = 0.540  # NCAA D1 average TS% (~54.0% vs NBA's ~57.8%)
+        if "home_fga" in df.columns and "home_fta" in df.columns:
+            _h_fga = float(df["home_fga"].values[i]) if pd.notna(df["home_fga"].values[i]) else 0
+            _a_fga = float(df["away_fga"].values[i]) if "away_fga" in df.columns and pd.notna(df["away_fga"].values[i]) else 0
+            _h_fta = float(df["home_fta"].values[i]) if pd.notna(df["home_fta"].values[i]) else 0
+            _a_fta = float(df["away_fta"].values[i]) if "away_fta" in df.columns and pd.notna(df["away_fta"].values[i]) else 0
+            def _ts_boost(ppg_val, fga_val, fta_val):
+                if fga_val <= 0 or fta_val <= 0: return 0
+                tsa = fga_val + 0.44 * fta_val
+                if tsa <= 0: return 0
+                ts = ppg_val / (2 * tsa)
+                return max(-2.5, min(2.5, (ts - NCAA_LG_TS) * 15))
+            hs += _ts_boost(h_ppg[i], _h_fga, _h_fta) * 0.05
+            asc += _ts_boost(a_ppg[i], _a_fga, _a_fta) * 0.05
+
+        # ── 5. Postseason compression ──
         if is_post[i]:
             mid = (hs + asc) / 2
             hs = mid + (hs - mid) * 0.90
             asc = mid + (asc - mid) * 0.90
 
-        # ── 6. Safety clamp ──
+        # ── Total cap (matches JS maxRealisticTotal = 190) ──
+        raw_total = hs + asc
+        if raw_total > 190:
+            current_spread = hs - asc
+            capped_mid = 190 / 2
+            hs = capped_mid + current_spread / 2
+            asc = capped_mid - current_spread / 2
+
+        # ── Safety clamp [35, 130] ──
         hs = max(35, min(130, hs))
         asc = max(35, min(130, asc))
 
-        # ── 7. Spread and win probability ──
+        # ── Spread and win probability ──
         spread = hs - asc
         wp = 1.0 / (1.0 + 10.0 ** (-spread / SIGMA))
         wp = max(0.03, min(0.97, wp))
@@ -415,21 +555,31 @@ def _ncaa_backfill_heuristic(df):
     df["pred_away_score"] = pred_away_score
     df["win_pct_home"] = win_pct_home
     df["spread_home"] = spread_home
-    df["ou_total"] = pred_home_score + pred_away_score
-    # Derive moneyline from win probability (matches JS formula)
+
+    # ── v20 cross-sport FIX: O/U uses PPG-based formula with shrink (matches JS ALIGN-8) ──
+    # Before: ou_total = pred_home_score + pred_away_score (spread-optimized, inflated by ~35 pts)
+    # After: PPG-based additive with 0.975 shrink factor (matches ncaaUtils.js lines 625-632)
+    NCAA_TOTAL_SHRINK = 0.975
+    _ou_hca = np.where(df["neutral_site"].fillna(False).values, 0, 1.5)
+    _all_ppg_vals = np.concatenate([h_ppg[h_ppg > 0], a_ppg[a_ppg > 0]])
+    _ou_lg = float(np.mean(np.clip(_all_ppg_vals, np.percentile(_all_ppg_vals, 5), np.percentile(_all_ppg_vals, 95)))) if len(_all_ppg_vals) > 20 else 72.5
+    _ou_home = (h_ppg + a_opp - _ou_lg + _ou_hca / 2) * NCAA_TOTAL_SHRINK
+    _ou_away = (a_ppg + h_opp - _ou_lg - _ou_hca / 2) * NCAA_TOTAL_SHRINK
+    df["ou_total"] = np.maximum(100, np.round(_ou_home + _ou_away, 1))
     df["model_ml_home"] = [
         int(-round((wp / (1 - wp)) * 100)) if wp >= 0.5
         else int(round(((1 - wp) / wp) * 100))
         for wp in win_pct_home
     ]
 
-    # Stats: how much differentiation did we get?
+    # Diagnostics
     wp_std = np.std(win_pct_home)
-    wp_range = np.max(win_pct_home) - np.min(win_pct_home)
+    sp_std = np.std(spread_home)
     non_neutral = (win_pct_home != 0.5).sum()
-    print(f"  NCAA heuristic backfill: {n} rows | "
+    print(f"  NCAA heuristic backfill (v18 audit fix): {n} rows | "
           f"win_pct std={wp_std:.3f}, range=[{np.min(win_pct_home):.3f}, {np.max(win_pct_home):.3f}] | "
-          f"{non_neutral}/{n} have non-neutral predictions")
+          f"spread std={sp_std:.1f}, range=[{np.min(spread_home):.1f}, {np.max(spread_home):.1f}] | "
+          f"{non_neutral}/{n} non-neutral | lg_avg_ppg={lg_avg_ppg:.1f}")
 
     return df
 
