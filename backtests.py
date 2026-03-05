@@ -5,12 +5,13 @@ from sports.ncaa import ncaa_build_features
 import numpy as np, pandas as pd, traceback, shap
 from datetime import datetime
 from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier, RandomForestRegressor, RandomForestClassifier
-from sklearn.linear_model import RidgeCV, LogisticRegression, Ridge
+from sklearn.linear_model import RidgeCV, LogisticRegression, Ridge, ElasticNetCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import cross_val_predict
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import mean_absolute_error, brier_score_loss
+from scipy.optimize import minimize_scalar
 from db import sb_get, load_model
 from ml_utils import StackedRegressor, StackedClassifier
 
