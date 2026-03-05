@@ -515,7 +515,7 @@ def train_nba():
         scaler   = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         n = len(df)
-        cv_folds = min(5, n)  # 5 for Railway; set 10 for local
+        cv_folds = min(10, n)  # 5 for Railway; set 10 for local
 
         if n >= 200:
             # ── Stacking ensemble: XGB+CAT+RF at 50 est (sweep-optimized) ──

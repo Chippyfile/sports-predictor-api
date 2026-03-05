@@ -748,7 +748,7 @@ def train_ncaa():
             n = MAX_TRAIN
             print(f"  NCAA: Capped to {n} rows for Railway timeout protection")
 
-        cv_folds = min(5, n)  # 5 for Railway; set 10 for local
+        cv_folds = min(10, n)  # 5 for Railway; set 10 for local
         fit_weights = sample_weights if sample_weights is not None else np.ones(n)
 
         if n >= 200:
