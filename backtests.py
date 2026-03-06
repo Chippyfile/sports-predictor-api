@@ -1816,3 +1816,275 @@ def historical_ats_all():
         sport: _historical_ats_analysis(sport).get_json()
         for sport in ["ncaa", "nba", "mlb"]
     })
+
+
+# ═══════════════════════════════════════════════════════════════
+# SPREAD-VS-MARKET ATS EDGE ANALYSIS
+# Where does the model disagree with Vegas, and is it right?
+# ═══════════════════════════════════════════════════════════════
+
+def spread_vs_market_analysis(sport):
+    """
+    Analyze ATS performance segmented by how much the model's predicted
+    spread disagrees with the Vegas spread.
+
+    The core insight: ATS edge lives where the model disagrees with Vegas.
+    If the model says home -10 but Vegas says home -7, the model thinks
+    Vegas is underpricing the favorite by 3 points. If the model is
+    systematically right in these spots, that's exploitable edge.
+
+    Computes:
+    - ATS accuracy bucketed by disagreement magnitude
+    - "Fade the model" analysis (bet against the model's lean when it's extreme)
+    - Contrarian signal (when model agrees with underdog covering)
+    - Value zone identification
+    """
+    SPORT_CFG = {
+        "ncaa": {
+            "table": "ncaa_historical",
+            "score_h": "actual_home_score", "score_a": "actual_away_score",
+            "spread_col": "market_spread_home", "ou_col": "market_ou_total",
+            "label": "NCAA Basketball",
+            "SIGMA": 16.0, "DEFAULT_HCA": 3.0,
+            "disagree_buckets": [0, 1.5, 3, 5, 7.5, 10, 15, 50],
+        },
+        "nba": {
+            "table": "nba_historical",
+            "score_h": "actual_home_score", "score_a": "actual_away_score",
+            "spread_col": "market_spread_home", "ou_col": "market_ou_total",
+            "label": "NBA Basketball",
+            "SIGMA": 12.0, "DEFAULT_HCA": 2.5,
+            "disagree_buckets": [0, 1.5, 3, 5, 7.5, 10, 15, 50],
+        },
+        "mlb": {
+            "table": "mlb_historical",
+            "score_h": "actual_home_runs", "score_a": "actual_away_runs",
+            "spread_col": "market_spread_home", "ou_col": "market_ou_total",
+            "label": "MLB Baseball",
+            "SIGMA": 4.0, "DEFAULT_HCA": 0.5,
+            "disagree_buckets": [0, 0.3, 0.6, 1.0, 1.5, 2.0, 3.0, 10],
+        },
+    }
+
+    cfg = SPORT_CFG.get(sport)
+    if not cfg:
+        return jsonify({"error": f"Unknown sport: {sport}"})
+
+    rows = sb_get(
+        cfg["table"],
+        f"{cfg['score_h']}=not.is.null&{cfg['spread_col']}=not.is.null"
+        f"&select=*&order=game_date.asc&limit=50000"
+    )
+    if not rows or len(rows) < 100:
+        return jsonify({"error": f"Need 100+ games", "n": len(rows) if rows else 0})
+
+    df = pd.DataFrame(rows)
+    df[cfg["score_h"]] = pd.to_numeric(df[cfg["score_h"]], errors="coerce")
+    df[cfg["score_a"]] = pd.to_numeric(df[cfg["score_a"]], errors="coerce")
+    df[cfg["spread_col"]] = pd.to_numeric(df[cfg["spread_col"]], errors="coerce")
+    df = df.dropna(subset=[cfg["score_h"], cfg["score_a"], cfg["spread_col"]])
+
+    # ── Compute model predicted spread (same as historical_ats) ──
+    SIGMA = cfg["SIGMA"]
+    HCA = cfg["DEFAULT_HCA"]
+
+    if sport == "ncaa":
+        h_em = pd.to_numeric(df.get("home_adj_em", 0), errors="coerce").fillna(0)
+        a_em = pd.to_numeric(df.get("away_adj_em", 0), errors="coerce").fillna(0)
+        neutral = df.get("neutral_site", False).fillna(False).astype(bool)
+        hca = np.where(neutral, 0, HCA)
+        pred_spread = h_em - a_em + hca
+        no_em = (h_em == 0) & (a_em == 0)
+        if no_em.any():
+            h_ppg = pd.to_numeric(df.get("home_ppg", 70), errors="coerce").fillna(70)
+            a_ppg = pd.to_numeric(df.get("away_ppg", 70), errors="coerce").fillna(70)
+            h_opp = pd.to_numeric(df.get("home_opp_ppg", 70), errors="coerce").fillna(70)
+            a_opp = pd.to_numeric(df.get("away_opp_ppg", 70), errors="coerce").fillna(70)
+            ppg_spread = ((h_ppg - a_opp) - (a_ppg - h_opp)) / 2 + hca
+            pred_spread = np.where(no_em, ppg_spread, pred_spread)
+    elif sport == "nba":
+        h_em = pd.to_numeric(df.get("home_net_rtg", 0), errors="coerce").fillna(0)
+        a_em = pd.to_numeric(df.get("away_net_rtg", 0), errors="coerce").fillna(0)
+        pred_spread = (h_em - a_em) / 2.7 + HCA
+        no_em = (h_em == 0) & (a_em == 0)
+        if no_em.any():
+            h_ppg = pd.to_numeric(df.get("home_ppg", 110), errors="coerce").fillna(110)
+            a_ppg = pd.to_numeric(df.get("away_ppg", 110), errors="coerce").fillna(110)
+            h_opp = pd.to_numeric(df.get("home_opp_ppg", 110), errors="coerce").fillna(110)
+            a_opp = pd.to_numeric(df.get("away_opp_ppg", 110), errors="coerce").fillna(110)
+            ppg_spread = ((h_ppg - a_opp) - (a_ppg - h_opp)) / 2 + HCA
+            pred_spread = np.where(no_em, ppg_spread, pred_spread)
+    elif sport == "mlb":
+        if "win_pct_home" in df.columns:
+            wp = pd.to_numeric(df["win_pct_home"], errors="coerce").fillna(0.5)
+            pred_spread = np.log10(wp / (1 - wp.clip(0.01, 0.99))) * SIGMA
+        else:
+            pred_spread = pd.Series(0, index=df.index)
+
+    df["pred_spread"] = pred_spread
+    # Market spread is in Vegas convention (negative = home favored)
+    # Model spread is positive = home favored
+    # To compare: negate market spread so both use same convention
+    df["market_spread_model_conv"] = -df[cfg["spread_col"]]
+    df["spread_disagree"] = df["pred_spread"] - df["market_spread_model_conv"]
+    df["abs_disagree"] = df["spread_disagree"].abs()
+
+    # ATS result
+    df["actual_margin"] = df[cfg["score_h"]] - df[cfg["score_a"]]
+    df["ats_result"] = df["actual_margin"] + df[cfg["spread_col"]]
+    df["home_covered"] = df["ats_result"] > 0
+    df["ats_push"] = df["ats_result"] == 0
+    df["home_won"] = df["actual_margin"] > 0
+
+    # Model's ATS pick: does the model lean toward home or away covering?
+    # If model_spread > market_spread (model thinks home is better than Vegas does),
+    # bet HOME to cover. If model_spread < market_spread, bet AWAY to cover.
+    df["model_leans_home"] = df["spread_disagree"] > 0
+    df["model_ats_correct"] = np.where(
+        df["ats_push"], np.nan,
+        np.where(df["model_leans_home"], df["home_covered"], ~df["home_covered"])
+    )
+
+    # Also compute the naive approach (just pick the ML winner side)
+    df["model_picked_home"] = df["pred_spread"] > 0
+    df["naive_ats_correct"] = np.where(
+        df["ats_push"], np.nan,
+        np.where(df["model_picked_home"], df["home_covered"], ~df["home_covered"])
+    )
+
+    ats_df = df[~df["ats_push"]].copy()
+
+    # ── 1. DISAGREEMENT BUCKETS ──
+    # "When model disagrees with Vegas by X points, how often does the model's
+    #  lean cover?"
+    buckets = cfg["disagree_buckets"]
+    disagree_analysis = []
+    for i in range(len(buckets) - 1):
+        lo, hi = buckets[i], buckets[i + 1]
+        subset = ats_df[(ats_df["abs_disagree"] >= lo) & (ats_df["abs_disagree"] < hi)]
+        if len(subset) >= 10:
+            model_ats = float(subset["model_ats_correct"].mean())
+            naive_ats = float(subset["naive_ats_correct"].mean())
+            disagree_analysis.append({
+                "disagreement_range": f"{lo:.1f}-{hi:.1f}",
+                "n_games": len(subset),
+                "model_lean_ats": round(model_ats, 4),
+                "naive_pick_ats": round(naive_ats, 4),
+                "profitable": model_ats > 0.524,
+                "avg_disagreement": round(float(subset["abs_disagree"].mean()), 2),
+                "avg_market_spread": round(float(subset[cfg["spread_col"]].mean()), 2),
+            })
+
+    # ── 2. DIRECTIONAL ANALYSIS ──
+    # Model thinks home is better than Vegas vs model thinks away is better
+    home_lean = ats_df[ats_df["spread_disagree"] > 0.5]  # model leans home
+    away_lean = ats_df[ats_df["spread_disagree"] < -0.5]  # model leans away
+    neutral_zone = ats_df[ats_df["abs_disagree"] <= 0.5]  # agreement zone
+
+    directional = {
+        "model_leans_home": {
+            "n_games": len(home_lean),
+            "ats_accuracy": round(float(home_lean["model_ats_correct"].mean()), 4) if len(home_lean) > 0 else None,
+            "avg_lean": round(float(home_lean["spread_disagree"].mean()), 2) if len(home_lean) > 0 else None,
+        },
+        "model_leans_away": {
+            "n_games": len(away_lean),
+            "ats_accuracy": round(float(away_lean["model_ats_correct"].mean()), 4) if len(away_lean) > 0 else None,
+            "avg_lean": round(float(away_lean["spread_disagree"].mean()), 2) if len(away_lean) > 0 else None,
+        },
+        "agreement_zone": {
+            "n_games": len(neutral_zone),
+            "note": "Model and Vegas agree within 0.5 pts — no edge expected"
+        },
+    }
+
+    # ── 3. CONTRARIAN ANALYSIS ──
+    # "Fade the public" — when the model agrees with the big favorite,
+    # the underdog often covers. When model picks the underdog, it's often right.
+    big_fav = ats_df[df[cfg["spread_col"]].abs() >= 10]  # 10+ point spreads
+    close_games = ats_df[df[cfg["spread_col"]].abs() <= 3]  # close games
+
+    contrarian = {}
+    if len(big_fav) >= 20:
+        # Model leans WITH big favorite
+        fav_with = big_fav[big_fav["model_leans_home"] == (big_fav[cfg["spread_col"]] < 0)]
+        fav_against = big_fav[big_fav["model_leans_home"] != (big_fav[cfg["spread_col"]] < 0)]
+        contrarian["big_favorites_10plus"] = {
+            "total_games": len(big_fav),
+            "model_with_favorite": {
+                "n": len(fav_with),
+                "ats": round(float(fav_with["model_ats_correct"].mean()), 4) if len(fav_with) > 0 else None,
+            },
+            "model_with_underdog": {
+                "n": len(fav_against),
+                "ats": round(float(fav_against["model_ats_correct"].mean()), 4) if len(fav_against) > 0 else None,
+            },
+            "insight": "When model agrees with underdog on big spreads, is that signal?"
+        }
+    if len(close_games) >= 20:
+        contrarian["close_games_3pts"] = {
+            "total_games": len(close_games),
+            "model_ats": round(float(close_games["model_ats_correct"].mean()), 4),
+            "insight": "Close games where Vegas is less certain — model may have edge"
+        }
+
+    # ── 4. VALUE ZONE IDENTIFICATION ──
+    # Find the specific disagreement range where model ATS > 52.4%
+    value_zones = []
+    for min_d in [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0]:
+        subset = ats_df[ats_df["abs_disagree"] >= min_d]
+        if len(subset) >= 20:
+            ats_acc = float(subset["model_ats_correct"].mean())
+            value_zones.append({
+                "min_disagreement": min_d,
+                "n_games": len(subset),
+                "ats_accuracy": round(ats_acc, 4),
+                "profitable": ats_acc > 0.524,
+                "pct_of_total": round(len(subset) / len(ats_df), 4),
+            })
+
+    # ── 5. MODEL SPREAD MAE vs VEGAS ──
+    model_err = (df["pred_spread"] - df["actual_margin"]).abs()
+    vegas_err = (df["market_spread_model_conv"] - df["actual_margin"]).abs()
+    both_valid = model_err.notna() & vegas_err.notna()
+
+    spread_comparison = {
+        "model_mae": round(float(model_err[both_valid].mean()), 2),
+        "vegas_mae": round(float(vegas_err[both_valid].mean()), 2),
+        "model_closer_pct": round(float((model_err[both_valid] < vegas_err[both_valid]).mean()), 4),
+        "n_games": int(both_valid.sum()),
+        "interpretation": "Model needs to be closer to actual margin than Vegas to have ATS edge"
+    }
+
+    # ── Overall summary ──
+    overall_model_lean = float(ats_df["model_ats_correct"].mean())
+    overall_naive = float(ats_df["naive_ats_correct"].mean())
+
+    return jsonify({
+        "sport": cfg["label"],
+        "total_games": len(ats_df),
+        "overall_model_lean_ats": round(overall_model_lean, 4),
+        "overall_naive_pick_ats": round(overall_naive, 4),
+        "overall_profitable": overall_model_lean > 0.524,
+        "spread_comparison": spread_comparison,
+        "by_disagreement": disagree_analysis,
+        "directional": directional,
+        "contrarian": contrarian,
+        "value_zones": value_zones,
+        "strategy_notes": {
+            "key_insight": "ATS edge = model lean accuracy when model disagrees with Vegas",
+            "model_lean": "Bet the side the model's spread favors vs Vegas spread",
+            "naive_pick": "Just bet whichever side the model picks to win (baseline)",
+            "profitable_threshold": "52.4% ATS at -110 juice",
+        },
+    })
+
+
+def spread_edge_ncaa():
+    return spread_vs_market_analysis("ncaa")
+
+def spread_edge_nba():
+    return spread_vs_market_analysis("nba")
+
+def spread_edge_mlb():
+    return spread_vs_market_analysis("mlb")

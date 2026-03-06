@@ -395,6 +395,7 @@ from backtests import (
     nba_confidence_calibration, ncaa_confidence_calibration, mlb_confidence_calibration,
     route_backtest_current_model,
     historical_ats_ncaa, historical_ats_nba, historical_ats_mlb, historical_ats_all,
+    spread_edge_ncaa, spread_edge_nba, spread_edge_mlb,
 )
 
 # Only register if they exist (graceful degradation)
@@ -411,6 +412,9 @@ _backtest_routes = {
     "/historical-ats/nba": (["GET"], "historical_ats_nba", historical_ats_nba),
     "/historical-ats/mlb": (["GET"], "historical_ats_mlb", historical_ats_mlb),
     "/historical-ats/all": (["GET"], "historical_ats_all", historical_ats_all),
+    "/spread-edge/ncaa": (["GET"], "spread_edge_ncaa", spread_edge_ncaa),
+    "/spread-edge/nba": (["GET"], "spread_edge_nba", spread_edge_nba),
+    "/spread-edge/mlb": (["GET"], "spread_edge_mlb", spread_edge_mlb),
 }
 for path, (methods, name, fn) in _backtest_routes.items():
     try:
