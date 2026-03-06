@@ -13,6 +13,34 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import mean_absolute_error, brier_score_loss
 from scipy.optimize import minimize_scalar
 from db import sb_get, load_model
+
+
+# ─────────────────────────────────────────────────────────────
+# HELPER: ATS + O/U hit rates for any graded DataFrame subset
+# ─────────────────────────────────────────────────────────────
+def _ats_ou_stats(subset):
+    """Compute ATS and O/U hit rates for a graded DataFrame subset."""
+    stats = {}
+    if "rl_correct" in subset.columns:
+        ats_sub = subset[subset["rl_correct"].notna()]
+        stats["ats_n"] = len(ats_sub)
+        stats["ats_accuracy"] = round(float(ats_sub["rl_correct"].astype(bool).mean()), 4) if len(ats_sub) > 0 else None
+    else:
+        stats["ats_n"] = 0
+        stats["ats_accuracy"] = None
+    if "ou_correct" in subset.columns:
+        has_line = subset["market_ou_total"].notna() if "market_ou_total" in subset.columns else pd.Series(False, index=subset.index)
+        ou_sub = subset[has_line & (subset["ou_correct"] != "PUSH")]
+        if len(ou_sub) > 0:
+            stats["ou_n"] = len(ou_sub)
+            stats["ou_accuracy"] = round(float(ou_sub["ou_correct"].isin(["OVER", "UNDER"]).mean()), 4)
+        else:
+            stats["ou_n"] = 0
+            stats["ou_accuracy"] = None
+    else:
+        stats["ou_n"] = 0
+        stats["ou_accuracy"] = None
+    return stats
 from ml_utils import StackedRegressor, StackedClassifier
 
 def route_model_info(sport):
@@ -58,11 +86,13 @@ def nba_confidence_calibration():
     for tier, lo, hi in [("LOW", 0, NBA_MED), ("MEDIUM", NBA_MED, NBA_HIGH), ("HIGH", NBA_HIGH, 0.5)]:
         subset = df[(df["conf_margin"] >= lo) & (df["conf_margin"] < hi)] if tier != "HIGH" else df[df["conf_margin"] >= lo]
         if len(subset) > 0:
+            ats_ou = _ats_ou_stats(subset)
             tier_results[tier] = {
                 "n_games": len(subset),
                 "accuracy": round(float(subset["ml_correct"].mean()), 4),
                 "avg_win_pct_margin": round(float(subset["conf_margin"].mean()), 4),
                 "margin_range": f"{lo:.2f}-{hi:.2f}" if tier != "HIGH" else f">={lo:.2f}",
+                **ats_ou,
             }
 
     # ── Data quality breakdown (secondary info) ──
@@ -72,8 +102,10 @@ def nba_confidence_calibration():
         for dq in ["LOW", "MEDIUM", "HIGH"]:
             subset = df[df["confidence"] == dq]
             if len(subset) > 0:
+                ats_ou = _ats_ou_stats(subset)
                 dq_results[dq] = {"n_games": len(subset),
-                                  "accuracy": round(float(subset["ml_correct"].mean()), 4)}
+                                  "accuracy": round(float(subset["ml_correct"].mean()), 4),
+                                  **ats_ou}
 
     # Accuracy by win probability margin decile
     decile_results = []
@@ -101,6 +133,35 @@ def nba_confidence_calibration():
                 "pct_of_total": round(len(subset) / len(df), 4),
             })
 
+    # ATS cumulative threshold
+    ats_cumulative = []
+    if "rl_correct" in df.columns:
+        for threshold in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]:
+            subset = df[df["conf_margin"] >= threshold]
+            ats_valid = subset[subset["rl_correct"].notna()]
+            if len(ats_valid) >= 5:
+                ats_cumulative.append({
+                    "min_margin": threshold,
+                    "n_games": len(ats_valid),
+                    "ats_accuracy": round(float(ats_valid["rl_correct"].astype(bool).mean()), 4),
+                    "pct_of_total": round(len(ats_valid) / max(1, df["rl_correct"].notna().sum()), 4),
+                })
+
+    # O/U cumulative threshold
+    ou_cumulative = []
+    if "ou_correct" in df.columns and "market_ou_total" in df.columns:
+        for threshold in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]:
+            subset = df[df["conf_margin"] >= threshold]
+            has_line = subset["market_ou_total"].notna() & (subset["ou_correct"] != "PUSH")
+            ou_sub = subset[has_line]
+            if len(ou_sub) >= 5:
+                ou_cumulative.append({
+                    "min_margin": threshold,
+                    "n_games": len(ou_sub),
+                    "ou_accuracy": round(float(ou_sub["ou_correct"].isin(["OVER", "UNDER"]).mean()), 4),
+                    "pct_of_total": round(len(ou_sub) / max(1, (df["market_ou_total"].notna() & (df["ou_correct"] != "PUSH")).sum()), 4),
+                })
+
     # Brier score
     brier_overall = round(float(np.mean(
         (df["win_pct_home"].clip(0.5, 0.97) - df["ml_correct"].astype(float)) ** 2
@@ -123,6 +184,8 @@ def nba_confidence_calibration():
         "tier_thresholds": {"LOW": f"<{NBA_MED}", "MEDIUM": f"{NBA_MED}-{NBA_HIGH}", "HIGH": f">={NBA_HIGH}"},
         "by_margin_decile": decile_results,
         "cumulative_threshold": cumulative,
+        "ats_cumulative_threshold": ats_cumulative,
+        "ou_cumulative_threshold": ou_cumulative,
         "suggested_thresholds": {
             "MEDIUM_min_margin": suggested_medium,
             "HIGH_min_margin": suggested_high,
