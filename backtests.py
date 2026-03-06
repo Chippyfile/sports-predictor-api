@@ -1586,10 +1586,11 @@ def route_backtest_ncaa():
 
 def _historical_ats_analysis(sport):
     """
-    Compute ATS/O/U accuracy from historical tables using the model's
-    heuristic backfill predictions vs actual outcomes vs real Vegas lines.
+    Compute ATS/O/U accuracy from historical tables using on-the-fly
+    heuristic predictions vs actual outcomes vs real Vegas lines.
 
-    Works for NCAA, NBA, MLB — each has different table/column conventions.
+    The _historical tables have raw stats + market odds but NOT pre-computed
+    predictions. We compute spread/win_pct from adjEM + HCA on the fly.
     """
     SPORT_CFG = {
         "ncaa": {
@@ -1597,9 +1598,7 @@ def _historical_ats_analysis(sport):
             "score_h": "actual_home_score", "score_a": "actual_away_score",
             "spread_col": "market_spread_home", "ou_col": "market_ou_total",
             "label": "NCAA Basketball",
-            # Tier thresholds (same as confidence endpoints)
-            "HIGH": 0.25, "MED": 0.10,
-            # Cumulative thresholds to test
+            "HIGH": 0.25, "MED": 0.10, "SIGMA": 16.0, "DEFAULT_HCA": 3.0,
             "cum_thresholds": [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40],
         },
         "nba": {
@@ -1607,7 +1606,7 @@ def _historical_ats_analysis(sport):
             "score_h": "actual_home_score", "score_a": "actual_away_score",
             "spread_col": "market_spread_home", "ou_col": "market_ou_total",
             "label": "NBA Basketball",
-            "HIGH": 0.15, "MED": 0.05,
+            "HIGH": 0.15, "MED": 0.05, "SIGMA": 12.0, "DEFAULT_HCA": 2.5,
             "cum_thresholds": [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40],
         },
         "mlb": {
@@ -1615,7 +1614,7 @@ def _historical_ats_analysis(sport):
             "score_h": "actual_home_runs", "score_a": "actual_away_runs",
             "spread_col": "market_spread_home", "ou_col": "market_ou_total",
             "label": "MLB Baseball",
-            "HIGH": 0.10, "MED": 0.04,
+            "HIGH": 0.10, "MED": 0.04, "SIGMA": 4.0, "DEFAULT_HCA": 0.5,
             "cum_thresholds": [0.02, 0.04, 0.06, 0.08, 0.10, 0.15, 0.20, 0.25],
         },
     }
@@ -1624,13 +1623,12 @@ def _historical_ats_analysis(sport):
     if not cfg:
         return jsonify({"error": f"Unknown sport: {sport}. Use ncaa, nba, or mlb."})
 
-    # Fetch historical rows that have both scores and market spread
+    # Fetch historical rows with scores AND market spread
+    # Use select=* since columns vary by sport and we compute predictions on the fly
     rows = sb_get(
         cfg["table"],
         f"{cfg['score_h']}=not.is.null&{cfg['spread_col']}=not.is.null"
-        f"&select={cfg['score_h']},{cfg['score_a']},{cfg['spread_col']},{cfg['ou_col']},"
-        f"win_pct_home,spread_home,pred_home_score,pred_away_score,ou_total,season"
-        f"&order=game_date.asc&limit=50000"
+        f"&select=*&order=game_date.asc&limit=50000"
     )
     if not rows or len(rows) < 50:
         return jsonify({"error": f"Need 50+ {cfg['label']} games with market spread", "n": len(rows) if rows else 0})
@@ -1639,51 +1637,96 @@ def _historical_ats_analysis(sport):
     df[cfg["score_h"]] = pd.to_numeric(df[cfg["score_h"]], errors="coerce")
     df[cfg["score_a"]] = pd.to_numeric(df[cfg["score_a"]], errors="coerce")
     df[cfg["spread_col"]] = pd.to_numeric(df[cfg["spread_col"]], errors="coerce")
-    df["win_pct_home"] = pd.to_numeric(df.get("win_pct_home", 0.5), errors="coerce").fillna(0.5)
-    df["spread_home"] = pd.to_numeric(df.get("spread_home", 0), errors="coerce").fillna(0)
 
     # Drop rows with missing scores or spread
     df = df.dropna(subset=[cfg["score_h"], cfg["score_a"], cfg["spread_col"]])
 
-    # Compute actual margin and ATS result
+    # ── Compute heuristic win_pct on the fly ──
+    SIGMA = cfg["SIGMA"]
+    HCA = cfg["DEFAULT_HCA"]
+
+    if sport == "ncaa":
+        h_em = pd.to_numeric(df.get("home_adj_em", 0), errors="coerce").fillna(0)
+        a_em = pd.to_numeric(df.get("away_adj_em", 0), errors="coerce").fillna(0)
+        neutral = df.get("neutral_site", False).fillna(False).astype(bool)
+        hca = np.where(neutral, 0, HCA)
+        # KenPom additive: spread = home_em - away_em + HCA
+        pred_spread = h_em - a_em + hca
+        # For games missing adjEM, fall back to PPG differential
+        no_em = (h_em == 0) & (a_em == 0)
+        if no_em.any():
+            h_ppg = pd.to_numeric(df.get("home_ppg", 70), errors="coerce").fillna(70)
+            a_ppg = pd.to_numeric(df.get("away_ppg", 70), errors="coerce").fillna(70)
+            h_opp = pd.to_numeric(df.get("home_opp_ppg", 70), errors="coerce").fillna(70)
+            a_opp = pd.to_numeric(df.get("away_opp_ppg", 70), errors="coerce").fillna(70)
+            ppg_spread = ((h_ppg - a_opp) - (a_ppg - h_opp)) / 2 + hca
+            pred_spread = np.where(no_em, ppg_spread, pred_spread)
+    elif sport == "nba":
+        h_em = pd.to_numeric(df.get("home_net_rtg", 0), errors="coerce").fillna(0)
+        a_em = pd.to_numeric(df.get("away_net_rtg", 0), errors="coerce").fillna(0)
+        pred_spread = (h_em - a_em) / 2.7 + HCA  # Net rating scale → points
+        # Fallback to PPG
+        no_em = (h_em == 0) & (a_em == 0)
+        if no_em.any():
+            h_ppg = pd.to_numeric(df.get("home_ppg", 110), errors="coerce").fillna(110)
+            a_ppg = pd.to_numeric(df.get("away_ppg", 110), errors="coerce").fillna(110)
+            h_opp = pd.to_numeric(df.get("home_opp_ppg", 110), errors="coerce").fillna(110)
+            a_opp = pd.to_numeric(df.get("away_opp_ppg", 110), errors="coerce").fillna(110)
+            ppg_spread = ((h_ppg - a_opp) - (a_ppg - h_opp)) / 2 + HCA
+            pred_spread = np.where(no_em, ppg_spread, pred_spread)
+    elif sport == "mlb":
+        # MLB: use win_pct_home if backfilled, otherwise estimate from basic stats
+        if "win_pct_home" in df.columns:
+            wp = pd.to_numeric(df["win_pct_home"], errors="coerce").fillna(0.5)
+            pred_spread = np.log10(wp / (1 - wp.clip(0.01, 0.99))) * SIGMA
+        else:
+            pred_spread = pd.Series(0, index=df.index)
+
+    df["pred_spread"] = pred_spread
+    df["win_pct_home"] = 1.0 / (1.0 + np.power(10, -pred_spread / SIGMA))
+    df["win_pct_home"] = df["win_pct_home"].clip(0.03, 0.97)
+
+    # ── Actual margin and ATS ──
     df["actual_margin"] = df[cfg["score_h"]] - df[cfg["score_a"]]
     df["ats_result"] = df["actual_margin"] + df[cfg["spread_col"]]
-    df["home_covered"] = df["ats_result"] > 0  # True = covered, False = didn't
+    df["home_covered"] = df["ats_result"] > 0
     df["ats_push"] = df["ats_result"] == 0
 
-    # ML correct (heuristic prediction)
+    # ML correct
     df["model_picked_home"] = df["win_pct_home"] >= 0.5
     df["home_won"] = df["actual_margin"] > 0
     df["ml_correct"] = df["model_picked_home"] == df["home_won"]
 
-    # Model ATS: did the model's predicted spread (spread_home) pick the right ATS side?
-    # Model says home covers if spread_home + market_spread > 0
-    # (model_spread is positive when home favored, market is negative when home favored)
-    # Actually: model picks the side its win_pct favors. If model says home wins (wp >= 0.5),
-    # we check if home covered. If model says away wins, we check if away covered.
+    # Model ATS correct: if model picks home (wp >= 0.5), check home covered
     df["model_ats_correct"] = np.where(
         df["ats_push"], np.nan,
         np.where(df["model_picked_home"], df["home_covered"], ~df["home_covered"])
     )
 
-    # Filter out pushes for ATS analysis
+    # Filter out pushes
     ats_df = df[~df["ats_push"]].copy()
     n_ats = len(ats_df)
 
-    # ── Overall stats ──
+    # ── Overall ──
     overall_ml = float(df["ml_correct"].mean()) if len(df) > 0 else None
     overall_ats = float(ats_df["model_ats_correct"].mean()) if n_ats > 0 else None
 
-    # ── O/U analysis ──
+    # ── O/U ──
     ou_stats = None
     if cfg["ou_col"] in df.columns:
         ou_line = pd.to_numeric(df[cfg["ou_col"]], errors="coerce")
         actual_total = df[cfg["score_h"]] + df[cfg["score_a"]]
-        pred_total = pd.to_numeric(df.get("pred_home_score", 0), errors="coerce").fillna(0) + \
-                     pd.to_numeric(df.get("pred_away_score", 0), errors="coerce").fillna(0)
-        # Alternative: use ou_total if pred scores missing
-        if pred_total.sum() == 0 and "ou_total" in df.columns:
-            pred_total = pd.to_numeric(df["ou_total"], errors="coerce").fillna(0)
+        # Use PPG-based total prediction
+        if sport == "ncaa":
+            h_ppg = pd.to_numeric(df.get("home_ppg", 70), errors="coerce").fillna(70)
+            a_ppg = pd.to_numeric(df.get("away_ppg", 70), errors="coerce").fillna(70)
+            pred_total = h_ppg + a_ppg
+        elif sport == "nba":
+            h_ppg = pd.to_numeric(df.get("home_ppg", 110), errors="coerce").fillna(110)
+            a_ppg = pd.to_numeric(df.get("away_ppg", 110), errors="coerce").fillna(110)
+            pred_total = h_ppg + a_ppg
+        else:
+            pred_total = ou_line  # MLB fallback
 
         ou_valid = ou_line.notna() & actual_total.notna() & pred_total.notna() & (actual_total != ou_line)
         if ou_valid.sum() >= 10:
@@ -1715,7 +1758,7 @@ def _historical_ats_analysis(sport):
                 "margin_range": f"{lo:.2f}-{hi:.2f}" if tier != "HIGH" else f">={lo:.2f}",
             }
 
-    # ── ATS cumulative threshold ──
+    # ── ATS cumulative ──
     ats_cumulative = []
     for threshold in cfg["cum_thresholds"]:
         subset = ats_df[ats_df["conf_margin"] >= threshold]
