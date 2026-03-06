@@ -1578,3 +1578,198 @@ def route_backtest_ncaa():
 # GET  /cron/status      — Model freshness & last training run
 # POST /train/all-logged — Manual retrain with shadow comparison + logging
 # ═══════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════
+# HISTORICAL ATS ANALYSIS — Uses _historical tables (real Vegas lines)
+# ═══════════════════════════════════════════════════════════════
+
+def _historical_ats_analysis(sport):
+    """
+    Compute ATS/O/U accuracy from historical tables using the model's
+    heuristic backfill predictions vs actual outcomes vs real Vegas lines.
+
+    Works for NCAA, NBA, MLB — each has different table/column conventions.
+    """
+    SPORT_CFG = {
+        "ncaa": {
+            "table": "ncaa_historical",
+            "score_h": "actual_home_score", "score_a": "actual_away_score",
+            "spread_col": "market_spread_home", "ou_col": "market_ou_total",
+            "label": "NCAA Basketball",
+            # Tier thresholds (same as confidence endpoints)
+            "HIGH": 0.25, "MED": 0.10,
+            # Cumulative thresholds to test
+            "cum_thresholds": [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40],
+        },
+        "nba": {
+            "table": "nba_historical",
+            "score_h": "actual_home_score", "score_a": "actual_away_score",
+            "spread_col": "market_spread_home", "ou_col": "market_ou_total",
+            "label": "NBA Basketball",
+            "HIGH": 0.15, "MED": 0.05,
+            "cum_thresholds": [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40],
+        },
+        "mlb": {
+            "table": "mlb_historical",
+            "score_h": "actual_home_runs", "score_a": "actual_away_runs",
+            "spread_col": "market_spread_home", "ou_col": "market_ou_total",
+            "label": "MLB Baseball",
+            "HIGH": 0.10, "MED": 0.04,
+            "cum_thresholds": [0.02, 0.04, 0.06, 0.08, 0.10, 0.15, 0.20, 0.25],
+        },
+    }
+
+    cfg = SPORT_CFG.get(sport)
+    if not cfg:
+        return jsonify({"error": f"Unknown sport: {sport}. Use ncaa, nba, or mlb."})
+
+    # Fetch historical rows that have both scores and market spread
+    rows = sb_get(
+        cfg["table"],
+        f"{cfg['score_h']}=not.is.null&{cfg['spread_col']}=not.is.null"
+        f"&select={cfg['score_h']},{cfg['score_a']},{cfg['spread_col']},{cfg['ou_col']},"
+        f"win_pct_home,spread_home,pred_home_score,pred_away_score,ou_total,season"
+        f"&order=game_date.asc&limit=50000"
+    )
+    if not rows or len(rows) < 50:
+        return jsonify({"error": f"Need 50+ {cfg['label']} games with market spread", "n": len(rows) if rows else 0})
+
+    df = pd.DataFrame(rows)
+    df[cfg["score_h"]] = pd.to_numeric(df[cfg["score_h"]], errors="coerce")
+    df[cfg["score_a"]] = pd.to_numeric(df[cfg["score_a"]], errors="coerce")
+    df[cfg["spread_col"]] = pd.to_numeric(df[cfg["spread_col"]], errors="coerce")
+    df["win_pct_home"] = pd.to_numeric(df.get("win_pct_home", 0.5), errors="coerce").fillna(0.5)
+    df["spread_home"] = pd.to_numeric(df.get("spread_home", 0), errors="coerce").fillna(0)
+
+    # Drop rows with missing scores or spread
+    df = df.dropna(subset=[cfg["score_h"], cfg["score_a"], cfg["spread_col"]])
+
+    # Compute actual margin and ATS result
+    df["actual_margin"] = df[cfg["score_h"]] - df[cfg["score_a"]]
+    df["ats_result"] = df["actual_margin"] + df[cfg["spread_col"]]
+    df["home_covered"] = df["ats_result"] > 0  # True = covered, False = didn't
+    df["ats_push"] = df["ats_result"] == 0
+
+    # ML correct (heuristic prediction)
+    df["model_picked_home"] = df["win_pct_home"] >= 0.5
+    df["home_won"] = df["actual_margin"] > 0
+    df["ml_correct"] = df["model_picked_home"] == df["home_won"]
+
+    # Model ATS: did the model's predicted spread (spread_home) pick the right ATS side?
+    # Model says home covers if spread_home + market_spread > 0
+    # (model_spread is positive when home favored, market is negative when home favored)
+    # Actually: model picks the side its win_pct favors. If model says home wins (wp >= 0.5),
+    # we check if home covered. If model says away wins, we check if away covered.
+    df["model_ats_correct"] = np.where(
+        df["ats_push"], np.nan,
+        np.where(df["model_picked_home"], df["home_covered"], ~df["home_covered"])
+    )
+
+    # Filter out pushes for ATS analysis
+    ats_df = df[~df["ats_push"]].copy()
+    n_ats = len(ats_df)
+
+    # ── Overall stats ──
+    overall_ml = float(df["ml_correct"].mean()) if len(df) > 0 else None
+    overall_ats = float(ats_df["model_ats_correct"].mean()) if n_ats > 0 else None
+
+    # ── O/U analysis ──
+    ou_stats = None
+    if cfg["ou_col"] in df.columns:
+        ou_line = pd.to_numeric(df[cfg["ou_col"]], errors="coerce")
+        actual_total = df[cfg["score_h"]] + df[cfg["score_a"]]
+        pred_total = pd.to_numeric(df.get("pred_home_score", 0), errors="coerce").fillna(0) + \
+                     pd.to_numeric(df.get("pred_away_score", 0), errors="coerce").fillna(0)
+        # Alternative: use ou_total if pred scores missing
+        if pred_total.sum() == 0 and "ou_total" in df.columns:
+            pred_total = pd.to_numeric(df["ou_total"], errors="coerce").fillna(0)
+
+        ou_valid = ou_line.notna() & actual_total.notna() & pred_total.notna() & (actual_total != ou_line)
+        if ou_valid.sum() >= 10:
+            model_over = pred_total[ou_valid] > ou_line[ou_valid]
+            actual_over = actual_total[ou_valid] > ou_line[ou_valid]
+            ou_stats = {
+                "n_games": int(ou_valid.sum()),
+                "accuracy": round(float((model_over == actual_over).mean()), 4),
+            }
+
+    # ── Confidence margin ──
+    df["conf_margin"] = (df["win_pct_home"] - 0.5).abs()
+    ats_df["conf_margin"] = (ats_df["win_pct_home"] - 0.5).abs()
+
+    # ── Tier breakdown ──
+    THRESH_HIGH = cfg["HIGH"]
+    THRESH_MED = cfg["MED"]
+    tier_results = {}
+    for tier, lo, hi in [("LOW", 0, THRESH_MED), ("MEDIUM", THRESH_MED, THRESH_HIGH), ("HIGH", THRESH_HIGH, 0.5)]:
+        subset = ats_df[(ats_df["conf_margin"] >= lo) & (ats_df["conf_margin"] < hi)] if tier != "HIGH" else ats_df[ats_df["conf_margin"] >= lo]
+        if len(subset) > 0:
+            ml_sub = df[(df["conf_margin"] >= lo) & (df["conf_margin"] < hi)] if tier != "HIGH" else df[df["conf_margin"] >= lo]
+            tier_results[tier] = {
+                "n_games": len(ml_sub),
+                "ml_accuracy": round(float(ml_sub["ml_correct"].mean()), 4),
+                "ats_n": len(subset),
+                "ats_accuracy": round(float(subset["model_ats_correct"].mean()), 4),
+                "avg_conf_margin": round(float(subset["conf_margin"].mean()), 4),
+                "margin_range": f"{lo:.2f}-{hi:.2f}" if tier != "HIGH" else f">={lo:.2f}",
+            }
+
+    # ── ATS cumulative threshold ──
+    ats_cumulative = []
+    for threshold in cfg["cum_thresholds"]:
+        subset = ats_df[ats_df["conf_margin"] >= threshold]
+        if len(subset) >= 10:
+            ats_cumulative.append({
+                "min_margin": threshold,
+                "n_games": len(subset),
+                "ats_accuracy": round(float(subset["model_ats_correct"].mean()), 4),
+                "ml_accuracy": round(float(df[df["conf_margin"] >= threshold]["ml_correct"].mean()), 4),
+                "pct_of_total": round(len(subset) / max(1, n_ats), 4),
+            })
+
+    # ── By season ──
+    season_results = {}
+    if "season" in ats_df.columns:
+        for season in sorted(ats_df["season"].dropna().unique()):
+            s_df = ats_df[ats_df["season"] == season]
+            ml_s = df[df["season"] == season]
+            if len(s_df) >= 10:
+                season_results[str(int(season))] = {
+                    "n_ats": len(s_df),
+                    "ats_accuracy": round(float(s_df["model_ats_correct"].mean()), 4),
+                    "ml_accuracy": round(float(ml_s["ml_correct"].mean()), 4),
+                }
+
+    return jsonify({
+        "sport": cfg["label"],
+        "source": f"{cfg['table']} (historical, real Vegas lines)",
+        "total_games": len(df),
+        "total_ats_games": n_ats,
+        "pushes": int(df["ats_push"].sum()),
+        "overall_ml_accuracy": round(overall_ml, 4) if overall_ml else None,
+        "overall_ats_accuracy": round(overall_ats, 4) if overall_ats else None,
+        "ats_profitable": overall_ats > 0.524 if overall_ats else None,
+        "breakeven_note": "52.4% ATS = breakeven at -110 juice",
+        "ou_analysis": ou_stats,
+        "by_tier": tier_results,
+        "tier_thresholds": {"LOW": f"<{THRESH_MED}", "MEDIUM": f"{THRESH_MED}-{THRESH_HIGH}", "HIGH": f">={THRESH_HIGH}"},
+        "ats_cumulative_threshold": ats_cumulative,
+        "by_season": season_results,
+    })
+
+
+def historical_ats_ncaa():
+    return _historical_ats_analysis("ncaa")
+
+def historical_ats_nba():
+    return _historical_ats_analysis("nba")
+
+def historical_ats_mlb():
+    return _historical_ats_analysis("mlb")
+
+def historical_ats_all():
+    return jsonify({
+        sport: _historical_ats_analysis(sport).get_json()
+        for sport in ["ncaa", "nba", "mlb"]
+    })
