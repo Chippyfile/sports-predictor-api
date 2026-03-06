@@ -75,7 +75,8 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 def _ats_ou_stats(subset):
     """Compute ATS and O/U hit rates for a graded DataFrame subset.
     Returns dict with ats_n, ats_accuracy, ou_n, ou_accuracy.
-    Safe if columns are missing or all null."""
+    Safe if columns are missing or all null.
+    Handles ou_correct stored as strings ("OVER"/"UNDER") or booleans (True/False)."""
     stats = {}
     # ATS: rl_correct is bool True/False or null (push / no line)
     if "rl_correct" in subset.columns:
@@ -85,13 +86,19 @@ def _ats_ou_stats(subset):
     else:
         stats["ats_n"] = 0
         stats["ats_accuracy"] = None
-    # O/U: "OVER"/"UNDER" = model correct, null = wrong OR no line, "PUSH" = excluded
+    # O/U: "OVER"/"UNDER" = model correct, True = correct, False/null = wrong, "PUSH" = excluded
+    # Supabase may return booleans or strings depending on sport/sync code
     if "ou_correct" in subset.columns:
         has_line = subset["market_ou_total"].notna() if "market_ou_total" in subset.columns else pd.Series(False, index=subset.index)
-        ou_sub = subset[has_line & (subset["ou_correct"] != "PUSH")]
+        not_push = subset["ou_correct"].astype(str) != "PUSH"
+        has_ou_data = subset["ou_correct"].notna()
+        ou_sub = subset[has_line & not_push & has_ou_data]
         if len(ou_sub) > 0:
+            # Correct if: "OVER", "UNDER", or boolean True
+            ou_vals = ou_sub["ou_correct"]
+            is_correct = ou_vals.apply(lambda v: v in ("OVER", "UNDER") or v is True or v == True)
             stats["ou_n"] = len(ou_sub)
-            stats["ou_accuracy"] = round(float(ou_sub["ou_correct"].isin(["OVER", "UNDER"]).mean()), 4)
+            stats["ou_accuracy"] = round(float(is_correct.mean()), 4)
         else:
             stats["ou_n"] = 0
             stats["ou_accuracy"] = None
@@ -2874,7 +2881,7 @@ def nba_confidence_calibration():
                 ou_cumulative.append({
                     "min_margin": threshold,
                     "n_games": len(ou_sub),
-                    "ou_accuracy": round(float(ou_sub["ou_correct"].isin(["OVER", "UNDER"]).mean()), 4),
+                    "ou_accuracy": round(float(ou_sub["ou_correct"].apply(lambda v: v in ("OVER", "UNDER") or v is True or v == True).mean()), 4),
                     "pct_of_total": round(len(ou_sub) / max(1, (df["market_ou_total"].notna() & (df["ou_correct"] != "PUSH")).sum()), 4),
                 })
 
@@ -5663,7 +5670,8 @@ def ncaa_walk_forward():
 def ncaa_confidence_calibration():
     rows = sb_get("ncaa_predictions",
                   "result_entered=eq.true&actual_home_score=not.is.null&ml_correct=not.is.null"
-                  "&select=*&order=game_date.asc")
+                  "&select=ml_correct,rl_correct,ou_correct,win_pct_home,confidence,market_ou_total,market_spread_home"
+                  "&order=game_date.asc&limit=5000")
     if len(rows) < 100:
         return jsonify({"error": "Need 100+ graded games", "n": len(rows)})
 
@@ -5753,7 +5761,7 @@ def ncaa_confidence_calibration():
                 ou_cumulative.append({
                     "min_margin": threshold,
                     "n_games": len(ou_sub),
-                    "ou_accuracy": round(float(ou_sub["ou_correct"].isin(["OVER", "UNDER"]).mean()), 4),
+                    "ou_accuracy": round(float(ou_sub["ou_correct"].apply(lambda v: v in ("OVER", "UNDER") or v is True or v == True).mean()), 4),
                     "pct_of_total": round(len(ou_sub) / max(1, (df["market_ou_total"].notna() & (df["ou_correct"] != "PUSH")).sum()), 4),
                 })
 
