@@ -392,7 +392,8 @@ def route_train_all_logged():
 from backtests import (
     route_backtest_mlb, route_backtest_nba, route_backtest_ncaa,
     route_model_info as _backtest_model_info,
-    nba_confidence_calibration, route_backtest_current_model,
+    nba_confidence_calibration, ncaa_confidence_calibration, mlb_confidence_calibration,
+    route_backtest_current_model,
 )
 
 # Only register if they exist (graceful degradation)
@@ -402,6 +403,8 @@ _backtest_routes = {
     "/backtest/nba": (["GET", "POST"], "route_backtest_nba", route_backtest_nba),
     "/backtest/ncaa": (["POST"], "route_backtest_ncaa", route_backtest_ncaa),
     "/backtest/nba-confidence": (["GET"], "nba_confidence", nba_confidence_calibration),
+    "/backtest/ncaa-confidence": (["GET"], "ncaa_confidence", ncaa_confidence_calibration),
+    "/backtest/mlb-confidence": (["GET"], "mlb_confidence", mlb_confidence_calibration),
     "/backtest/mlb/current-model": (["POST"], "backtest_mlb_current", route_backtest_current_model),
 }
 for path, (methods, name, fn) in _backtest_routes.items():
