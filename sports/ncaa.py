@@ -64,6 +64,7 @@ def ncaa_build_features(df):
 
     # ── Raw team stats (with defaults for missing data) ──
     raw_cols = {
+        # v1 CORE
         "home_ppg": 75.0, "away_ppg": 75.0,
         "home_opp_ppg": 72.0, "away_opp_ppg": 72.0,
         "home_fgpct": 0.455, "away_fgpct": 0.455,
@@ -93,6 +94,88 @@ def ncaa_build_features(df):
         "is_conference_tournament": 0, "is_ncaa_tournament": 0,
         "is_bubble_game": 0, "is_early_season": 0,
         "importance_multiplier": 1.0,
+        # ── v3 ADVANCED SHOOTING ──
+        "home_twopt_pct": 0.48, "away_twopt_pct": 0.48,
+        "home_efg_pct": 0.50, "away_efg_pct": 0.50,
+        "home_ts_pct": 0.53, "away_ts_pct": 0.53,
+        "home_three_rate": 0.35, "away_three_rate": 0.35,
+        "home_assist_rate": 0.55, "away_assist_rate": 0.55,
+        "home_drb_pct": 0.70, "away_drb_pct": 0.70,
+        "home_ppp": 1.0, "away_ppp": 1.0,
+        # ── v3 OPPONENT FOUR FACTORS ──
+        "home_opp_efg_pct": 0.50, "away_opp_efg_pct": 0.50,
+        "home_opp_to_rate": 0.18, "away_opp_to_rate": 0.18,
+        "home_opp_fta_rate": 0.30, "away_opp_fta_rate": 0.30,
+        "home_opp_orb_pct": 0.28, "away_opp_orb_pct": 0.28,
+        # ── v3 ANALYTICS ──
+        "home_luck": 0.0, "away_luck": 0.0,
+        "home_consistency": 15.0, "away_consistency": 15.0,
+        "home_elo": 1500, "away_elo": 1500,
+        "home_pyth_residual": 0.0, "away_pyth_residual": 0.0,
+        "home_margin_trend": 0.0, "away_margin_trend": 0.0,
+        "home_close_win_rate": 0.5, "away_close_win_rate": 0.5,
+        # ── v3 NOVEL ──
+        "home_eff_vol_ratio": 1.0, "away_eff_vol_ratio": 1.0,
+        "home_ceiling": 15.0, "away_ceiling": 15.0,
+        "home_floor": -10.0, "away_floor": -10.0,
+        "home_recovery_idx": 0.0, "away_recovery_idx": 0.0,
+        "home_is_after_loss": 0, "away_is_after_loss": 0,
+        "home_opp_suppression": 0.0, "away_opp_suppression": 0.0,
+        "home_concentration": 0.0, "away_concentration": 0.0,
+        "home_blowout_asym": 0.0, "away_blowout_asym": 0.0,
+        "home_margin_accel": 0.0, "away_margin_accel": 0.0,
+        "home_wl_momentum": 0.0, "away_wl_momentum": 0.0,
+        "home_clutch_over_exp": 0.0, "away_clutch_over_exp": 0.0,
+        "home_def_stability": 10.0, "away_def_stability": 10.0,
+        "home_fatigue_load": 0.0, "away_fatigue_load": 0.0,
+        "home_info_gain": 0.0, "away_info_gain": 0.0,
+        "home_regression_pressure": 0.0, "away_regression_pressure": 0.0,
+        "home_pace_adj_margin": 0.0, "away_pace_adj_margin": 0.0,
+        "home_ft_pressure": 0.0, "away_ft_pressure": 0.0,
+        "home_transition_dep": 0.0, "away_transition_dep": 0.0,
+        "home_margin_autocorr": 0.0, "away_margin_autocorr": 0.0,
+        "home_opp_adj_form": 0.0, "away_opp_adj_form": 0.0,
+        "home_scoring_entropy": 1.5, "away_scoring_entropy": 1.5,
+        "home_run_vulnerability": 0.0, "away_run_vulnerability": 0.0,
+        "home_anti_fragility": 0.0, "away_anti_fragility": 0.0,
+        "home_sos_trajectory": 0.0, "away_sos_trajectory": 0.0,
+        "home_margin_skew": 0.0, "away_margin_skew": 0.0,
+        "home_bimodal": 0.0, "away_bimodal": 0.0,
+        "home_pit_sos": 1500, "away_pit_sos": 1500,
+        # ── v3 SCHEDULE ──
+        "home_games_last_7": 2, "away_games_last_7": 2,
+        "home_streak": 0, "away_streak": 0,
+        "home_season_pct": 0.5, "away_season_pct": 0.5,
+        # ── v3 ESPN EXTRAS ──
+        "home_pts_off_to": 12.0, "away_pts_off_to": 12.0,
+        "home_fastbreak_pts": 10.0, "away_fastbreak_pts": 10.0,
+        "home_paint_pts": 30.0, "away_paint_pts": 30.0,
+        "home_fouls": 17.0, "away_fouls": 17.0,
+        # ── v3 CENTURY ──
+        "home_scoring_source_entropy": 1.5, "away_scoring_source_entropy": 1.5,
+        "home_ft_dependency": 0.20, "away_ft_dependency": 0.20,
+        "home_three_value": 0.35, "away_three_value": 0.35,
+        "home_steal_foul_ratio": 0.40, "away_steal_foul_ratio": 0.40,
+        "home_block_foul_ratio": 0.20, "away_block_foul_ratio": 0.20,
+        "home_def_versatility": 0.5, "away_def_versatility": 0.5,
+        "home_to_conversion": 1.0, "away_to_conversion": 1.0,
+        "home_fg_divergence": 0.0, "away_fg_divergence": 0.0,
+        "home_three_divergence": 0.0, "away_three_divergence": 0.0,
+        "home_ppp_divergence": 0.0, "away_ppp_divergence": 0.0,
+        "home_def_improvement": 0.0, "away_def_improvement": 0.0,
+        "home_home_margin": 0.0, "home_away_margin": 0.0,
+        "away_home_margin": 0.0, "away_away_margin": 0.0,
+        "home_rhythm_disruption": 0.0, "away_rhythm_disruption": 0.0,
+        "home_overreaction": 0.0, "away_overreaction": 0.0,
+        # ── v3 MATCHUP-LEVEL (pre-computed per-game in backfill) ──
+        "matchup_efg": 0.0, "matchup_to": 0.0, "matchup_orb": 0.0, "matchup_ft": 0.0,
+        "style_familiarity": 0.5, "pace_leverage": 0.0,
+        "common_opp_diff": 0.0, "pace_control_diff": 0.0, "def_rest_advantage": 0.0,
+        "is_revenge_game": 0, "is_sandwich": 0, "is_letdown": 0, "is_midweek": 0,
+        "spread_regime": 1,
+        # ── v3 INTERACTION (pre-computed) ──
+        "fatigue_x_quality": 0.0, "luck_x_spread": 0.0,
+        "rest_x_defense": 0.0, "form_x_familiarity": 0.0, "consistency_x_spread": 0.0,
     }
     for col, default in raw_cols.items():
         if col in df.columns:
@@ -240,31 +323,149 @@ def ncaa_build_features(df):
     df["spread_vs_market"] = (_ncaa_pred_spread + df["market_spread"]) * df["has_market"]
     # tourney_x_em, early_x_form REMOVED (AUDIT P4) — correlated with components
 
+    # ══════════════════════════════════════════════════════════════
+    # v3 FEATURE COMPUTATIONS — new differentials from PIT backfill
+    # ══════════════════════════════════════════════════════════════
+
+    # Elo
+    df["elo_diff"] = df["home_elo"] - df["away_elo"]
+
+    # Advanced shooting differentials
+    df["efg_diff"] = df["home_efg_pct"] - df["away_efg_pct"]
+    df["ts_diff"] = df["home_ts_pct"] - df["away_ts_pct"]
+    df["twopt_diff"] = df["home_twopt_pct"] - df["away_twopt_pct"]
+    df["three_rate_diff"] = df["home_three_rate"] - df["away_three_rate"]
+    df["assist_rate_diff"] = df["home_assist_rate"] - df["away_assist_rate"]
+    df["drb_pct_diff"] = df["home_drb_pct"] - df["away_drb_pct"]
+    df["ppp_diff"] = df["home_ppp"] - df["away_ppp"]
+
+    # Opponent Four Factors differentials
+    df["opp_efg_diff"] = df["home_opp_efg_pct"] - df["away_opp_efg_pct"]
+    df["opp_to_rate_diff"] = df["home_opp_to_rate"] - df["away_opp_to_rate"]
+    df["opp_fta_rate_diff"] = df["home_opp_fta_rate"] - df["away_opp_fta_rate"]
+    df["opp_orb_pct_diff"] = df["home_opp_orb_pct"] - df["away_opp_orb_pct"]
+
+    # KenPom-style analytics
+    df["luck_diff"] = df["home_luck"] - df["away_luck"]
+    df["consistency_diff"] = df["home_consistency"] - df["away_consistency"]
+    df["pyth_residual_diff"] = df["home_pyth_residual"] - df["away_pyth_residual"]
+
+    # Momentum / Form
+    df["margin_trend_diff"] = df["home_margin_trend"] - df["away_margin_trend"]
+    df["margin_accel_diff"] = df["home_margin_accel"] - df["away_margin_accel"]
+    df["opp_adj_form_diff"] = df["home_opp_adj_form"] - df["away_opp_adj_form"]
+    df["wl_momentum_diff"] = df["home_wl_momentum"] - df["away_wl_momentum"]
+    df["recovery_diff"] = df["home_recovery_idx"] - df["away_recovery_idx"]
+    df["after_loss_either"] = ((df["home_is_after_loss"] == 1) | (df["away_is_after_loss"] == 1)).astype(int)
+
+    # Volatility / Distribution
+    df["eff_vol_diff"] = df["home_eff_vol_ratio"] - df["away_eff_vol_ratio"]
+    df["ceiling_diff"] = df["home_ceiling"] - df["away_ceiling"]
+    df["floor_diff"] = df["home_floor"] - df["away_floor"]
+    df["margin_skew_diff"] = df["home_margin_skew"] - df["away_margin_skew"]
+    df["scoring_entropy_diff"] = df["home_scoring_entropy"] - df["away_scoring_entropy"]
+    df["bimodal_diff"] = df["home_bimodal"] - df["away_bimodal"]
+
+    # Defensive profile
+    df["def_stability_diff"] = df["home_def_stability"] - df["away_def_stability"]
+    df["opp_suppression_diff"] = df["home_opp_suppression"] - df["away_opp_suppression"]
+    df["def_versatility_diff"] = df["home_def_versatility"] - df["away_def_versatility"]
+    df["steal_foul_diff"] = df["home_steal_foul_ratio"] - df["away_steal_foul_ratio"]
+    df["block_foul_diff"] = df["home_block_foul_ratio"] - df["away_block_foul_ratio"]
+
+    # Transition / Paint
+    df["transition_dep_diff"] = df["home_transition_dep"] - df["away_transition_dep"]
+    df["paint_pts_diff"] = df["home_paint_pts"] - df["away_paint_pts"]
+    df["pts_off_to_diff"] = df["home_pts_off_to"] - df["away_pts_off_to"]
+    df["fastbreak_diff"] = df["home_fastbreak_pts"] - df["away_fastbreak_pts"]
+
+    # Schedule / Fatigue
+    df["fatigue_diff"] = df["home_fatigue_load"] - df["away_fatigue_load"]
+    df["games7_diff"] = df["home_games_last_7"] - df["away_games_last_7"]
+    df["streak_diff"] = df["home_streak"] - df["away_streak"]
+    df["season_pct_avg"] = (df["home_season_pct"] + df["away_season_pct"]) / 2
+
+    # Regression / Information
+    df["regression_diff"] = df["home_regression_pressure"] - df["away_regression_pressure"]
+    df["info_gain_diff"] = df["home_info_gain"] - df["away_info_gain"]
+    df["overreaction_diff"] = df["home_overreaction"] - df["away_overreaction"]
+
+    # Scoring source
+    df["scoring_source_entropy_diff"] = df["home_scoring_source_entropy"] - df["away_scoring_source_entropy"]
+    df["ft_dependency_diff"] = df["home_ft_dependency"] - df["away_ft_dependency"]
+    df["three_value_diff"] = df["home_three_value"] - df["away_three_value"]
+    df["concentration_diff"] = df["home_concentration"] - df["away_concentration"]
+    df["to_conversion_diff"] = df["home_to_conversion"] - df["away_to_conversion"]
+
+    # Divergence (hot/cold)
+    df["fg_divergence_diff"] = df["home_fg_divergence"] - df["away_fg_divergence"]
+    df["three_divergence_diff"] = df["home_three_divergence"] - df["away_three_divergence"]
+    df["ppp_divergence_diff"] = df["home_ppp_divergence"] - df["away_ppp_divergence"]
+
+    # Pace-adjusted / ELO SOS / Venue
+    df["pace_adj_margin_diff"] = df["home_pace_adj_margin"] - df["away_pace_adj_margin"]
+    df["pit_sos_diff"] = df["home_pit_sos"] - df["away_pit_sos"]
+    df["venue_advantage"] = df["home_home_margin"] - df["away_away_margin"]
+    df["rhythm_disruption_diff"] = df["home_rhythm_disruption"] - df["away_rhythm_disruption"]
+    df["def_improvement_diff"] = df["home_def_improvement"] - df["away_def_improvement"]
+
     feature_cols = [
-        # R1: Decomposed efficiency + HCA
+        # ── EXISTING 38 (unchanged) ──
         "neutral_em_diff", "hca_pts", "neutral",
-        # AUDIT P4: heur_win_prob_capped REMOVED — redundant with raw stats it derives from
-        # Raw stats — differentials
         "ppg_diff", "opp_ppg_diff", "fgpct_diff", "threepct_diff",
         "orb_pct_diff", "fta_rate_diff", "ato_diff",
         "def_fgpct_diff", "steals_diff", "blocks_diff",
         "sos_diff", "form_diff", "rank_diff", "win_pct_diff",
-        # Turnover quality
         "to_margin_diff", "steals_to_diff",
-        # Context
         "tempo_avg", "is_ranked_game", "is_top_matchup",
-        # R3: Conference + season phase
         "is_conf_game", "season_phase",
-        # R5: Schedule fatigue
         "rest_diff", "either_b2b",
-        # Market line signal
         "market_spread", "market_total", "spread_vs_market", "has_market",
-        # AUDIT P4: ppg_x_sos, em_x_conf, injury_x_em, tourney_x_em, early_x_form REMOVED
-        # P1-INJ: Injury signal (components only, no interaction)
         "injury_diff", "starters_diff", "any_injury_flag",
-        # P1-CTX: Tournament context (components only, no interaction)
         "is_conf_tourney", "is_ncaa_tourney", "is_bubble", "is_early",
         "importance",
+        # ── v3: Elo ──
+        "elo_diff",
+        # ── v3: Advanced shooting ──
+        "efg_diff", "ts_diff", "twopt_diff",
+        "three_rate_diff", "assist_rate_diff", "drb_pct_diff", "ppp_diff",
+        # ── v3: Opponent Four Factors ──
+        "opp_efg_diff", "opp_to_rate_diff", "opp_fta_rate_diff", "opp_orb_pct_diff",
+        # ── v3: KenPom analytics ──
+        "luck_diff", "consistency_diff", "pyth_residual_diff",
+        # ── v3: Momentum / Form ──
+        "margin_trend_diff", "margin_accel_diff",
+        "opp_adj_form_diff", "wl_momentum_diff",
+        "recovery_diff", "after_loss_either",
+        # ── v3: Volatility / Distribution ──
+        "eff_vol_diff", "ceiling_diff", "floor_diff",
+        "margin_skew_diff", "scoring_entropy_diff", "bimodal_diff",
+        # ── v3: Defensive profile ──
+        "def_stability_diff", "opp_suppression_diff", "def_versatility_diff",
+        "steal_foul_diff", "block_foul_diff",
+        # ── v3: Transition / Paint ──
+        "transition_dep_diff", "paint_pts_diff", "pts_off_to_diff", "fastbreak_diff",
+        # ── v3: Schedule / Fatigue ──
+        "fatigue_diff", "games7_diff", "streak_diff", "season_pct_avg",
+        # ── v3: Regression / Information ──
+        "regression_diff", "info_gain_diff", "overreaction_diff",
+        # ── v3: Scoring source ──
+        "scoring_source_entropy_diff", "ft_dependency_diff",
+        "three_value_diff", "concentration_diff", "to_conversion_diff",
+        # ── v3: Hot/cold divergence ──
+        "fg_divergence_diff", "three_divergence_diff", "ppp_divergence_diff",
+        # ── v3: Pace-adjusted / SOS / Venue ──
+        "pace_adj_margin_diff", "pit_sos_diff", "venue_advantage",
+        "rhythm_disruption_diff", "def_improvement_diff",
+        # ── v3: Matchup-level (pre-computed in backfill) ──
+        "matchup_efg", "matchup_to", "matchup_orb", "matchup_ft",
+        "style_familiarity", "pace_leverage",
+        "common_opp_diff", "pace_control_diff", "def_rest_advantage",
+        # ── v3: Situational ──
+        "is_revenge_game", "is_sandwich", "is_letdown", "is_midweek", "spread_regime",
+        # ── v3: Interaction features ──
+        "fatigue_x_quality", "luck_x_spread",
+        "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
     ]
     return df[feature_cols].fillna(0)
 
@@ -964,6 +1165,84 @@ def predict_ncaa(game: dict):
         "is_bubble_game": game.get("is_bubble_game", False),
         "is_early_season": game.get("is_early_season", False),
         "importance_multiplier": game.get("importance_multiplier", 1.0),
+        # ── v3 fields ──
+        "home_twopt_pct": game.get("home_twopt_pct", 0.48), "away_twopt_pct": game.get("away_twopt_pct", 0.48),
+        "home_efg_pct": game.get("home_efg_pct", 0.50), "away_efg_pct": game.get("away_efg_pct", 0.50),
+        "home_ts_pct": game.get("home_ts_pct", 0.53), "away_ts_pct": game.get("away_ts_pct", 0.53),
+        "home_three_rate": game.get("home_three_rate", 0.35), "away_three_rate": game.get("away_three_rate", 0.35),
+        "home_assist_rate": game.get("home_assist_rate", 0.55), "away_assist_rate": game.get("away_assist_rate", 0.55),
+        "home_drb_pct": game.get("home_drb_pct", 0.70), "away_drb_pct": game.get("away_drb_pct", 0.70),
+        "home_ppp": game.get("home_ppp", 1.0), "away_ppp": game.get("away_ppp", 1.0),
+        "home_opp_efg_pct": game.get("home_opp_efg_pct", 0.50), "away_opp_efg_pct": game.get("away_opp_efg_pct", 0.50),
+        "home_opp_to_rate": game.get("home_opp_to_rate", 0.18), "away_opp_to_rate": game.get("away_opp_to_rate", 0.18),
+        "home_opp_fta_rate": game.get("home_opp_fta_rate", 0.30), "away_opp_fta_rate": game.get("away_opp_fta_rate", 0.30),
+        "home_opp_orb_pct": game.get("home_opp_orb_pct", 0.28), "away_opp_orb_pct": game.get("away_opp_orb_pct", 0.28),
+        "home_luck": game.get("home_luck", 0.0), "away_luck": game.get("away_luck", 0.0),
+        "home_consistency": game.get("home_consistency", 15.0), "away_consistency": game.get("away_consistency", 15.0),
+        "home_elo": game.get("home_elo", 1500), "away_elo": game.get("away_elo", 1500),
+        "home_pyth_residual": game.get("home_pyth_residual", 0.0), "away_pyth_residual": game.get("away_pyth_residual", 0.0),
+        "home_margin_trend": game.get("home_margin_trend", 0.0), "away_margin_trend": game.get("away_margin_trend", 0.0),
+        "home_close_win_rate": game.get("home_close_win_rate", 0.5), "away_close_win_rate": game.get("away_close_win_rate", 0.5),
+        "home_eff_vol_ratio": game.get("home_eff_vol_ratio", 1.0), "away_eff_vol_ratio": game.get("away_eff_vol_ratio", 1.0),
+        "home_ceiling": game.get("home_ceiling", 15.0), "away_ceiling": game.get("away_ceiling", 15.0),
+        "home_floor": game.get("home_floor", -10.0), "away_floor": game.get("away_floor", -10.0),
+        "home_recovery_idx": game.get("home_recovery_idx", 0.0), "away_recovery_idx": game.get("away_recovery_idx", 0.0),
+        "home_is_after_loss": game.get("home_is_after_loss", 0), "away_is_after_loss": game.get("away_is_after_loss", 0),
+        "home_opp_suppression": game.get("home_opp_suppression", 0.0), "away_opp_suppression": game.get("away_opp_suppression", 0.0),
+        "home_concentration": game.get("home_concentration", 0.0), "away_concentration": game.get("away_concentration", 0.0),
+        "home_blowout_asym": game.get("home_blowout_asym", 0.0), "away_blowout_asym": game.get("away_blowout_asym", 0.0),
+        "home_margin_accel": game.get("home_margin_accel", 0.0), "away_margin_accel": game.get("away_margin_accel", 0.0),
+        "home_wl_momentum": game.get("home_wl_momentum", 0.0), "away_wl_momentum": game.get("away_wl_momentum", 0.0),
+        "home_clutch_over_exp": game.get("home_clutch_over_exp", 0.0), "away_clutch_over_exp": game.get("away_clutch_over_exp", 0.0),
+        "home_def_stability": game.get("home_def_stability", 10.0), "away_def_stability": game.get("away_def_stability", 10.0),
+        "home_fatigue_load": game.get("home_fatigue_load", 0.0), "away_fatigue_load": game.get("away_fatigue_load", 0.0),
+        "home_info_gain": game.get("home_info_gain", 0.0), "away_info_gain": game.get("away_info_gain", 0.0),
+        "home_regression_pressure": game.get("home_regression_pressure", 0.0), "away_regression_pressure": game.get("away_regression_pressure", 0.0),
+        "home_pace_adj_margin": game.get("home_pace_adj_margin", 0.0), "away_pace_adj_margin": game.get("away_pace_adj_margin", 0.0),
+        "home_ft_pressure": game.get("home_ft_pressure", 0.0), "away_ft_pressure": game.get("away_ft_pressure", 0.0),
+        "home_transition_dep": game.get("home_transition_dep", 0.0), "away_transition_dep": game.get("away_transition_dep", 0.0),
+        "home_margin_autocorr": game.get("home_margin_autocorr", 0.0), "away_margin_autocorr": game.get("away_margin_autocorr", 0.0),
+        "home_opp_adj_form": game.get("home_opp_adj_form", 0.0), "away_opp_adj_form": game.get("away_opp_adj_form", 0.0),
+        "home_scoring_entropy": game.get("home_scoring_entropy", 1.5), "away_scoring_entropy": game.get("away_scoring_entropy", 1.5),
+        "home_run_vulnerability": game.get("home_run_vulnerability", 0.0), "away_run_vulnerability": game.get("away_run_vulnerability", 0.0),
+        "home_anti_fragility": game.get("home_anti_fragility", 0.0), "away_anti_fragility": game.get("away_anti_fragility", 0.0),
+        "home_sos_trajectory": game.get("home_sos_trajectory", 0.0), "away_sos_trajectory": game.get("away_sos_trajectory", 0.0),
+        "home_margin_skew": game.get("home_margin_skew", 0.0), "away_margin_skew": game.get("away_margin_skew", 0.0),
+        "home_bimodal": game.get("home_bimodal", 0.0), "away_bimodal": game.get("away_bimodal", 0.0),
+        "home_pit_sos": game.get("home_pit_sos", 1500), "away_pit_sos": game.get("away_pit_sos", 1500),
+        "home_games_last_7": game.get("home_games_last_7", 2), "away_games_last_7": game.get("away_games_last_7", 2),
+        "home_streak": game.get("home_streak", 0), "away_streak": game.get("away_streak", 0),
+        "home_season_pct": game.get("home_season_pct", 0.5), "away_season_pct": game.get("away_season_pct", 0.5),
+        "home_pts_off_to": game.get("home_pts_off_to", 12.0), "away_pts_off_to": game.get("away_pts_off_to", 12.0),
+        "home_fastbreak_pts": game.get("home_fastbreak_pts", 10.0), "away_fastbreak_pts": game.get("away_fastbreak_pts", 10.0),
+        "home_paint_pts": game.get("home_paint_pts", 30.0), "away_paint_pts": game.get("away_paint_pts", 30.0),
+        "home_fouls": game.get("home_fouls", 17.0), "away_fouls": game.get("away_fouls", 17.0),
+        "home_scoring_source_entropy": game.get("home_scoring_source_entropy", 1.5), "away_scoring_source_entropy": game.get("away_scoring_source_entropy", 1.5),
+        "home_ft_dependency": game.get("home_ft_dependency", 0.20), "away_ft_dependency": game.get("away_ft_dependency", 0.20),
+        "home_three_value": game.get("home_three_value", 0.35), "away_three_value": game.get("away_three_value", 0.35),
+        "home_steal_foul_ratio": game.get("home_steal_foul_ratio", 0.40), "away_steal_foul_ratio": game.get("away_steal_foul_ratio", 0.40),
+        "home_block_foul_ratio": game.get("home_block_foul_ratio", 0.20), "away_block_foul_ratio": game.get("away_block_foul_ratio", 0.20),
+        "home_def_versatility": game.get("home_def_versatility", 0.5), "away_def_versatility": game.get("away_def_versatility", 0.5),
+        "home_to_conversion": game.get("home_to_conversion", 1.0), "away_to_conversion": game.get("away_to_conversion", 1.0),
+        "home_fg_divergence": game.get("home_fg_divergence", 0.0), "away_fg_divergence": game.get("away_fg_divergence", 0.0),
+        "home_three_divergence": game.get("home_three_divergence", 0.0), "away_three_divergence": game.get("away_three_divergence", 0.0),
+        "home_ppp_divergence": game.get("home_ppp_divergence", 0.0), "away_ppp_divergence": game.get("away_ppp_divergence", 0.0),
+        "home_def_improvement": game.get("home_def_improvement", 0.0), "away_def_improvement": game.get("away_def_improvement", 0.0),
+        "home_home_margin": game.get("home_home_margin", 0.0), "home_away_margin": game.get("home_away_margin", 0.0),
+        "away_home_margin": game.get("away_home_margin", 0.0), "away_away_margin": game.get("away_away_margin", 0.0),
+        "home_rhythm_disruption": game.get("home_rhythm_disruption", 0.0), "away_rhythm_disruption": game.get("away_rhythm_disruption", 0.0),
+        "home_overreaction": game.get("home_overreaction", 0.0), "away_overreaction": game.get("away_overreaction", 0.0),
+        "matchup_efg": game.get("matchup_efg", 0.0), "matchup_to": game.get("matchup_to", 0.0),
+        "matchup_orb": game.get("matchup_orb", 0.0), "matchup_ft": game.get("matchup_ft", 0.0),
+        "style_familiarity": game.get("style_familiarity", 0.5), "pace_leverage": game.get("pace_leverage", 0.0),
+        "common_opp_diff": game.get("common_opp_diff", 0.0), "pace_control_diff": game.get("pace_control_diff", 0.0),
+        "def_rest_advantage": game.get("def_rest_advantage", 0.0),
+        "is_revenge_game": game.get("is_revenge_game", 0), "is_sandwich": game.get("is_sandwich", 0),
+        "is_letdown": game.get("is_letdown", 0), "is_midweek": game.get("is_midweek", 0),
+        "spread_regime": game.get("spread_regime", 1),
+        "fatigue_x_quality": game.get("fatigue_x_quality", 0.0), "luck_x_spread": game.get("luck_x_spread", 0.0),
+        "rest_x_defense": game.get("rest_x_defense", 0.0), "form_x_familiarity": game.get("form_x_familiarity", 0.0),
+        "consistency_x_spread": game.get("consistency_x_spread", 0.0),
     }
     row = pd.DataFrame([row_data])
     X_built = ncaa_build_features(row)
