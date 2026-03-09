@@ -338,20 +338,32 @@ def ncaa_build_features(df):
     df["is_early"] = df["is_early_season"]
     df["importance"] = pd.to_numeric(df["importance_multiplier"], errors="coerce").fillna(1.0)
 
-    # ── Market line features ──
-    df["market_spread"] = pd.to_numeric(df["market_spread_home"] if "market_spread_home" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
-    df["market_total"] = pd.to_numeric(
-        df["market_ou_total"] if "market_ou_total" in df.columns else (df["ou_total"] if "ou_total" in df.columns else pd.Series(0, index=df.index)), errors="coerce"
-    ).fillna(0)
-    df["has_market"] = ((df["market_spread"] != 0) | (df["market_total"] != 0)).astype(int)
+    # ── Unified Market Features ──────────────────────────────────
+    # ESPN odds (DraftKings via ESPN, ~77% historical coverage) is preferred.
+    # Odds API (market_spread_home, ~4% historical coverage) is the fallback.
+    # These are the SAME signal — real Vegas lines — just different data sources.
+    _espn_sp = pd.to_numeric(df["espn_spread"] if "espn_spread" in df.columns else pd.Series(dtype=float), errors="coerce")
+    _odds_sp = pd.to_numeric(df["market_spread_home"] if "market_spread_home" in df.columns else pd.Series(dtype=float), errors="coerce")
+    _espn_ou = pd.to_numeric(df["espn_over_under"] if "espn_over_under" in df.columns else pd.Series(dtype=float), errors="coerce")
+    _odds_ou = pd.to_numeric(
+        df["market_ou_total"] if "market_ou_total" in df.columns else (df["ou_total"] if "ou_total" in df.columns else pd.Series(dtype=float)), errors="coerce"
+    )
+    _has_espn = _espn_sp.notna() & (_espn_sp != 0)
+    _has_odds = _odds_sp.notna() & (_odds_sp != 0)
+
+    # Prefer ESPN, fall back to Odds API, else 0
+    df["mkt_spread"] = np.where(_has_espn, _espn_sp,
+                       np.where(_has_odds, _odds_sp, 0)).astype(float)
+    df["mkt_total"]  = np.where(_espn_ou.notna() & (_espn_ou != 0), _espn_ou,
+                       np.where(_odds_ou.notna() & (_odds_ou != 0), _odds_ou, 0)).astype(float)
+    df["has_mkt"]    = (_has_espn | _has_odds).astype(int)
+
     _ncaa_pred_spread = pd.to_numeric(df["spread_home"] if "spread_home" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
     # BUGFIX 1: Sign alignment — model spread is +positive when home wins (e.g. +7.8),
     # but market_spread_home is -negative when home is favored (e.g. -7.5, Vegas convention).
-    # Negate market so both point the same direction before subtracting.
-    # Wrong: spread_vs_market = 7.8 - (-7.5) = +15.3 → massively inflates home win prob
     # Fixed: spread_vs_market = 7.8 - (+7.5) = +0.3 → correct small model disagreement
-    # BUGFIX 2: Zero out when no market line (has_market=0) to prevent pred_spread leaking in.
-    df["spread_vs_market"] = (_ncaa_pred_spread + df["market_spread"]) * df["has_market"]
+    # BUGFIX 2: Zero out when no market line (has_mkt=0) to prevent pred_spread leaking in.
+    df["mkt_spread_vs_model"] = (_ncaa_pred_spread + df["mkt_spread"]) * df["has_mkt"]
     # tourney_x_em, early_x_form REMOVED (AUDIT P4) — correlated with components
 
     # ══════════════════════════════════════════════════════════════
@@ -444,16 +456,12 @@ def ncaa_build_features(df):
     # v19: ESPN COMPREHENSIVE EXTRACTION FEATURES
     # ═══════════════════════════════════════════════════════════════
 
-    # ── ESPN Odds Signal ──
-    _espn_spread = df["espn_spread"]
-    _espn_ou = df["espn_over_under"]
+    # ── ESPN Odds — UNIFIED into mkt_spread/mkt_total above ──
+    # ESPN win probability edge is still a unique signal (not just spread)
     _espn_wp = df["espn_home_win_pct"]
     _espn_pred = df["espn_predictor_home_pct"]
-    df["has_espn_odds"] = ((_espn_spread != 0) | (_espn_ou != 0)).astype(int)
-    df["espn_spread_vs_model"] = (_ncaa_pred_spread - _espn_spread) * df["has_espn_odds"]
-    df["espn_spread_vs_market"] = (_espn_spread - df["market_spread"]) * df["has_market"] * df["has_espn_odds"]
-    df["espn_wp_edge"] = (_espn_wp - 0.5) * df["has_espn_odds"]
-    df["espn_predictor_edge"] = (_espn_pred - 0.5) * df["has_espn_odds"]
+    df["espn_wp_edge"] = (_espn_wp - 0.5) * df["has_mkt"]
+    df["espn_predictor_edge"] = (_espn_pred - 0.5) * df["has_mkt"]
 
     # ── PBP Half Split Features ──
     df["half_margin_swing"] = df["home_2h_margin"] - df["home_1h_margin"]
@@ -490,7 +498,8 @@ def ncaa_build_features(df):
         "tempo_avg", "is_ranked_game", "is_top_matchup",
         "is_conf_game", "season_phase",
         "rest_diff", "either_b2b",
-        "market_spread", "market_total", "spread_vs_market", "has_market",
+        # Unified market signal (ESPN preferred → Odds API fallback)
+        "mkt_spread", "mkt_total", "mkt_spread_vs_model", "has_mkt",
         "injury_diff", "starters_diff", "any_injury_flag",
         "is_conf_tourney", "is_ncaa_tourney", "is_bubble", "is_early",
         "importance",
@@ -536,10 +545,7 @@ def ncaa_build_features(df):
         # ── v3: Interaction features ──
         "fatigue_x_quality", "luck_x_spread",
         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
-        # ═══ v19: ESPN PRE-GAME ODDS FEATURES (no in-game data) ═══
-        # ESPN Odds (independent from The Odds API market lines)
-        "espn_spread", "espn_over_under", "has_espn_odds",
-        "espn_spread_vs_model", "espn_spread_vs_market",
+        # ═══ v19→v20: ESPN Win Prob edges (unique signal beyond spread) ═══
         "espn_wp_edge", "espn_predictor_edge",
         # NOTE: PBP, clutch, player, and win probability features REMOVED —
         # they are in-game outcomes (data leakage). The columns remain in
