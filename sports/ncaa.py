@@ -176,6 +176,37 @@ def ncaa_build_features(df):
         # ── v3 INTERACTION (pre-computed) ──
         "fatigue_x_quality": 0.0, "luck_x_spread": 0.0,
         "rest_x_defense": 0.0, "form_x_familiarity": 0.0, "consistency_x_spread": 0.0,
+        # ═══ v19: ESPN COMPREHENSIVE EXTRACTION COLUMNS ═══
+        # ESPN Odds (from ncaa_espn_extract_all.py — 64% coverage)
+        "espn_spread": 0.0, "espn_over_under": 0.0,
+        "espn_home_win_pct": 0.5, "espn_predictor_home_pct": 0.5,
+        # PBP Half Scores
+        "home_1h_score": 0.0, "away_1h_score": 0.0,
+        "home_2h_score": 0.0, "away_2h_score": 0.0,
+        "home_1h_margin": 0.0, "home_2h_margin": 0.0,
+        # PBP Momentum
+        "home_largest_run": 0.0, "away_largest_run": 0.0,
+        "home_runs_8plus": 0, "away_runs_8plus": 0,
+        "home_drought_count": 0, "away_drought_count": 0,
+        "home_longest_drought_sec": 0.0, "away_longest_drought_sec": 0.0,
+        # PBP Game Flow
+        "lead_changes": 0, "ties": 0,
+        "home_time_with_lead_pct": 0.5,
+        "largest_lead_home": 0.0, "largest_lead_away": 0.0,
+        # PBP Clutch
+        "home_clutch_ftm": 0, "home_clutch_fta": 0,
+        "away_clutch_ftm": 0, "away_clutch_fta": 0,
+        "garbage_time_seconds": 0, "is_garbage_time_game": 0,
+        # Player Features
+        "home_star1_pts_share": 0.25, "away_star1_pts_share": 0.25,
+        "home_top3_pts_share": 0.55, "away_top3_pts_share": 0.55,
+        "home_minutes_hhi": 0.2, "away_minutes_hhi": 0.2,
+        "home_bench_pts": 15.0, "away_bench_pts": 15.0,
+        "home_bench_pts_share": 0.2, "away_bench_pts_share": 0.2,
+        "home_players_used": 8, "away_players_used": 8,
+        "home_starter_mins": 150.0, "away_starter_mins": 150.0,
+        # Win Probability
+        "halftime_home_win_prob": 0.5, "wp_volatility": 0.15, "wp_max_swing": 0.1,
     }
     for col, default in raw_cols.items():
         if col in df.columns:
@@ -409,6 +440,45 @@ def ncaa_build_features(df):
     df["rhythm_disruption_diff"] = df["home_rhythm_disruption"] - df["away_rhythm_disruption"]
     df["def_improvement_diff"] = df["home_def_improvement"] - df["away_def_improvement"]
 
+    # ═══════════════════════════════════════════════════════════════
+    # v19: ESPN COMPREHENSIVE EXTRACTION FEATURES
+    # ═══════════════════════════════════════════════════════════════
+
+    # ── ESPN Odds Signal ──
+    _espn_spread = df["espn_spread"]
+    _espn_ou = df["espn_over_under"]
+    _espn_wp = df["espn_home_win_pct"]
+    _espn_pred = df["espn_predictor_home_pct"]
+    df["has_espn_odds"] = ((_espn_spread != 0) | (_espn_ou != 0)).astype(int)
+    df["espn_spread_vs_model"] = (_ncaa_pred_spread - _espn_spread) * df["has_espn_odds"]
+    df["espn_spread_vs_market"] = (_espn_spread - df["market_spread"]) * df["has_market"] * df["has_espn_odds"]
+    df["espn_wp_edge"] = (_espn_wp - 0.5) * df["has_espn_odds"]
+    df["espn_predictor_edge"] = (_espn_pred - 0.5) * df["has_espn_odds"]
+
+    # ── PBP Half Split Features ──
+    df["half_margin_swing"] = df["home_2h_margin"] - df["home_1h_margin"]
+    df["largest_lead_diff"] = df["largest_lead_home"] - df["largest_lead_away"]
+
+    # ── PBP Momentum Features ──
+    df["run_diff"] = df["home_largest_run"] - df["away_largest_run"]
+    df["drought_diff"] = df["home_drought_count"] - df["away_drought_count"]
+
+    # ── PBP Clutch Features ──
+    df["home_clutch_ft_pct"] = (df["home_clutch_ftm"] / df["home_clutch_fta"].clip(1)).fillna(0.7)
+    df["away_clutch_ft_pct"] = (df["away_clutch_ftm"] / df["away_clutch_fta"].clip(1)).fillna(0.7)
+    df["clutch_ft_diff"] = df["home_clutch_ft_pct"] - df["away_clutch_ft_pct"]
+
+    # ── Player Dependency Features ──
+    df["star1_share_diff"] = df["home_star1_pts_share"] - df["away_star1_pts_share"]
+    df["top3_share_diff"] = df["home_top3_pts_share"] - df["away_top3_pts_share"]
+    df["minutes_hhi_diff"] = df["home_minutes_hhi"] - df["away_minutes_hhi"]
+    df["bench_pts_share_diff"] = df["home_bench_pts_share"] - df["away_bench_pts_share"]
+    df["players_used_diff"] = df["home_players_used"] - df["away_players_used"]
+    df["starter_mins_diff"] = df["home_starter_mins"] - df["away_starter_mins"]
+
+    # ── Win Probability Features ──
+    df["halftime_wp_edge"] = df["halftime_home_win_prob"] - 0.5
+
     feature_cols = [
         # ── EXISTING 38 (unchanged) ──
         "neutral_em_diff", "hca_pts", "neutral",
@@ -466,6 +536,25 @@ def ncaa_build_features(df):
         # ── v3: Interaction features ──
         "fatigue_x_quality", "luck_x_spread",
         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
+        # ═══ v19: ESPN COMPREHENSIVE EXTRACTION FEATURES ═══
+        # ESPN Odds (independent from The Odds API market lines)
+        "espn_spread", "espn_over_under", "has_espn_odds",
+        "espn_spread_vs_model", "espn_spread_vs_market",
+        "espn_wp_edge", "espn_predictor_edge",
+        # PBP Game Flow
+        "home_1h_margin", "home_2h_margin", "half_margin_swing",
+        "home_time_with_lead_pct", "lead_changes", "largest_lead_diff",
+        # PBP Momentum
+        "run_diff", "drought_diff",
+        # PBP Clutch
+        "clutch_ft_diff", "is_garbage_time_game",
+        # Player Dependency
+        "star1_share_diff", "top3_share_diff", "minutes_hhi_diff",
+        "bench_pts_share_diff", "players_used_diff",
+        "home_star1_pts_share", "away_star1_pts_share",
+        "starter_mins_diff",
+        # Win Probability
+        "halftime_wp_edge", "wp_volatility", "wp_max_swing",
     ]
     return df[feature_cols].fillna(0)
 
@@ -1243,6 +1332,53 @@ def predict_ncaa(game: dict):
         "fatigue_x_quality": game.get("fatigue_x_quality", 0.0), "luck_x_spread": game.get("luck_x_spread", 0.0),
         "rest_x_defense": game.get("rest_x_defense", 0.0), "form_x_familiarity": game.get("form_x_familiarity", 0.0),
         "consistency_x_spread": game.get("consistency_x_spread", 0.0),
+        # ═══ v19: ESPN extraction columns for live predictions ═══
+        "espn_spread": game.get("espn_spread", 0.0),
+        "espn_over_under": game.get("espn_over_under", 0.0),
+        "espn_home_win_pct": game.get("espn_home_win_pct", 0.5),
+        "espn_predictor_home_pct": game.get("espn_predictor_home_pct", 0.5),
+        "home_1h_score": game.get("home_1h_score", 0.0),
+        "away_1h_score": game.get("away_1h_score", 0.0),
+        "home_2h_score": game.get("home_2h_score", 0.0),
+        "away_2h_score": game.get("away_2h_score", 0.0),
+        "home_1h_margin": game.get("home_1h_margin", 0.0),
+        "home_2h_margin": game.get("home_2h_margin", 0.0),
+        "home_largest_run": game.get("home_largest_run", 0.0),
+        "away_largest_run": game.get("away_largest_run", 0.0),
+        "home_runs_8plus": game.get("home_runs_8plus", 0),
+        "away_runs_8plus": game.get("away_runs_8plus", 0),
+        "home_drought_count": game.get("home_drought_count", 0),
+        "away_drought_count": game.get("away_drought_count", 0),
+        "home_longest_drought_sec": game.get("home_longest_drought_sec", 0.0),
+        "away_longest_drought_sec": game.get("away_longest_drought_sec", 0.0),
+        "lead_changes": game.get("lead_changes", 0),
+        "ties": game.get("ties", 0),
+        "home_time_with_lead_pct": game.get("home_time_with_lead_pct", 0.5),
+        "largest_lead_home": game.get("largest_lead_home", 0.0),
+        "largest_lead_away": game.get("largest_lead_away", 0.0),
+        "home_clutch_ftm": game.get("home_clutch_ftm", 0),
+        "home_clutch_fta": game.get("home_clutch_fta", 0),
+        "away_clutch_ftm": game.get("away_clutch_ftm", 0),
+        "away_clutch_fta": game.get("away_clutch_fta", 0),
+        "garbage_time_seconds": game.get("garbage_time_seconds", 0),
+        "is_garbage_time_game": game.get("is_garbage_time_game", 0),
+        "home_star1_pts_share": game.get("home_star1_pts_share", 0.25),
+        "away_star1_pts_share": game.get("away_star1_pts_share", 0.25),
+        "home_top3_pts_share": game.get("home_top3_pts_share", 0.55),
+        "away_top3_pts_share": game.get("away_top3_pts_share", 0.55),
+        "home_minutes_hhi": game.get("home_minutes_hhi", 0.2),
+        "away_minutes_hhi": game.get("away_minutes_hhi", 0.2),
+        "home_bench_pts": game.get("home_bench_pts", 15.0),
+        "away_bench_pts": game.get("away_bench_pts", 15.0),
+        "home_bench_pts_share": game.get("home_bench_pts_share", 0.2),
+        "away_bench_pts_share": game.get("away_bench_pts_share", 0.2),
+        "home_players_used": game.get("home_players_used", 8),
+        "away_players_used": game.get("away_players_used", 8),
+        "home_starter_mins": game.get("home_starter_mins", 150.0),
+        "away_starter_mins": game.get("away_starter_mins", 150.0),
+        "halftime_home_win_prob": game.get("halftime_home_win_prob", 0.5),
+        "wp_volatility": game.get("wp_volatility", 0.15),
+        "wp_max_swing": game.get("wp_max_swing", 0.1),
     }
     row = pd.DataFrame([row_data])
     X_built = ncaa_build_features(row)
