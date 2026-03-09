@@ -536,25 +536,15 @@ def ncaa_build_features(df):
         # ── v3: Interaction features ──
         "fatigue_x_quality", "luck_x_spread",
         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
-        # ═══ v19: ESPN COMPREHENSIVE EXTRACTION FEATURES ═══
+        # ═══ v19: ESPN PRE-GAME ODDS FEATURES (no in-game data) ═══
         # ESPN Odds (independent from The Odds API market lines)
         "espn_spread", "espn_over_under", "has_espn_odds",
         "espn_spread_vs_model", "espn_spread_vs_market",
         "espn_wp_edge", "espn_predictor_edge",
-        # PBP Game Flow
-        "home_1h_margin", "home_2h_margin", "half_margin_swing",
-        "home_time_with_lead_pct", "lead_changes", "largest_lead_diff",
-        # PBP Momentum
-        "run_diff", "drought_diff",
-        # PBP Clutch
-        "clutch_ft_diff", "is_garbage_time_game",
-        # Player Dependency
-        "star1_share_diff", "top3_share_diff", "minutes_hhi_diff",
-        "bench_pts_share_diff", "players_used_diff",
-        "home_star1_pts_share", "away_star1_pts_share",
-        "starter_mins_diff",
-        # Win Probability
-        "halftime_wp_edge", "wp_volatility", "wp_max_swing",
+        # NOTE: PBP, clutch, player, and win probability features REMOVED —
+        # they are in-game outcomes (data leakage). The columns remain in
+        # Supabase for future use (e.g., post-game analysis, team tendency
+        # rolling averages) but must NOT be used as training features.
     ]
     return df[feature_cols].fillna(0)
 
