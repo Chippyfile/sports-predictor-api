@@ -5,3 +5,10 @@ ncaa_raw_summary_cache.json
 ncaa_extract_cache.json
 ncaa_boxscore_cache.json
 *.cache.json
+catboost_info/
+*.DS_Store
+*.pyc
+logs/
+*.bak
+*.jsonl
+ncaa_raw_summary_cache*
