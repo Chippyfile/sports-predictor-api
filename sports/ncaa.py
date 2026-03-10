@@ -207,6 +207,29 @@ def ncaa_build_features(df):
         "home_starter_mins": 150.0, "away_starter_mins": 150.0,
         # Win Probability
         "halftime_home_win_prob": 0.5, "wp_volatility": 0.15, "wp_max_swing": 0.1,
+        # ═══ v21: VENUE FEATURES (pre-game, no leakage) ═══
+        "venue_capacity": 8000, "venue_indoor": 1, "attendance": 0,
+        # ═══ v21: ROLLING TEAM TENDENCY FEATURES (from prior games, no leakage) ═══
+        # These are computed by ncaa_rolling_tendencies.py and stored in Supabase.
+        # PBP tendencies (rolling avg from prior N games)
+        "home_roll_largest_run": 8.0, "away_roll_largest_run": 8.0,
+        "home_roll_drought_rate": 1.5, "away_roll_drought_rate": 1.5,
+        "home_roll_lead_changes": 8.0, "away_roll_lead_changes": 8.0,
+        "home_roll_time_with_lead_pct": 0.5, "away_roll_time_with_lead_pct": 0.5,
+        # Player dependency tendencies (rolling avg)
+        "home_roll_star1_share": 0.25, "away_roll_star1_share": 0.25,
+        "home_roll_top3_share": 0.55, "away_roll_top3_share": 0.55,
+        "home_roll_bench_share": 0.20, "away_roll_bench_share": 0.20,
+        "home_roll_minutes_hhi": 0.20, "away_roll_minutes_hhi": 0.20,
+        "home_roll_players_used": 8.0, "away_roll_players_used": 8.0,
+        # Clutch tendencies (rolling avg)
+        "home_roll_clutch_ft_pct": 0.70, "away_roll_clutch_ft_pct": 0.70,
+        # Garbage time tendency (rolling avg)
+        "home_roll_garbage_pct": 0.15, "away_roll_garbage_pct": 0.15,
+        # ATS tendency (rolling record against the spread)
+        "home_roll_ats_pct": 0.50, "away_roll_ats_pct": 0.50,
+        "home_roll_ats_n": 0, "away_roll_ats_n": 0,
+        "home_roll_ats_margin": 0.0, "away_roll_ats_margin": 0.0,
     }
     for col, default in raw_cols.items():
         if col in df.columns:
@@ -487,6 +510,59 @@ def ncaa_build_features(df):
     # ── Win Probability Features ──
     df["halftime_wp_edge"] = df["halftime_home_win_prob"] - 0.5
 
+    # ═══════════════════════════════════════════════════════════════
+    # v21: VENUE FEATURES (pre-game facts, zero leakage)
+    # ═══════════════════════════════════════════════════════════════
+
+    # Crowd factor: attendance as % of venue capacity (proxy for crowd energy)
+    # High values (>0.90) = packed arena = stronger HCA; low (<0.50) = weak crowd
+    _cap = df["venue_capacity"].clip(lower=1000)  # avoid div-by-zero on bad data
+    _att = df["attendance"]
+    _has_att = (_att > 0).astype(int)
+    df["crowd_pct"] = (_att / _cap).clip(0, 1.2) * _has_att  # allow >1.0 for overflow
+    df["has_crowd_data"] = _has_att
+
+    # Venue capacity tier: small gym (<5K) vs mid (5-10K) vs large (>10K)
+    # Normalized so model can learn venue size effect on HCA
+    df["venue_size_norm"] = (_cap / 15000).clip(0, 2.0)  # 15K = ~NCAA avg large arena
+
+    # ═══════════════════════════════════════════════════════════════
+    # v21: ROLLING TEAM TENDENCY FEATURES (from prior games, no leakage)
+    # ═══════════════════════════════════════════════════════════════
+    # These columns are pre-computed by ncaa_rolling_tendencies.py
+    # and stored in Supabase. They represent each team's behavioral
+    # profile from their PRIOR games — NOT from the current game.
+
+    # PBP tendencies
+    df["roll_run_diff"] = df["home_roll_largest_run"] - df["away_roll_largest_run"]
+    df["roll_drought_diff"] = df["home_roll_drought_rate"] - df["away_roll_drought_rate"]
+    df["roll_lead_change_avg"] = (df["home_roll_lead_changes"] + df["away_roll_lead_changes"]) / 2
+    df["roll_dominance_diff"] = df["home_roll_time_with_lead_pct"] - df["away_roll_time_with_lead_pct"]
+
+    # Player dependency tendencies
+    df["roll_star_dep_diff"] = df["home_roll_star1_share"] - df["away_roll_star1_share"]
+    df["roll_top3_dep_diff"] = df["home_roll_top3_share"] - df["away_roll_top3_share"]
+    df["roll_bench_diff"] = df["home_roll_bench_share"] - df["away_roll_bench_share"]
+    df["roll_rotation_diff"] = df["home_roll_players_used"] - df["away_roll_players_used"]
+    df["roll_minutes_hhi_diff"] = df["home_roll_minutes_hhi"] - df["away_roll_minutes_hhi"]
+
+    # Clutch tendency
+    df["roll_clutch_ft_diff"] = df["home_roll_clutch_ft_pct"] - df["away_roll_clutch_ft_pct"]
+
+    # Garbage time tendency (teams that frequently blow out opponents)
+    df["roll_garbage_diff"] = df["home_roll_garbage_pct"] - df["away_roll_garbage_pct"]
+
+    # ATS tendency (market mispricing signal)
+    # Teams that consistently cover → market undervalues them
+    # Teams that consistently fail to cover → market overvalues them
+    df["roll_ats_diff"] = df["home_roll_ats_pct"] - df["away_roll_ats_pct"]
+    df["roll_ats_margin_diff"] = df["home_roll_ats_margin"] - df["away_roll_ats_margin"]
+    # Flag: both teams have enough ATS data for signal to be meaningful
+    df["has_ats_data"] = ((df["home_roll_ats_n"] >= 3) & (df["away_roll_ats_n"] >= 3)).astype(int)
+    # Gated ATS: zero out when not enough data
+    df["roll_ats_diff_gated"] = df["roll_ats_diff"] * df["has_ats_data"]
+    df["roll_ats_margin_gated"] = df["roll_ats_margin_diff"] * df["has_ats_data"]
+
     feature_cols = [
         # ── EXISTING 38 (unchanged) ──
         "neutral_em_diff", "hca_pts", "neutral",
@@ -547,6 +623,19 @@ def ncaa_build_features(df):
         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
         # ═══ v19→v20: ESPN Win Prob edges (unique signal beyond spread) ═══
         "espn_wp_edge", "espn_predictor_edge",
+        # ═══ v21: Venue features (pre-game, no leakage) ═══
+        "crowd_pct", "has_crowd_data", "venue_size_norm",
+        # ═══ v21: Rolling team tendency features (prior games, no leakage) ═══
+        # PBP tendencies
+        "roll_run_diff", "roll_drought_diff",
+        "roll_lead_change_avg", "roll_dominance_diff",
+        # Player dependency tendencies
+        "roll_star_dep_diff", "roll_top3_dep_diff",
+        "roll_bench_diff", "roll_rotation_diff", "roll_minutes_hhi_diff",
+        # Clutch + blowout tendencies
+        "roll_clutch_ft_diff", "roll_garbage_diff",
+        # ATS tendencies (market mispricing signal)
+        "roll_ats_diff_gated", "roll_ats_margin_gated", "has_ats_data",
         # NOTE: PBP, clutch, player, and win probability features REMOVED —
         # they are in-game outcomes (data leakage). The columns remain in
         # Supabase for future use (e.g., post-game analysis, team tendency
@@ -1375,6 +1464,39 @@ def predict_ncaa(game: dict):
         "halftime_home_win_prob": game.get("halftime_home_win_prob", 0.5),
         "wp_volatility": game.get("wp_volatility", 0.15),
         "wp_max_swing": game.get("wp_max_swing", 0.1),
+        # ═══ v21: Venue features ═══
+        "venue_capacity": game.get("venue_capacity", 8000),
+        "venue_indoor": game.get("venue_indoor", 1),
+        "attendance": game.get("attendance", 0),
+        # ═══ v21: Rolling team tendency features (from prior games) ═══
+        "home_roll_largest_run": game.get("home_roll_largest_run", 8.0),
+        "away_roll_largest_run": game.get("away_roll_largest_run", 8.0),
+        "home_roll_drought_rate": game.get("home_roll_drought_rate", 1.5),
+        "away_roll_drought_rate": game.get("away_roll_drought_rate", 1.5),
+        "home_roll_lead_changes": game.get("home_roll_lead_changes", 8.0),
+        "away_roll_lead_changes": game.get("away_roll_lead_changes", 8.0),
+        "home_roll_time_with_lead_pct": game.get("home_roll_time_with_lead_pct", 0.5),
+        "away_roll_time_with_lead_pct": game.get("away_roll_time_with_lead_pct", 0.5),
+        "home_roll_star1_share": game.get("home_roll_star1_share", 0.25),
+        "away_roll_star1_share": game.get("away_roll_star1_share", 0.25),
+        "home_roll_top3_share": game.get("home_roll_top3_share", 0.55),
+        "away_roll_top3_share": game.get("away_roll_top3_share", 0.55),
+        "home_roll_bench_share": game.get("home_roll_bench_share", 0.20),
+        "away_roll_bench_share": game.get("away_roll_bench_share", 0.20),
+        "home_roll_minutes_hhi": game.get("home_roll_minutes_hhi", 0.20),
+        "away_roll_minutes_hhi": game.get("away_roll_minutes_hhi", 0.20),
+        "home_roll_players_used": game.get("home_roll_players_used", 8.0),
+        "away_roll_players_used": game.get("away_roll_players_used", 8.0),
+        "home_roll_clutch_ft_pct": game.get("home_roll_clutch_ft_pct", 0.70),
+        "away_roll_clutch_ft_pct": game.get("away_roll_clutch_ft_pct", 0.70),
+        "home_roll_garbage_pct": game.get("home_roll_garbage_pct", 0.15),
+        "away_roll_garbage_pct": game.get("away_roll_garbage_pct", 0.15),
+        "home_roll_ats_pct": game.get("home_roll_ats_pct", 0.50),
+        "away_roll_ats_pct": game.get("away_roll_ats_pct", 0.50),
+        "home_roll_ats_n": game.get("home_roll_ats_n", 0),
+        "away_roll_ats_n": game.get("away_roll_ats_n", 0),
+        "home_roll_ats_margin": game.get("home_roll_ats_margin", 0.0),
+        "away_roll_ats_margin": game.get("away_roll_ats_margin", 0.0),
     }
     row = pd.DataFrame([row_data])
     X_built = ncaa_build_features(row)
