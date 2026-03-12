@@ -18,12 +18,6 @@ try:
 except ImportError:
     HAS_CAT = False
 
-try:
-    from lightgbm import LGBMRegressor
-    HAS_LGBM = True
-except ImportError:
-    HAS_LGBM = False
-
 # Conference HCA mapping — used by ncaa_build_features R1 fix and _ncaa_backfill_heuristic
 _NCAA_CONF_HCA = {
     "Big 12": 3.8, "Southeastern Conference": 3.7, "SEC": 3.7,
@@ -1081,27 +1075,6 @@ def _ncaa_merge_historical(current_df):
     print(f"  NCAA training corpus: {n_hist} historical + {n_curr} current "
           f"= {n_hist + n_curr} total")
 
-
-    # ── ESPN/DraftKings odds fallback (sweep-validated: 4% → 59% market coverage) ──
-    if "espn_spread" in combined.columns:
-        espn_s = pd.to_numeric(combined["espn_spread"], errors="coerce")
-        if "market_spread_home" not in combined.columns:
-            combined["market_spread_home"] = np.nan
-        mkt_s = pd.to_numeric(combined["market_spread_home"], errors="coerce")
-        fill_mask = (mkt_s.isna() | (mkt_s == 0)) & espn_s.notna()
-        combined.loc[fill_mask, "market_spread_home"] = espn_s[fill_mask]
-        n_filled = int(fill_mask.sum())
-        if n_filled > 0:
-            print(f"  ESPN odds fallback: {n_filled} spreads filled from DraftKings")
-
-    if "espn_over_under" in combined.columns:
-        espn_ou = pd.to_numeric(combined["espn_over_under"], errors="coerce")
-        if "market_ou_total" not in combined.columns:
-            combined["market_ou_total"] = np.nan
-        mkt_ou = pd.to_numeric(combined["market_ou_total"], errors="coerce")
-        fill_ou = (mkt_ou.isna() | (mkt_ou == 0)) & espn_ou.notna()
-        combined.loc[fill_ou, "market_ou_total"] = espn_ou[fill_ou]
-
     return combined, weights.values, n_hist
 
 
@@ -1150,32 +1123,29 @@ def train_ncaa():
             n = MAX_TRAIN
             print(f"  NCAA: Capped to {n} rows for Railway timeout protection")
 
-        cv_folds = min(60, n)  # 5 for Railway; set 10 for local
+        cv_folds = min(10, n)  # 5 for Railway; set 10 for local
         fit_weights = sample_weights if sample_weights is not None else np.ones(n)
 
         if n >= 200:
-            # ── Stacking ensemble at e=175 d=7 lr=0.1imators (sweep-optimized) ──
-            # SWEEP WINNER: LGBM replaces RF (faster + better MAE)
-            if HAS_LGBM:
-                lgbm_reg = LGBMRegressor(
-                    n_estimators=175, max_depth=7, learning_rate=0.10,
-                    subsample=0.8, colsample_bytree=0.8, min_child_samples=20,
-                    random_state=42, verbosity=-1,
-                )
+            # ── Stacking ensemble at 160 estimators (sweep-optimized) ──
+            rf_reg = RandomForestRegressor(
+                n_estimators=160, max_depth=6,
+                min_samples_leaf=15, max_features=0.7,
+                random_state=42, n_jobs=1,  # Railway: single core; set -1 for local
+            )
             if HAS_XGB:
-                xgb_reg = XGBRegressor(n_estimators=175, max_depth=7, learning_rate=0.10, subsample=0.8, colsample_bytree=0.8, min_child_weight=20, random_state=42, tree_method="hist", verbosity=0)
+                xgb_reg = XGBRegressor(n_estimators=160, max_depth=4, learning_rate=0.06, subsample=0.8, colsample_bytree=0.8, min_child_weight=20, random_state=42, tree_method="hist", verbosity=0)
             if HAS_CAT:
-                cat_reg = CatBoostRegressor(iterations=175, depth=7, learning_rate=0.10, subsample=0.8, min_data_in_leaf=20, random_seed=42, verbose=0)
+                cat_reg = CatBoostRegressor(iterations=160, depth=4, learning_rate=0.06, subsample=0.8, min_data_in_leaf=20, random_seed=42, verbose=0)
 
             ensemble_parts = []
             if HAS_XGB: ensemble_parts.append('XGB')
             if HAS_CAT: ensemble_parts.append('CAT')
-            if HAS_LGBM: ensemble_parts.append('LGBM')
+            ensemble_parts.append('RF')
             ensemble_label = '+'.join(ensemble_parts)
-            print(f"  NCAAB: Training stacking ensemble on {n} rows (ts-cv, {ensemble_label}, e=175 d=7 lr=0.1)...")
+            print(f"  NCAAB: Training stacking ensemble on {n} rows (ts-cv, {ensemble_label}, 160 est)...")
 
-            reg_models = {}
-            if HAS_LGBM: reg_models["lgbm"] = lgbm_reg
+            reg_models = {"rf": rf_reg}
             if HAS_XGB: reg_models["xgb"] = xgb_reg
             if HAS_CAT: reg_models["cat"] = cat_reg
 

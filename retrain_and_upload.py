@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeCV, LogisticRegression
 from sklearn.isotonic import IsotonicRegression
-from sklearn.ensemble import RandomForestRegressor
+# from sklearn.ensemble import RandomForestRegressor  # replaced by LGBM
+from lightgbm import LGBMRegressor
 from sklearn.metrics import mean_absolute_error
 from xgboost import XGBRegressor
 from catboost import CatBoostRegressor
@@ -62,7 +63,37 @@ t0 = time.time()
 rows = sb_get("ncaa_historical", "actual_home_score=not.is.null&select=*&order=season.asc")
 print(f"  Loaded {len(rows)} rows in {time.time()-t0:.0f}s")
 
+# ESPN/DraftKings odds fallback
+import pandas as pd, numpy as np
 df = pd.DataFrame(rows)
+if "espn_spread" in df.columns:
+    espn_s = pd.to_numeric(df["espn_spread"], errors="coerce")
+    mkt_s = pd.to_numeric(df.get("market_spread_home", pd.Series(dtype=float)), errors="coerce")
+    fill = (mkt_s.isna() | (mkt_s == 0)) & espn_s.notna()
+    df.loc[fill, "market_spread_home"] = espn_s[fill]
+    print(f"  ESPN odds fallback: {int(fill.sum())} spreads filled")
+if "espn_over_under" in df.columns:
+    espn_ou = pd.to_numeric(df["espn_over_under"], errors="coerce")
+    mkt_ou = pd.to_numeric(df.get("market_ou_total", pd.Series(dtype=float)), errors="coerce")
+    fill_ou = (mkt_ou.isna() | (mkt_ou == 0)) & espn_ou.notna()
+    df.loc[fill_ou, "market_ou_total"] = espn_ou[fill_ou]
+rows = df.to_dict("records")
+
+df = pd.DataFrame(rows)
+
+# Quality filter: drop rows with <80% real data
+_quality_cols = ["home_adj_em","away_adj_em","home_ppg","away_ppg","home_opp_ppg","away_opp_ppg",
+    "home_fgpct","away_fgpct","home_threepct","away_threepct","home_tempo","away_tempo",
+    "home_orb_pct","away_orb_pct","home_fta_rate","away_fta_rate","home_turnovers","away_turnovers",
+    "home_steals","away_steals","home_blocks","away_blocks","home_ato_ratio","away_ato_ratio",
+    "market_spread_home","market_ou_total"]
+_qcols = [c for c in _quality_cols if c in df.columns]
+_qmat = pd.DataFrame({c: df[c].notna() & (df[c] != 0 if c in ["home_adj_em","away_adj_em","market_spread_home","market_ou_total"] else True) for c in _qcols})
+_row_q = _qmat.mean(axis=1)
+_keep = _row_q >= 0.8
+print(f"  Quality filter: keeping {int(_keep.sum())}/{len(df)} games (dropped {int((~_keep).sum())} below 80%)")
+df = df.loc[_keep].reset_index(drop=True)
+rows = df.to_dict("records")
 for col in ["actual_home_score","actual_away_score","home_adj_em","away_adj_em",
             "home_adj_oe","away_adj_oe","home_adj_de","away_adj_de",
             "home_ppg","away_ppg","home_opp_ppg","away_opp_ppg",
@@ -101,25 +132,25 @@ scaler = StandardScaler()
 X_s = scaler.fit_transform(X)
 
 print("\n  XGBoost...", end=" ", flush=True)
-xgb = XGBRegressor(n_estimators=160, max_depth=5, learning_rate=0.06, random_state=42, tree_method="hist")
-oof_xgb = time_series_oof(xgb, X_s, y_margin, n_splits=10)
+xgb = XGBRegressor(n_estimators=175, max_depth=7, learning_rate=0.10, random_state=42, tree_method="hist")
+oof_xgb = time_series_oof(xgb, X_s, y_margin, n_splits=50)
 xgb.fit(X_s, y_margin, sample_weight=weights)
 print(f"MAE: {mean_absolute_error(y_margin, oof_xgb):.3f}")
 
 print("  CatBoost...", end=" ", flush=True)
-cat = CatBoostRegressor(n_estimators=160, depth=5, learning_rate=0.06, random_seed=42, verbose=0)
-oof_cat = time_series_oof(cat, X_s, y_margin, n_splits=10)
+cat = CatBoostRegressor(n_estimators=175, depth=7, learning_rate=0.10, random_seed=42, verbose=0)
+oof_cat = time_series_oof(cat, X_s, y_margin, n_splits=50)
 cat.fit(X_s, y_margin, sample_weight=weights)
 print(f"MAE: {mean_absolute_error(y_margin, oof_cat):.3f}")
 
-print("  RandomForest...", end=" ", flush=True)
-rf = RandomForestRegressor(n_estimators=160, max_depth=10, random_state=42, n_jobs=-1)
-oof_rf = time_series_oof(rf, X_s, y_margin, n_splits=10)
-rf.fit(X_s, y_margin, sample_weight=weights)
-print(f"MAE: {mean_absolute_error(y_margin, oof_rf):.3f}")
+print("  LightGBM...", end=" ", flush=True)
+lgbm = LGBMRegressor(n_estimators=175, max_depth=7, learning_rate=0.10, subsample=0.8, colsample_bytree=0.8, min_child_samples=20, random_state=42, verbosity=-1)
+oof_lgbm = time_series_oof(lgbm, X_s, y_margin, n_splits=50)
+lgbm.fit(X_s, y_margin, sample_weight=weights)
+print(f"MAE: {mean_absolute_error(y_margin, oof_lgbm):.3f}")
 
 print("\n  Stacking...")
-oof_stacked = np.column_stack([oof_xgb, oof_cat, oof_rf])
+oof_stacked = np.column_stack([oof_xgb, oof_cat, oof_lgbm])
 meta_reg = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0])
 meta_reg.fit(oof_stacked, y_margin)
 print(f"  Meta weights: {list(meta_reg.coef_.round(4))}")
@@ -138,22 +169,22 @@ isotonic.fit(oof_probs, y_win)
 explainer = shap.TreeExplainer(xgb)
 
 # Build with ml_utils classes (THIS IS THE KEY FIX)
-reg = StackedRegressor([xgb, cat, rf], meta_reg)
+reg = StackedRegressor([xgb, cat, lgbm], meta_reg)
 # Train classifiers (StackedClassifier needs predict_proba)
 from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
-from sklearn.ensemble import RandomForestClassifier
+from lightgbm import LGBMClassifier
 print("  Training classifiers...")
-xgb_c = XGBClassifier(n_estimators=160, max_depth=5, learning_rate=0.06, random_state=42, tree_method="hist", eval_metric="logloss")
+xgb_c = XGBClassifier(n_estimators=175, max_depth=7, learning_rate=0.10, random_state=42, tree_method="hist", eval_metric="logloss")
 xgb_c.fit(X_s, y_win, sample_weight=weights)
-cat_c = CatBoostClassifier(n_estimators=160, depth=5, learning_rate=0.06, random_seed=42, verbose=0)
+cat_c = CatBoostClassifier(n_estimators=175, depth=7, learning_rate=0.10, random_seed=42, verbose=0)
 cat_c.fit(X_s, y_win, sample_weight=weights)
-rf_c = RandomForestClassifier(n_estimators=160, max_depth=10, random_state=42, n_jobs=-1)
-rf_c.fit(X_s, y_win, sample_weight=weights)
-oof_probs_stack = np.column_stack([xgb_c.predict_proba(X_s)[:,1], cat_c.predict_proba(X_s)[:,1], rf_c.predict_proba(X_s)[:,1]])
+lgbm_c = LGBMClassifier(n_estimators=175, max_depth=7, learning_rate=0.10, subsample=0.8, colsample_bytree=0.8, min_child_samples=20, random_state=42, verbosity=-1)
+lgbm_c.fit(X_s, y_win, sample_weight=weights)
+oof_probs_stack = np.column_stack([xgb_c.predict_proba(X_s)[:,1], cat_c.predict_proba(X_s)[:,1], lgbm_c.predict_proba(X_s)[:,1]])
 meta_clf = LogisticRegression(max_iter=2000)
 meta_clf.fit(oof_probs_stack, y_win)
-clf = StackedClassifier([xgb_c, cat_c, rf_c], meta_clf)
+clf = StackedClassifier([xgb_c, cat_c, lgbm_c], meta_clf)
 
 bundle = {
     "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
