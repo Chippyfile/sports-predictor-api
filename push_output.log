@@ -1,0 +1,166 @@
+======================================================================
+  PUSH PLAYER-DERIVED FEATURES: Cache → Supabase
+======================================================================
+  Loading ncaa_extract_cache.json...
+  Cache: 64881 games
+
+  Games with player data: 64829
+
+  Column coverage:
+    home_minutes_hhi                 64,820
+    away_minutes_hhi                 64,808
+    home_star1_pts_share             64,820
+    away_star1_pts_share             64,808
+    home_top3_pts_share              64,820
+    away_top3_pts_share              64,808
+    home_bench_pts                   64,820
+    away_bench_pts                   64,808
+    home_bench_pts_share             64,820
+    away_bench_pts_share             64,808
+    home_players_used                64,820
+    away_players_used                64,808
+
+  Pushing 64,829 patches to ncaa_historical...
+    500/64829 | success:500 errors:0
+    Exception for 400608202: HTTPSConnectionPool(host='lxaaqtqvlwjvyuedyauo.supabase.co', port=443): Read timed out. (read timeout=15)
+    Exception for 400586144: HTTPSConnectionPool(host='lxaaqtqvlwjvyuedyauo.supabase.co', port=443): Read timed out. (read timeout=15)
+    1000/64829 | success:998 errors:2
+    Exception for 400589104: HTTPSConnectionPool(host='lxaaqtqvlwjvyuedyauo.supabase.co', port=443): Read timed out. (read timeout=15)
+    1500/64829 | success:1497 errors:3
+    2000/64829 | success:1997 errors:3
+    Exception for 400586383: HTTPSConnectionPool(host='lxaaqtqvlwjvyuedyauo.supabase.co', port=443): Read timed out. (read timeout=15)
+    Exception for 400591306: HTTPSConnectionPool(host='lxaaqtqvlwjvyuedyauo.supabase.co', port=443): Read timed out. (read timeout=15)
+    2500/64829 | success:2493 errors:7
+    3000/64829 | success:2993 errors:7
+    3500/64829 | success:3493 errors:7
+    4000/64829 | success:3993 errors:7
+    4500/64829 | success:4493 errors:7
+    5000/64829 | success:4993 errors:7
+    5500/64829 | success:5493 errors:7
+    6000/64829 | success:5993 errors:7
+    6500/64829 | success:6493 errors:7
+    7000/64829 | success:6993 errors:7
+    7500/64829 | success:7493 errors:7
+    8000/64829 | success:7993 errors:7
+    8500/64829 | success:8493 errors:7
+    9000/64829 | success:8993 errors:7
+    9500/64829 | success:9493 errors:7
+    10000/64829 | success:9993 errors:7
+    10500/64829 | success:10493 errors:7
+    11000/64829 | success:10993 errors:7
+    11500/64829 | success:11493 errors:7
+    12000/64829 | success:11993 errors:7
+    12500/64829 | success:12493 errors:7
+    13000/64829 | success:12993 errors:7
+    13500/64829 | success:13493 errors:7
+    14000/64829 | success:13993 errors:7
+    14500/64829 | success:14493 errors:7
+    15000/64829 | success:14993 errors:7
+    15500/64829 | success:15493 errors:7
+    16000/64829 | success:15993 errors:7
+    16500/64829 | success:16493 errors:7
+    17000/64829 | success:16993 errors:7
+    17500/64829 | success:17493 errors:7
+    18000/64829 | success:17993 errors:7
+    18500/64829 | success:18493 errors:7
+    19000/64829 | success:18993 errors:7
+    19500/64829 | success:19493 errors:7
+    20000/64829 | success:19993 errors:7
+    20500/64829 | success:20493 errors:7
+    21000/64829 | success:20993 errors:7
+    21500/64829 | success:21493 errors:7
+    22000/64829 | success:21993 errors:7
+    22500/64829 | success:22493 errors:7
+    23000/64829 | success:22993 errors:7
+    23500/64829 | success:23493 errors:7
+    24000/64829 | success:23993 errors:7
+    24500/64829 | success:24493 errors:7
+    25000/64829 | success:24993 errors:7
+    25500/64829 | success:25493 errors:7
+    26000/64829 | success:25993 errors:7
+    26500/64829 | success:26493 errors:7
+    27000/64829 | success:26993 errors:7
+    27500/64829 | success:27493 errors:7
+    28000/64829 | success:27993 errors:7
+    28500/64829 | success:28493 errors:7
+    29000/64829 | success:28993 errors:7
+    29500/64829 | success:29493 errors:7
+    30000/64829 | success:29993 errors:7
+    30500/64829 | success:30493 errors:7
+    31000/64829 | success:30993 errors:7
+    31500/64829 | success:31493 errors:7
+    32000/64829 | success:31993 errors:7
+    32500/64829 | success:32493 errors:7
+    33000/64829 | success:32993 errors:7
+    33500/64829 | success:33493 errors:7
+    34000/64829 | success:33993 errors:7
+    34500/64829 | success:34493 errors:7
+    35000/64829 | success:34993 errors:7
+    35500/64829 | success:35493 errors:7
+    36000/64829 | success:35993 errors:7
+    36500/64829 | success:36493 errors:7
+    37000/64829 | success:36993 errors:7
+    37500/64829 | success:37493 errors:7
+    38000/64829 | success:37993 errors:7
+    38500/64829 | success:38493 errors:7
+    39000/64829 | success:38993 errors:7
+    39500/64829 | success:39493 errors:7
+    40000/64829 | success:39993 errors:7
+    40500/64829 | success:40493 errors:7
+    41000/64829 | success:40993 errors:7
+    41500/64829 | success:41493 errors:7
+    42000/64829 | success:41993 errors:7
+    42500/64829 | success:42493 errors:7
+    43000/64829 | success:42993 errors:7
+    43500/64829 | success:43493 errors:7
+    44000/64829 | success:43993 errors:7
+    44500/64829 | success:44493 errors:7
+    45000/64829 | success:44993 errors:7
+    45500/64829 | success:45493 errors:7
+    46000/64829 | success:45993 errors:7
+    46500/64829 | success:46493 errors:7
+    47000/64829 | success:46993 errors:7
+    47500/64829 | success:47493 errors:7
+    48000/64829 | success:47993 errors:7
+    48500/64829 | success:48493 errors:7
+    49000/64829 | success:48993 errors:7
+    49500/64829 | success:49493 errors:7
+    50000/64829 | success:49993 errors:7
+    50500/64829 | success:50493 errors:7
+    51000/64829 | success:50993 errors:7
+    51500/64829 | success:51493 errors:7
+    52000/64829 | success:51993 errors:7
+    52500/64829 | success:52493 errors:7
+    53000/64829 | success:52993 errors:7
+    53500/64829 | success:53493 errors:7
+    54000/64829 | success:53993 errors:7
+    54500/64829 | success:54493 errors:7
+    55000/64829 | success:54993 errors:7
+    55500/64829 | success:55493 errors:7
+    56000/64829 | success:55993 errors:7
+    56500/64829 | success:56493 errors:7
+    57000/64829 | success:56993 errors:7
+    57500/64829 | success:57493 errors:7
+    58000/64829 | success:57993 errors:7
+    58500/64829 | success:58493 errors:7
+    59000/64829 | success:58993 errors:7
+    59500/64829 | success:59493 errors:7
+    60000/64829 | success:59993 errors:7
+    60500/64829 | success:60493 errors:7
+    61000/64829 | success:60993 errors:7
+    61500/64829 | success:61493 errors:7
+    62000/64829 | success:61993 errors:7
+    62500/64829 | success:62493 errors:7
+    63000/64829 | success:62993 errors:7
+    63500/64829 | success:63493 errors:7
+    64000/64829 | success:63993 errors:7
+    64500/64829 | success:64493 errors:7
+
+======================================================================
+  PUSH COMPLETE
+======================================================================
+  Success: 64,822
+  Errors:  7
+  Time:    166.8 minutes
+  Rate:    6 patches/sec
+======================================================================
