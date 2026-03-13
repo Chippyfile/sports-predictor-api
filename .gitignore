@@ -12,3 +12,9 @@ logs/
 *.bak
 *.jsonl
 ncaa_raw_summary_cache*
+hhi_fix.log
+ncaa_hhi_players_cache.json
+rolling_player_avg_w10.csv
+sweep_checkpoint_*.json
+referee_profiles.json
+*.backup
