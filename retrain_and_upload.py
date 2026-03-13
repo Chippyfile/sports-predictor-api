@@ -119,6 +119,14 @@ df["season_weight"] = df["season"].apply(
 print("  Heuristic backfill...")
 df = _ncaa_backfill_heuristic(df)
 
+try:
+    import json as _json
+    with open("referee_profiles.json") as _rf:
+        from sports.ncaa import ncaa_build_features
+        ncaa_build_features._ref_profiles = _json.load(_rf)
+    print(f"  Loaded {len(ncaa_build_features._ref_profiles)} referee profiles")
+except FileNotFoundError:
+    print("  referee_profiles.json not found - ref features zero")
 print("  Building features...")
 df = df.dropna(subset=["actual_home_score", "actual_away_score"])
 X = ncaa_build_features(df)

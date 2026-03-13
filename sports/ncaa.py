@@ -100,6 +100,10 @@ def ncaa_build_features(df):
         "is_conference_tournament": 0, "is_ncaa_tournament": 0,
         "is_bubble_game": 0, "is_early_season": 0,
         "importance_multiplier": 1.0,
+        "home_roll_star1_share": 0.25, "away_roll_star1_share": 0.25,
+        "home_roll_top3_share": 0.65, "away_roll_top3_share": 0.65,
+        "home_roll_bench_share": 0.20, "away_roll_bench_share": 0.20,
+        "home_roll_bench_pts": 15.0, "away_roll_bench_pts": 15.0,
         # ── v3 ADVANCED SHOOTING ──
         "home_twopt_pct": 0.48, "away_twopt_pct": 0.48,
         "home_efg_pct": 0.50, "away_efg_pct": 0.50,
@@ -569,6 +573,38 @@ def ncaa_build_features(df):
     df["roll_ats_diff_gated"] = df["roll_ats_diff"] * df["has_ats_data"]
     df["roll_ats_margin_gated"] = df["roll_ats_margin_diff"] * df["has_ats_data"]
 
+    # Rolling player features (legitimate pre-game signal)
+    df["roll_star1_share_diff"] = df["home_roll_star1_share"] - df["away_roll_star1_share"]
+    df["roll_top3_share_diff"] = df["home_roll_top3_share"] - df["away_roll_top3_share"]
+    df["roll_bench_share_diff"] = df["home_roll_bench_share"] - df["away_roll_bench_share"]
+    df["roll_bench_pts_diff"] = df["home_roll_bench_pts"] - df["away_roll_bench_pts"]
+
+    # Referee crew features (from prebuilt profiles)
+    _ref_profiles = getattr(ncaa_build_features, "_ref_profiles", {})
+    _ref_ou = []
+    _ref_hw = []
+    _ref_fr = []
+    _ref_pace = []
+    for _, _row in df.iterrows():
+        _ou, _hw, _fr, _pa = [], [], [], []
+        for _rc in ["referee_1", "referee_2", "referee_3"]:
+            _name = str(_row.get(_rc, "")).strip()
+            if _name and _name in _ref_profiles:
+                _p = _ref_profiles[_name]
+                _ou.append(_p.get("ou_bias", 0))
+                _hw.append(_p.get("home_whistle", 0))
+                _fr.append(_p.get("foul_rate", 0))
+                _pa.append(_p.get("pace_impact", 145))
+        _ref_ou.append(float(np.mean(_ou)) if _ou else 0.0)
+        _ref_hw.append(float(np.mean(_hw)) if _hw else 0.0)
+        _ref_fr.append(float(np.mean(_fr)) if _fr else 0.0)
+        _ref_pace.append(float(np.mean(_pa)) - 145.0 if _pa else 0.0)
+    df["ref_ou_bias"] = _ref_ou
+    df["ref_home_whistle"] = _ref_hw
+    df["ref_foul_rate"] = _ref_fr
+    df["ref_pace_impact"] = _ref_pace
+    df["has_ref_data"] = (pd.Series(_ref_ou) != 0.0).astype(int).values
+
     feature_cols = [
         # ── EXISTING 38 (unchanged) ──
         "neutral_em_diff", "hca_pts", "neutral",
@@ -625,6 +661,10 @@ def ncaa_build_features(df):
         # ── v3: Situational ──
         "is_revenge_game", "is_sandwich", "is_letdown", "is_midweek", "spread_regime",
         # ── v3: Interaction features ──
+        "roll_star1_share_diff", "roll_top3_share_diff",
+        "roll_bench_share_diff", "roll_bench_pts_diff",
+        "ref_ou_bias", "ref_home_whistle", "ref_foul_rate",
+        "ref_pace_impact", "has_ref_data",
         "fatigue_x_quality", "luck_x_spread",
         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
         # ═══ v19→v20: ESPN Win Prob edges (unique signal beyond spread) ═══
@@ -1121,6 +1161,14 @@ def train_ncaa():
             return {"error": "Not enough NCAAB data", "n": len(df),
                     "n_current": len(current_df)}
 
+        try:
+            import json as _json
+            with open("referee_profiles.json") as _rf:
+                ncaa_build_features._ref_profiles = _json.load(_rf)
+            print(f"  Loaded {len(ncaa_build_features._ref_profiles)} referee profiles")
+        except FileNotFoundError:
+            print("  referee_profiles.json not found - ref features zero")
+            ncaa_build_features._ref_profiles = {}
         X  = ncaa_build_features(df)
         y_margin = df["actual_home_score"].astype(float) - df["actual_away_score"].astype(float)
         y_win    = (y_margin > 0).astype(int)
@@ -1150,7 +1198,7 @@ def train_ncaa():
             n = MAX_TRAIN
             print(f"  NCAA: Capped to {n} rows for Railway timeout protection")
 
-        cv_folds = min(60, n)  # 5 for Railway; set 10 for local
+        cv_folds = min(10, n)  # 5 for Railway; set 10 for local
         fit_weights = sample_weights if sample_weights is not None else np.ones(n)
 
         if n >= 200:
