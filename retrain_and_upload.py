@@ -82,11 +82,7 @@ rows = df.to_dict("records")
 df = pd.DataFrame(rows)
 
 # Quality filter: drop rows with <80% real data
-_quality_cols = ["home_adj_em","away_adj_em","home_ppg","away_ppg","home_opp_ppg","away_opp_ppg",
-    "home_fgpct","away_fgpct","home_threepct","away_threepct","home_tempo","away_tempo",
-    "home_orb_pct","away_orb_pct","home_fta_rate","away_fta_rate","home_turnovers","away_turnovers",
-    "home_steals","away_steals","home_blocks","away_blocks","home_ato_ratio","away_ato_ratio",
-    "market_spread_home","market_ou_total"]
+_quality_cols = ["home_adj_em","away_adj_em","home_ppg","away_ppg","market_spread_home","market_ou_total"]
 _qcols = [c for c in _quality_cols if c in df.columns]
 _qmat = pd.DataFrame({c: df[c].notna() & (df[c] != 0 if c in ["home_adj_em","away_adj_em","market_spread_home","market_ou_total"] else True) for c in _qcols})
 _row_q = _qmat.mean(axis=1)

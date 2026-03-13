@@ -200,8 +200,43 @@
     19100/64328 | success:19087 errors:13 | 515min left
     19200/64328 | success:19187 errors:13 | 514min left
     19300/64328 | success:19287 errors:13 | 513min left
-00/64828 | success:19387 errors:13 | 516min left
-    19500/64828 | success:19487 errors:13 | 515min left
-    19600/64828 | success:19587 errors:13 | 514min left
-    19700/64828 | success:19687 errors:13 | 513min left
-    19800/64828 | success:19787 errors:13 | 511min left
+    19400/64328 | success:19387 errors:13 | 512min left
+    19500/64328 | success:19487 errors:13 | 511min left
+    19600/64328 | success:19587 errors:13 | 510min left
+    19700/64328 | success:19687 errors:13 | 508min left
+    19800/64328 | success:19787 errors:13 | 507min left
+    19900/64328 | success:19887 errors:13 | 506min left
+    20000/64328 | success:19987 errors:13 | 505min left
+    20100/64328 | success:20087 errors:13 | 504min left
+    20200/64328 | success:20187 errors:13 | 503min left
+    20300/64328 | success:20287 errors:13 | 502min left
+    20400/64328 | success:20387 errors:13 | 501min left
+    20500/64328 | success:20487 errors:13 | 499min left
+    20600/64328 | success:20587 errors:13 | 498min left
+    20700/64328 | success:20687 errors:13 | 497min left
+    20800/64328 | success:20787 errors:13 | 496min left
+    20900/64328 | success:20887 errors:13 | 494min left
+    21000/64328 | success:20987 errors:13 | 493min left
+    21100/64328 | success:21087 errors:13 | 492min left
+    21200/64328 | success:21187 errors:13 | 491min left
+    21300/64328 | success:21287 errors:13 | 489min left
+    21400/64328 | success:21386 errors:14 | 488min left
+    21500/64328 | success:21486 errors:14 | 487min left
+    21600/64328 | success:21586 errors:14 | 486min left
+    21700/64328 | success:21686 errors:14 | 485min left
+    21800/64328 | success:21786 errors:14 | 483min left
+    21900/64328 | success:21886 errors:14 | 482min left
+    22000/64328 | success:21986 errors:14 | 481min left
+    22100/64328 | success:22086 errors:14 | 480min left
+    22200/64328 | success:22186 errors:14 | 479min left
+    22300/64328 | success:22286 errors:14 | 478min left
+    22400/64328 | success:22386 errors:14 | 476min left
+    22500/64328 | success:22486 errors:14 | 475min left
+    22600/64328 | success:22586 errors:14 | 474min left
+    22700/64328 | success:22686 errors:14 | 473min left
+    22800/64328 | success:22786 errors:14 | 472min left
+00/64828 | success:22886 errors:14 | 475min left
+    23000/64828 | success:22986 errors:14 | 474min left
+    23100/64828 | success:23086 errors:14 | 473min left
+    23200/64828 | success:23186 errors:14 | 472min left
+    23300/64828 | success:23286 errors:14 | 471min left
