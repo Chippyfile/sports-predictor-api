@@ -9,7 +9,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeCV, LogisticRegression
 from sklearn.isotonic import IsotonicRegression
 # from sklearn.ensemble import RandomForestRegressor  # replaced by LGBM
-from lightgbm import LGBMRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import mean_absolute_error
 from xgboost import XGBRegressor
@@ -148,11 +147,7 @@ oof_cat = time_series_oof(cat, X_s, y_margin, n_splits=50)
 cat.fit(X_s, y_margin, sample_weight=weights)
 print(f"MAE: {mean_absolute_error(y_margin, oof_cat):.3f}")
 
-print("  LightGBM...", end=" ", flush=True)
-lgbm = LGBMRegressor(n_estimators=175, max_depth=7, learning_rate=0.10, subsample=0.8, colsample_bytree=0.8, min_child_samples=20, random_state=42, verbosity=-1)
-oof_lgbm = time_series_oof(lgbm, X_s, y_margin, n_splits=50)
-lgbm.fit(X_s, y_margin, sample_weight=weights)
-print(f"MAE: {mean_absolute_error(y_margin, oof_lgbm):.3f}")
+
 
 print("  MLP-128-64...", end=" ", flush=True)
 mlp = MLPRegressor(hidden_layer_sizes=(128, 64), max_iter=500, early_stopping=True,
@@ -162,7 +157,7 @@ mlp.fit(X_s, y_margin)
 print(f"MAE: {mean_absolute_error(y_margin, oof_mlp):.3f}")
 
 print("\n  Stacking...")
-oof_stacked = np.column_stack([oof_xgb, oof_cat, oof_lgbm, oof_mlp])
+oof_stacked = np.column_stack([oof_xgb, oof_cat, oof_mlp])
 meta_reg = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0])
 meta_reg.fit(oof_stacked, y_margin)
 print(f"  Meta weights: {list(meta_reg.coef_.round(4))}")
@@ -181,26 +176,24 @@ isotonic.fit(oof_probs, y_win)
 explainer = shap.TreeExplainer(xgb)
 
 # Build with ml_utils classes (THIS IS THE KEY FIX)
-reg = StackedRegressor([xgb, cat, lgbm, mlp], meta_reg)
+reg = StackedRegressor([xgb, cat, mlp], meta_reg)
 # Train classifiers (StackedClassifier needs predict_proba)
 from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
-from lightgbm import LGBMClassifier
 from sklearn.neural_network import MLPClassifier
 print("  Training classifiers...")
 xgb_c = XGBClassifier(n_estimators=175, max_depth=7, learning_rate=0.10, random_state=42, tree_method="hist", eval_metric="logloss")
 xgb_c.fit(X_s, y_win, sample_weight=weights)
 cat_c = CatBoostClassifier(n_estimators=175, depth=7, learning_rate=0.10, random_seed=42, verbose=0)
 cat_c.fit(X_s, y_win, sample_weight=weights)
-lgbm_c = LGBMClassifier(n_estimators=175, max_depth=7, learning_rate=0.10, subsample=0.8, colsample_bytree=0.8, min_child_samples=20, random_state=42, verbosity=-1)
-lgbm_c.fit(X_s, y_win, sample_weight=weights)
+
 mlp_c = MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, early_stopping=True,
                       validation_fraction=0.1, random_state=42)
 mlp_c.fit(X_s, y_win)
-oof_probs_stack = np.column_stack([xgb_c.predict_proba(X_s)[:,1], cat_c.predict_proba(X_s)[:,1], lgbm_c.predict_proba(X_s)[:,1], mlp_c.predict_proba(X_s)[:,1]])
+oof_probs_stack = np.column_stack([xgb_c.predict_proba(X_s)[:,1], cat_c.predict_proba(X_s)[:,1], mlp_c.predict_proba(X_s)[:,1]])
 meta_clf = LogisticRegression(max_iter=2000)
 meta_clf.fit(oof_probs_stack, y_win)
-clf = StackedClassifier([xgb_c, cat_c, lgbm_c, mlp_c], meta_clf)
+clf = StackedClassifier([xgb_c, cat_c, mlp_c], meta_clf)
 
 bundle = {
     "scaler": scaler, "reg": reg, "clf": clf, "explainer": explainer,
