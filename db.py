@@ -7,41 +7,58 @@ def sb_get(table, params=""):
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Prefer": "count=exact",
     }
     
+    # Warm up connection (Supabase cold start causes first request to timeout)
+    try:
+        requests.get(f"{SUPABASE_URL}/rest/v1/{table}?limit=1", headers=headers, timeout=10)
+    except:
+        pass
+
     all_data = []
+    page_size = 200
     offset = 0
-    limit = 1000  # Supabase default max per request
+    max_retries = 3
     
     while True:
-        # Add range headers for pagination
         sep = "&" if params else ""
-
-        url = f"{SUPABASE_URL}/rest/v1/{table}?{params}{sep}limit={limit}&offset={offset}"
-        print(f"Fetching from Supabase: {url} (rows {offset}-{offset + limit - 1})")
+        url = f"{SUPABASE_URL}/rest/v1/{table}?{params}{sep}offset={offset}&limit={page_size}"
         
-        try:
-            r = requests.get(url, headers=headers, timeout=30)
-            if not r.ok:
-                print(f"Error response: {r.text[:200]}")
-                break
-                
-            data = r.json()
-            if not data:  # No more data
-                break
-                
-            all_data.extend(data)
-            print(f"Got {len(data)} rows, total so far: {len(all_data)}")
-            
-            # Check if we got less than the limit (end of data)
-            if len(data) < limit:
-                break
-                
-            offset += limit
-            
-        except Exception as e:
-            print(f"Exception in sb_get: {str(e)}")
+        for attempt in range(max_retries):
+            try:
+                r = requests.get(url, headers=headers, timeout=300)
+                if r.ok:
+                    break
+                if attempt < max_retries - 1:
+                    pass  # silent retry
+                    import time; time.sleep(2)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    pass  # silent retry
+                    import time; time.sleep(2)
+                else:
+                    print(f"  Failed after {max_retries} retries at offset {offset}: {e}")
+                    print(f"Total rows fetched: {len(all_data)}")
+                    return all_data
+        
+        if not r.ok:
+            print(f"Error at offset {offset}: {r.text[:200]}")
             break
+        
+        data = r.json()
+        if not data:
+            break
+        
+        all_data.extend(data)
+        
+        if len(all_data) % 5000 < page_size:
+            print(f"  Loaded {len(all_data)} rows...")
+        
+        if len(data) < page_size:
+            break
+        
+        offset += page_size
     
     print(f"Total rows fetched: {len(all_data)}")
     return all_data
@@ -122,7 +139,7 @@ def load_model(name):
         }
         resp = requests.get(
             f"{SUPABASE_URL}/rest/v1/model_store?name=eq.{name}&select=data",
-            headers=headers, timeout=30,
+            headers=headers, timeout=120,
         )
         if resp.ok:
             rows = resp.json()

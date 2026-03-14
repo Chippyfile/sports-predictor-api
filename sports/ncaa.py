@@ -230,7 +230,7 @@ def ncaa_build_features(df):
         "home_roll_star1_share": 0.25, "away_roll_star1_share": 0.25,
         "home_roll_top3_share": 0.55, "away_roll_top3_share": 0.55,
         "home_roll_bench_share": 0.20, "away_roll_bench_share": 0.20,
-        "home_roll_minutes_hhi": 0.20, "away_roll_minutes_hhi": 0.20,
+        "home_roll_hhi": 0.20, "away_roll_hhi": 0.20,
         "home_roll_players_used": 8.0, "away_roll_players_used": 8.0,
         # Clutch tendencies (rolling avg)
         "home_roll_clutch_ft_pct": 0.70, "away_roll_clutch_ft_pct": 0.70,
@@ -526,15 +526,16 @@ def ncaa_build_features(df):
 
     # Crowd factor: attendance as % of venue capacity (proxy for crowd energy)
     # High values (>0.90) = packed arena = stronger HCA; low (<0.50) = weak crowd
-    _cap = df["venue_capacity"].clip(lower=1000)  # avoid div-by-zero on bad data
     _att = df["attendance"]
     _has_att = (_att > 0).astype(int)
-    df["crowd_pct"] = (_att / _cap).clip(0, 1.2) * _has_att  # allow >1.0 for overflow
+    # Normalize attendance by league median (~2400) since venue_capacity is 0% populated
+    # Result: 0.5 = small crowd, 1.0 = typical, 2.0+ = packed major arena
+    df["crowd_pct"] = (_att / 2400).clip(0, 5.0) * _has_att
     df["has_crowd_data"] = _has_att
 
     # Venue capacity tier: small gym (<5K) vs mid (5-10K) vs large (>10K)
     # Normalized so model can learn venue size effect on HCA
-    df["venue_size_norm"] = (_cap / 15000).clip(0, 2.0)  # 15K = ~NCAA avg large arena
+    df["venue_size_norm"] = (df["venue_capacity"].clip(lower=1000) / 15000).clip(0, 2.0)
 
     # ═══════════════════════════════════════════════════════════════
     # v21: ROLLING TEAM TENDENCY FEATURES (from prior games, no leakage)
@@ -554,7 +555,7 @@ def ncaa_build_features(df):
     df["roll_top3_dep_diff"] = df["home_roll_top3_share"] - df["away_roll_top3_share"]
     df["roll_bench_diff"] = df["home_roll_bench_share"] - df["away_roll_bench_share"]
     df["roll_rotation_diff"] = df["home_roll_players_used"] - df["away_roll_players_used"]
-    df["roll_minutes_hhi_diff"] = df["home_roll_minutes_hhi"] - df["away_roll_minutes_hhi"]
+    df["roll_hhi_diff"] = df["home_roll_hhi"] - df["away_roll_hhi"]
 
     # Clutch tendency
     df["roll_clutch_ft_diff"] = df["home_roll_clutch_ft_pct"] - df["away_roll_clutch_ft_pct"]
@@ -605,6 +606,45 @@ def ncaa_build_features(df):
     df["ref_pace_impact"] = _ref_pace
     df["has_ref_data"] = (pd.Series(_ref_ou) != 0.0).astype(int).values
 
+
+    # ── Orphaned features (were in Supabase but not in model) ──
+    df["adj_oe_diff"] = df["home_adj_oe"] - df["away_adj_oe"]
+    df["adj_de_diff"] = df["away_adj_de"] - df["home_adj_de"]  # flipped: lower D is better
+    df["scoring_var_diff"] = df["home_scoring_var"] - df["away_scoring_var"]
+    df["score_kurtosis_diff"] = df["home_score_kurtosis"] - df["away_score_kurtosis"]
+    df["clutch_ratio_diff"] = df["home_clutch_ratio"] - df["away_clutch_ratio"]
+    df["garbage_adj_ppp_diff"] = df["home_garbage_adj_ppp"] - df["away_garbage_adj_ppp"]
+    df["days_since_loss_diff"] = df["home_days_since_loss"] - df["away_days_since_loss"]
+    df["games_since_blowout_diff"] = df["home_games_since_blowout_loss"] - df["away_games_since_blowout_loss"]
+    df["games_last_14_diff"] = df["home_games_last_14"] - df["away_games_last_14"]
+    df["rest_effect_diff"] = df["home_rest_effect"] - df["away_rest_effect"]
+    df["momentum_halflife_diff"] = df["home_momentum_halflife"] - df["away_momentum_halflife"]
+    df["win_aging_diff"] = df["home_win_aging"] - df["away_win_aging"]
+    df["centrality_diff"] = df["home_centrality"] - df["away_centrality"]
+    df["dow_effect_diff"] = df["home_dow_effect"] - df["away_dow_effect"]
+    df["conf_balance_diff"] = df["home_conf_balance"] - df["away_conf_balance"]
+    # ESPN moneyline edge: convert to implied prob delta vs model
+    _espn_ml_h = pd.to_numeric(df["espn_ml_home"], errors="coerce").fillna(0)
+    _espn_ml_a = pd.to_numeric(df["espn_ml_away"], errors="coerce").fillna(0)
+    _has_espn_ml = (_espn_ml_h != 0).astype(float)
+    _espn_imp_h = np.where(_espn_ml_h > 0, 100 / (_espn_ml_h + 100), -_espn_ml_h / (-_espn_ml_h + 100))
+    _espn_imp_a = np.where(_espn_ml_a > 0, 100 / (_espn_ml_a + 100), -_espn_ml_a / (-_espn_ml_a + 100))
+    _espn_vig_total = _espn_imp_h + _espn_imp_a
+    _espn_true_h = np.where(_espn_vig_total > 0, _espn_imp_h / _espn_vig_total, 0.5)
+    df["espn_ml_edge"] = np.where(_has_espn_ml, _espn_true_h - 0.5, 0.0)  # deviation from 50%
+
+
+    # ── Spread movement (sharp money signal) ──
+    # Merge Odds API (2024-2025) and DraftKings/ESPN pickcenter (2026) sources
+    _oa_mvmt = pd.to_numeric(df["odds_api_spread_movement"], errors="coerce").fillna(0)
+    _dk_mvmt = pd.to_numeric(df["dk_spread_movement"], errors="coerce").fillna(0)
+    df["spread_movement"] = np.where(_oa_mvmt != 0, _oa_mvmt, _dk_mvmt)
+    df["has_spread_movement"] = (df["spread_movement"] != 0).astype(int)
+    # Total line movement
+    _oa_total_mvmt = pd.to_numeric(df["odds_api_total_movement"], errors="coerce").fillna(0)
+    _dk_total_mvmt = pd.to_numeric(df["dk_total_movement"], errors="coerce").fillna(0)
+    df["total_movement"] = np.where(_oa_total_mvmt != 0, _oa_total_mvmt, _dk_total_mvmt)
+
     feature_cols = [
         # ── EXISTING 38 (unchanged) ──
         "neutral_em_diff", "hca_pts", "neutral",
@@ -612,19 +652,15 @@ def ncaa_build_features(df):
         "orb_pct_diff", "fta_rate_diff", "ato_diff",
         "def_fgpct_diff", "steals_diff", "blocks_diff",
         "sos_diff", "form_diff", "rank_diff", "win_pct_diff",
-        "to_margin_diff", "steals_to_diff",
-        "tempo_avg", "is_ranked_game", "is_top_matchup",
-        "is_conf_game", "season_phase",
-        "rest_diff", "either_b2b",
-        # Unified market signal (ESPN preferred → Odds API fallback)
+        "to_margin_diff",         "tempo_avg",         "season_phase",
+                # Unified market signal (ESPN preferred → Odds API fallback)
         "mkt_spread", "mkt_total", "mkt_spread_vs_model", "has_mkt",
-        "injury_diff", "starters_diff", "any_injury_flag",
-        "is_conf_tourney", "is_ncaa_tourney", "is_bubble", "is_early",
+                "is_conf_tourney", "is_early",
         "importance",
         # ── v3: Elo ──
         "elo_diff",
         # ── v3: Advanced shooting ──
-        "efg_diff", "ts_diff", "twopt_diff",
+        "efg_diff", "twopt_diff",
         "three_rate_diff", "assist_rate_diff", "drb_pct_diff", "ppp_diff",
         # ── v3: Opponent Four Factors ──
         "opp_efg_diff", "opp_to_rate_diff", "opp_fta_rate_diff", "opp_orb_pct_diff",
@@ -635,49 +671,49 @@ def ncaa_build_features(df):
         "opp_adj_form_diff", "wl_momentum_diff",
         "recovery_diff", "after_loss_either",
         # ── v3: Volatility / Distribution ──
-        "eff_vol_diff", "ceiling_diff", "floor_diff",
+        "ceiling_diff", "floor_diff",
         "margin_skew_diff", "scoring_entropy_diff", "bimodal_diff",
         # ── v3: Defensive profile ──
         "def_stability_diff", "opp_suppression_diff", "def_versatility_diff",
         "steal_foul_diff", "block_foul_diff",
         # ── v3: Transition / Paint ──
-        "transition_dep_diff", "paint_pts_diff", "pts_off_to_diff", "fastbreak_diff",
+        "transition_dep_diff", "paint_pts_diff", "fastbreak_diff",
         # ── v3: Schedule / Fatigue ──
-        "fatigue_diff", "games7_diff", "streak_diff", "season_pct_avg",
+        "fatigue_diff", "streak_diff", "season_pct_avg",
         # ── v3: Regression / Information ──
         "regression_diff", "info_gain_diff", "overreaction_diff",
         # ── v3: Scoring source ──
         "scoring_source_entropy_diff", "ft_dependency_diff",
         "three_value_diff", "concentration_diff", "to_conversion_diff",
         # ── v3: Hot/cold divergence ──
-        "fg_divergence_diff", "three_divergence_diff", "ppp_divergence_diff",
+        "three_divergence_diff", "ppp_divergence_diff",
         # ── v3: Pace-adjusted / SOS / Venue ──
         "pace_adj_margin_diff", "pit_sos_diff", "venue_advantage",
-        "rhythm_disruption_diff", "def_improvement_diff",
-        # ── v3: Matchup-level (pre-computed in backfill) ──
+                # ── v3: Matchup-level (pre-computed in backfill) ──
         "matchup_efg", "matchup_to", "matchup_orb", "matchup_ft",
         "style_familiarity", "pace_leverage",
-        "common_opp_diff", "pace_control_diff", "def_rest_advantage",
-        # ── v3: Situational ──
-        "is_revenge_game", "is_sandwich", "is_letdown", "is_midweek", "spread_regime",
+        "common_opp_diff", "pace_control_diff",         # ── v3: Situational ──
+        "is_midweek", "spread_regime",
         # ── v3: Interaction features ──
         "roll_star1_share_diff", "roll_top3_share_diff",
         "roll_bench_share_diff", "roll_bench_pts_diff",
         "ref_ou_bias", "ref_home_whistle", "ref_foul_rate",
-        "ref_pace_impact", "has_ref_data",
-        "fatigue_x_quality", "luck_x_spread",
-        "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
+        "ref_pace_impact",         "adj_oe_diff", "adj_de_diff",
+        "scoring_var_diff", "score_kurtosis_diff",
+        "clutch_ratio_diff", "garbage_adj_ppp_diff",
+        "days_since_loss_diff", "games_since_blowout_diff",
+        "games_last_14_diff", "rest_effect_diff",
+        "momentum_halflife_diff", "win_aging_diff",
+        "centrality_diff",         "n_common_opps",         "is_lookahead",                 "fatigue_x_quality",         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
         # ═══ v19→v20: ESPN Win Prob edges (unique signal beyond spread) ═══
-        "espn_wp_edge", "espn_predictor_edge",
-        # ═══ v21: Venue features (pre-game, no leakage) ═══
-        "crowd_pct", "has_crowd_data", "venue_size_norm",
-        # ═══ v21: Rolling team tendency features (prior games, no leakage) ═══
+        "espn_wp_edge",         # ═══ v21: Venue features (pre-game, no leakage) ═══
+        "crowd_pct",         # ═══ v21: Rolling team tendency features (prior games, no leakage) ═══
         # PBP tendencies
         "roll_run_diff", "roll_drought_diff",
         "roll_lead_change_avg", "roll_dominance_diff",
         # Player dependency tendencies
         "roll_star_dep_diff", "roll_top3_dep_diff",
-        "roll_bench_diff", "roll_rotation_diff", "roll_minutes_hhi_diff",
+        "roll_bench_diff", "roll_rotation_diff", "roll_hhi_diff",
         # Clutch + blowout tendencies
         "roll_clutch_ft_diff", "roll_garbage_diff",
         # ATS tendencies (market mispricing signal)
@@ -685,7 +721,8 @@ def ncaa_build_features(df):
         # NOTE: PBP, clutch, player, and win probability features REMOVED —
         # they are in-game outcomes (data leakage). The columns remain in
         # Supabase for future use (e.g., post-game analysis, team tendency
-        # rolling averages) but must NOT be used as training features.
+        # rolling averages) but must NOT be used as training features.,
+        "spread_movement", "total_movement",
     ]
     return df[feature_cols].fillna(0)
 
@@ -1088,7 +1125,7 @@ def _ncaa_merge_historical(current_df):
     if "importance_multiplier" not in hist_df.columns:
         hist_df["importance_multiplier"] = 1.0
     # Injury columns (not available for historical)
-    for inj_col in ["injury_diff", "home_missing_starters", "away_missing_starters",
+    for inj_col in ["home_missing_starters", "away_missing_starters",
                      "home_injury_penalty", "away_injury_penalty"]:
         if inj_col not in hist_df.columns:
             hist_df[inj_col] = 0
@@ -1408,7 +1445,7 @@ def predict_ncaa(game: dict):
         # v18 P1-INJ: Injury features
         "home_injury_penalty": game.get("home_injury_penalty", 0),
         "away_injury_penalty": game.get("away_injury_penalty", 0),
-        "injury_diff": game.get("injury_diff", 0),
+        "injury_diff": game.get(0),
         "home_missing_starters": game.get("home_missing_starters", 0),
         "away_missing_starters": game.get("away_missing_starters", 0),
         # v18 P1-CTX: Tournament context
@@ -1417,6 +1454,47 @@ def predict_ncaa(game: dict):
         "is_bubble_game": game.get("is_bubble_game", False),
         "is_early_season": game.get("is_early_season", False),
         "importance_multiplier": game.get("importance_multiplier", 1.0),
+        # ── Orphaned features ──
+        "home_adj_oe": game.get("home_adj_oe", 105.0),
+        "away_adj_oe": game.get("away_adj_oe", 105.0),
+        "home_adj_de": game.get("home_adj_de", 105.0),
+        "away_adj_de": game.get("away_adj_de", 105.0),
+        "home_scoring_var": game.get("home_scoring_var", 12.0),
+        "away_scoring_var": game.get("away_scoring_var", 12.0),
+        "home_score_kurtosis": game.get("home_score_kurtosis", 0.0),
+        "away_score_kurtosis": game.get("away_score_kurtosis", 0.0),
+        "home_clutch_ratio": game.get("home_clutch_ratio", 0.5),
+        "away_clutch_ratio": game.get("away_clutch_ratio", 0.5),
+        "home_garbage_adj_ppp": game.get("home_garbage_adj_ppp", 1.0),
+        "away_garbage_adj_ppp": game.get("away_garbage_adj_ppp", 1.0),
+        "home_days_since_loss": game.get("home_days_since_loss", 5),
+        "away_days_since_loss": game.get("away_days_since_loss", 5),
+        "home_games_since_blowout_loss": game.get("home_games_since_blowout_loss", 10),
+        "away_games_since_blowout_loss": game.get("away_games_since_blowout_loss", 10),
+        "home_games_last_14": game.get("home_games_last_14", 4),
+        "away_games_last_14": game.get("away_games_last_14", 4),
+        "home_rest_effect": game.get("home_rest_effect", 0.0),
+        "away_rest_effect": game.get("away_rest_effect", 0.0),
+        "home_momentum_halflife": game.get("home_momentum_halflife", 1.0),
+        "away_momentum_halflife": game.get("away_momentum_halflife", 1.0),
+        "home_win_aging": game.get("home_win_aging", 1.0),
+        "away_win_aging": game.get("away_win_aging", 1.0),
+        "home_centrality": game.get("home_centrality", 1.0),
+        "away_centrality": game.get("away_centrality", 1.0),
+        "home_dow_effect": game.get("home_dow_effect", 0.0),
+        "away_dow_effect": game.get("away_dow_effect", 0.0),
+        "home_conf_balance": game.get("home_conf_balance", 0.0),
+        "away_conf_balance": game.get("away_conf_balance", 0.0),
+        "n_common_opps": game.get("n_common_opps", 0),
+        "revenge_margin": game.get("revenge_margin", 0.0),
+        "is_lookahead": game.get("is_lookahead", 0),
+        "is_postseason": game.get("is_postseason", 0),
+        "espn_ml_home": game.get("espn_ml_home", 0),
+        "odds_api_spread_movement": game.get("odds_api_spread_movement", 0),
+        "dk_spread_movement": game.get("dk_spread_movement", 0),
+        "odds_api_total_movement": game.get("odds_api_total_movement", 0),
+        "dk_total_movement": game.get("dk_total_movement", 0),
+        "espn_ml_away": game.get("espn_ml_away", 0),
         # ── v3 fields ──
         "home_twopt_pct": game.get("home_twopt_pct", 0.48), "away_twopt_pct": game.get("away_twopt_pct", 0.48),
         "home_efg_pct": game.get("home_efg_pct", 0.50), "away_efg_pct": game.get("away_efg_pct", 0.50),
@@ -1561,8 +1639,8 @@ def predict_ncaa(game: dict):
         "away_roll_top3_share": game.get("away_roll_top3_share", 0.55),
         "home_roll_bench_share": game.get("home_roll_bench_share", 0.20),
         "away_roll_bench_share": game.get("away_roll_bench_share", 0.20),
-        "home_roll_minutes_hhi": game.get("home_roll_minutes_hhi", 0.20),
-        "away_roll_minutes_hhi": game.get("away_roll_minutes_hhi", 0.20),
+        "home_roll_hhi": game.get("home_roll_hhi", 0.20),
+        "away_roll_hhi": game.get("away_roll_hhi", 0.20),
         "home_roll_players_used": game.get("home_roll_players_used", 8.0),
         "away_roll_players_used": game.get("away_roll_players_used", 8.0),
         "home_roll_clutch_ft_pct": game.get("home_roll_clutch_ft_pct", 0.70),
