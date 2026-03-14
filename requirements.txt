@@ -30,7 +30,7 @@ pyparsing==3.3.2
 python-dateutil==2.9.0.post0
 pytz==2026.1.post1
 requests==2.32.3
-scikit-learn==1.5.1
+scikit-learn==1.8.0
 scipy==1.13.1
 shap==0.45.1
 six==1.17.0
