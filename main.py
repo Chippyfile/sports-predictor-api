@@ -124,6 +124,15 @@ def route_debug_reload(sport):
             return jsonify({"error": "no_data_in_response", "rows_count": len(rows)})
         data_len = len(rows[0]["data"])
         raw = base64.b64decode(rows[0]["data"])
+        # Fix numpy version mismatch for MT19937 BitGenerator
+        import numpy.random._pickle as _nrp
+        _orig_ctor = _nrp.__bit_generator_ctor
+        def _patched_ctor(bit_generator_name):
+            if 'MT19937' in str(bit_generator_name):
+                from numpy.random import MT19937
+                return MT19937()
+            return _orig_ctor(bit_generator_name)
+        _nrp.__bit_generator_ctor = _patched_ctor
         obj = joblib.load(io.BytesIO(raw))
         _models[sport] = obj
         return jsonify({"status": "ok", "mae": obj.get("mae_cv"), "data_len": data_len, "features": len(obj.get("feature_cols", []))})
