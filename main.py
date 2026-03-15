@@ -105,7 +105,7 @@ def route_reload_model(sport):
 
 @app.route("/debug/reload-model/<sport>", methods=["POST"])
 def route_debug_reload(sport):
-    import requests
+    import requests, base64, io, traceback, joblib
     import base64, io, traceback
     from db import _models
     _models.pop(sport, None)
