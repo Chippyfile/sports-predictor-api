@@ -275,12 +275,11 @@ def _fetch_espn_game_info(game_id, game_date, pregame=False):
             home_pred = predictor.get("homeTeam", {})
             info["espn_predictor_home_pct"] = home_pred.get("gameProjection", 50) / 100.0
 
-        # ESPN Win Probability (BPI or similar)
+        # ESPN Win Probability — first entry is pre-game baseline
         winprob = data.get("winprobability", [])
         if winprob:
-            # Last entry is current/final win probability
-            last = winprob[-1] if winprob else {}
-            info["espn_home_win_pct"] = last.get("homeWinPercentage", 0.5)
+            first = winprob[0]
+            info["espn_home_win_pct"] = first.get("homeWinPercentage", 0.5)
 
         _cache_set(cache_key, info)
         return info
