@@ -698,6 +698,24 @@ def predict_ncaa_full(request_data):
             X[col] = 0
     X = X[feature_cols]
 
+    # ═══ Fix: Set ref features to league average when refs not assigned ═══
+    # When ref_home_whistle=0, the classifier sees it as strong negative signal.
+    # League averages computed from referee_profiles.json across all refs.
+    _ref_profiles = getattr(ncaa_build_features, "_ref_profiles", {})
+    if _ref_profiles:
+        _all_hw = [p.get("home_whistle", 0) for p in _ref_profiles.values() if p.get("home_whistle")]
+        _all_fr = [p.get("foul_rate", 0) for p in _ref_profiles.values() if p.get("foul_rate")]
+        _all_ou = [p.get("ou_bias", 0) for p in _ref_profiles.values() if p.get("ou_bias")]
+        avg_hw = sum(_all_hw) / len(_all_hw) if _all_hw else 0.0
+        avg_fr = sum(_all_fr) / len(_all_fr) if _all_fr else 0.0
+        avg_ou = sum(_all_ou) / len(_all_ou) if _all_ou else 0.0
+        if "ref_home_whistle" in X.columns and X["ref_home_whistle"].iloc[0] == 0:
+            X.loc[:, "ref_home_whistle"] = avg_hw
+        if "ref_foul_rate" in X.columns and X["ref_foul_rate"].iloc[0] == 0:
+            X.loc[:, "ref_foul_rate"] = avg_fr
+        if "ref_ou_bias" in X.columns and X["ref_ou_bias"].iloc[0] == 0:
+            X.loc[:, "ref_ou_bias"] = avg_ou
+
     # Count real vs default features
     non_zero = (X.iloc[0] != 0).sum()
     total = len(feature_cols)
@@ -715,15 +733,34 @@ def predict_ncaa_full(request_data):
     win_prob = float(isotonic.predict([raw_win_prob])[0]) if isotonic else raw_win_prob
     win_prob = max(0.05, min(0.95, win_prob))
 
+    # ═══ Consistency check: if classifier wildly disagrees with regressor, ═══
+    # use sigma-converted margin as fallback probability.
+    # Positive margin should mean >50% win prob, and vice versa.
+    SIGMA = 16.0
+    margin_prob = 1.0 / (1.0 + 10.0 ** (-margin / SIGMA))
+    margin_prob = max(0.05, min(0.95, margin_prob))
+    classifier_disagrees = (margin > 2 and win_prob < 0.40) or (margin < -2 and win_prob > 0.60)
+    if classifier_disagrees:
+        # Blend: 70% margin-based, 30% classifier (don't fully discard classifier)
+        win_prob = 0.70 * margin_prob + 0.30 * win_prob
+        win_prob = max(0.05, min(0.95, win_prob))
+
     # SHAP
-    shap_vals = bundle["explainer"].shap_values(X_s)
-    if isinstance(shap_vals, list):
-        shap_vals = shap_vals[0]
-    shap_out = [
-        {"feature": f, "shap": round(float(v), 4), "value": round(float(X[f].iloc[0]), 3)}
-        for f, v in zip(feature_cols, shap_vals[0])
-    ]
-    shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+    shap_out = []
+    try:
+        explainer = bundle.get("explainer")
+        if explainer:
+            shap_vals = explainer.shap_values(X_s)
+            if isinstance(shap_vals, list):
+                shap_vals = shap_vals[0]
+            shap_out = [
+                {"feature": f, "shap": round(float(v), 4), "value": round(float(X[f].iloc[0]), 3)}
+                for f, v in zip(feature_cols, shap_vals[0])
+            ]
+            shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+    except Exception as e:
+        print(f"  [full_predict] SHAP error: {e}")
+        shap_out = []
 
     return {
         "sport": "NCAAB",
@@ -732,6 +769,8 @@ def predict_ncaa_full(request_data):
         "ml_win_prob_home": round(win_prob, 4),
         "ml_win_prob_away": round(1 - win_prob, 4),
         "ml_win_prob_raw": round(raw_win_prob, 4),
+        "margin_based_prob": round(margin_prob, 4),
+        "classifier_overridden": classifier_disagrees,
         "bias_correction_applied": round(bias, 3),
         "shap": shap_out,
         "feature_coverage": f"{non_zero}/{total}",
