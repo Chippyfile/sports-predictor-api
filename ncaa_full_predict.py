@@ -106,18 +106,60 @@ def _fetch_espn_team_stats(team_id):
                 stat_map[stat.get("name", "")] = stat.get("value", 0)
 
         stats = {
-            "ppg": stat_map.get("avgPoints", 0),
-            "opp_ppg": stat_map.get("avgPointsAllowed", stat_map.get("oppPoints", 0)),
-            "fgpct": stat_map.get("fieldGoalPct", 0.44),
-            "threepct": stat_map.get("threePointFieldGoalPct", 0.34),
-            "ftpct": stat_map.get("freeThrowPct", 0.72),
+            "ppg": stat_map.get("avgPoints", 75),
+            "opp_ppg": stat_map.get("avgPointsAllowed", stat_map.get("oppPoints", 72)),
+            # ESPN returns percentages (50.6), model expects decimals (0.506)
+            "fgpct": stat_map.get("fieldGoalPct", 44.0) / 100.0,
+            "threepct": stat_map.get("threePointFieldGoalPct", 34.0) / 100.0,
+            "ftpct": stat_map.get("freeThrowPct", 72.0) / 100.0,
             "assists": stat_map.get("avgAssists", 14),
             "turnovers": stat_map.get("avgTurnovers", 12),
             "tempo": stat_map.get("avgPossessions", 68),
-            "orb_pct": stat_map.get("offReboundPct", 0.28),
             "steals": stat_map.get("avgSteals", 7),
             "blocks": stat_map.get("avgBlocks", 3.5),
+            # Derived stats for model features
+            "twopt_pct": stat_map.get("twoPointFieldGoalPct", 48.0) / 100.0,
+            "orb": stat_map.get("avgOffensiveRebounds", 10),
+            "drb": stat_map.get("avgDefensiveRebounds", 25),
+            "fga": stat_map.get("avgFieldGoalsAttempted", 60),
+            "fta": stat_map.get("avgFreeThrowsAttempted", 22),
+            "three_att": stat_map.get("avgThreePointFieldGoalsAttempted", 25),
+            "three_made": stat_map.get("avgThreePointFieldGoalsMade", 9),
+            "fgm": stat_map.get("avgFieldGoalsMade", 30),
+            "ftm": stat_map.get("avgFreeThrowsMade", 17),
+            "total_reb": stat_map.get("avgRebounds", 35),
         }
+        
+        # Compute advanced stats the model needs
+        fga = stats["fga"] or 60
+        fta = stats["fta"] or 22
+        fgm = stats["fgm"] or 30
+        ftm = stats["ftm"] or 17
+        three_made = stats["three_made"] or 9
+        ppg = stats["ppg"] or 75
+        total_reb = stats["total_reb"] or 35
+        orb = stats["orb"] or 10
+        drb = stats["drb"] or 25
+        
+        # eFG% = (FGM + 0.5 * 3PM) / FGA
+        stats["efg_pct"] = (fgm + 0.5 * three_made) / max(fga, 1)
+        # TS% = PTS / (2 * (FGA + 0.44 * FTA))
+        stats["ts_pct"] = ppg / max(2 * (fga + 0.44 * fta), 1)
+        # 3-point rate = 3PA / FGA
+        stats["three_rate"] = stats["three_att"] / max(fga, 1)
+        # Assist rate = AST / FGM
+        stats["assist_rate"] = stats["assists"] / max(fgm, 1)
+        # FTA rate = FTA / FGA
+        stats["fta_rate"] = fta / max(fga, 1)
+        # ORB% = ORB / total rebounds (rough estimate)
+        stats["orb_pct"] = orb / max(total_reb, 1)
+        # DRB% = DRB / total rebounds
+        stats["drb_pct"] = drb / max(total_reb, 1)
+        # ATO ratio
+        stats["ato_ratio"] = stats["assists"] / max(stats["turnovers"], 0.5)
+        # PPP = points per possession
+        poss = stats["tempo"] if stats["tempo"] > 0 else 68
+        stats["ppp"] = ppg / max(poss, 1)
 
         _cache_set(cache_key, stats)
         return stats
@@ -451,7 +493,7 @@ def predict_ncaa_full(request_data):
         "away_team_name": away_team_name,
         "neutral_site": neutral_site,
 
-        # ESPN base stats
+        # ESPN base stats (normalized to decimal format)
         "home_ppg": home_stats.get("ppg", 75), "away_ppg": away_stats.get("ppg", 75),
         "home_opp_ppg": home_stats.get("opp_ppg", 72), "away_opp_ppg": away_stats.get("opp_ppg", 72),
         "home_fgpct": home_stats.get("fgpct", 0.44), "away_fgpct": away_stats.get("fgpct", 0.44),
@@ -463,6 +505,23 @@ def predict_ncaa_full(request_data):
         "home_orb_pct": home_stats.get("orb_pct", 0.28), "away_orb_pct": away_stats.get("orb_pct", 0.28),
         "home_steals": home_stats.get("steals", 7), "away_steals": away_stats.get("steals", 7),
         "home_blocks": home_stats.get("blocks", 3.5), "away_blocks": away_stats.get("blocks", 3.5),
+        
+        # Advanced stats: ESPN-derived first, Supabase fallback
+        "home_efg_pct": home_stats.get("efg_pct", sb("home_efg_pct", 0.50)),
+        "away_efg_pct": away_stats.get("efg_pct", sb_away("home_efg_pct", 0.50)),
+        "home_twopt_pct": home_stats.get("twopt_pct", sb("home_twopt_pct", 0.48)),
+        "away_twopt_pct": away_stats.get("twopt_pct", sb_away("home_twopt_pct", 0.48)),
+        "home_three_rate": home_stats.get("three_rate", sb("home_three_rate", 0.35)),
+        "away_three_rate": away_stats.get("three_rate", sb_away("home_three_rate", 0.35)),
+        "home_assist_rate": home_stats.get("assist_rate", sb("home_assist_rate", 0.55)),
+        "away_assist_rate": away_stats.get("assist_rate", sb_away("home_assist_rate", 0.55)),
+        "home_drb_pct": home_stats.get("drb_pct", sb("home_drb_pct", 0.70)),
+        "away_drb_pct": away_stats.get("drb_pct", sb_away("home_drb_pct", 0.70)),
+        "home_ppp": home_stats.get("ppp", sb("home_ppp", 1.0)),
+        "away_ppp": away_stats.get("ppp", sb_away("home_ppp", 1.0)),
+        "home_fta_rate": home_stats.get("fta_rate", 0.34), "away_fta_rate": away_stats.get("fta_rate", 0.34),
+        "home_ato_ratio": home_stats.get("ato_ratio", 1.2), "away_ato_ratio": away_stats.get("ato_ratio", 1.2),
+        "home_ts_pct": home_stats.get("ts_pct", 0.53), "away_ts_pct": away_stats.get("ts_pct", 0.53),
 
         # Record
         "home_wins": home_record["wins"], "away_wins": away_record["wins"],
@@ -484,14 +543,8 @@ def predict_ncaa_full(request_data):
         # Elo
         "home_elo": sb("home_elo", 1500), "away_elo": sb_away("home_elo", 1500),
 
-        # Advanced stats from Supabase
+        # Supabase-only advanced stats (no ESPN equivalent)
         "home_pyth_residual": sb("home_pyth_residual"), "away_pyth_residual": sb_away("home_pyth_residual"),
-        "home_efg_pct": sb("home_efg_pct", 0.50), "away_efg_pct": sb_away("home_efg_pct", 0.50),
-        "home_twopt_pct": sb("home_twopt_pct", 0.48), "away_twopt_pct": sb_away("home_twopt_pct", 0.48),
-        "home_three_rate": sb("home_three_rate", 0.35), "away_three_rate": sb_away("home_three_rate", 0.35),
-        "home_assist_rate": sb("home_assist_rate", 0.55), "away_assist_rate": sb_away("home_assist_rate", 0.55),
-        "home_drb_pct": sb("home_drb_pct", 0.70), "away_drb_pct": sb_away("home_drb_pct", 0.70),
-        "home_ppp": sb("home_ppp", 1.0), "away_ppp": sb_away("home_ppp", 1.0),
         "home_opp_efg_pct": sb("home_opp_efg_pct", 0.50), "away_opp_efg_pct": sb_away("home_opp_efg_pct", 0.50),
         "home_opp_to_rate": sb("home_opp_to_rate", 0.18), "away_opp_to_rate": sb_away("home_opp_to_rate", 0.18),
         "home_opp_fta_rate": sb("home_opp_fta_rate", 0.30), "away_opp_fta_rate": sb_away("home_opp_fta_rate", 0.30),
@@ -622,17 +675,6 @@ def predict_ncaa_full(request_data):
         "is_bubble_game": request_data.get("is_bubble_game", 0),
         "is_early_season": request_data.get("is_early_season", 0),
         "importance_multiplier": request_data.get("importance_multiplier", 1.0),
-        "n_common_opps": 0,
-        "is_lookahead": 0,
-        "is_revenge_game": 0, "revenge_margin": 0.0,
-        "is_sandwich": 0, "def_rest_advantage": 0.0,
-        "luck_x_spread": 0.0,
-        "spread_regime": 1, "is_midweek": 0,
-        "style_familiarity": 0.5, "pace_leverage": 0.0, "pace_control_diff": 0.0,
-        "matchup_efg": 0.0, "matchup_to": 0.0, "matchup_orb": 0.0, "matchup_ft": 0.0,
-        "common_opp_diff": 0.0,
-        "fatigue_x_quality": 0.0, "rest_x_defense": 0.0,
-        "form_x_familiarity": 0.0, "consistency_x_spread": 0.0,
 
         # Form (from ESPN stats if available)
         "home_form": home_stats.get("form", 0), "away_form": away_stats.get("form", 0),
