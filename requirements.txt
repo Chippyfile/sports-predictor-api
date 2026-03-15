@@ -30,7 +30,7 @@ python-dateutil==2.9.0.post0
 pytz==2026.1.post1
 requests==2.32.3
 scikit-learn==1.8.0
-scipy==1.15.2
+scipy==1.13.1
 shap==0.45.1
 six==1.17.0
 slicer==0.0.8
@@ -43,4 +43,4 @@ xgboost==3.2.0
 # force redeploy Sun Mar  8 14:02:24 PDT 2026
 # redeploy 1773007329
 beautifulsoup4
-numpy==2.2.0
+numpy==1.26.4
