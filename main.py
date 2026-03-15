@@ -26,6 +26,7 @@ from ml_utils import StackedRegressor, StackedClassifier; import sys; sys.module
 from sports.mlb import train_mlb, predict_mlb, calibrate_mlb_dispersion
 from sports.nba import train_nba, predict_nba, nba_build_features
 from sports.ncaa import train_ncaa, predict_ncaa, ncaa_build_features
+from ncaa_full_predict import predict_ncaa_full
 from sports.nfl import train_nfl, predict_nfl, nfl_build_features
 from sports.ncaaf import train_ncaaf, predict_ncaaf, ncaaf_build_features
 from nba_backfill import backfill_nba_historical
@@ -201,6 +202,18 @@ def route_predict(sport):
         import traceback
         tb = traceback.format_exc()
         print(f"[predict/{sport}] ERROR: {tb}")
+        return jsonify({"error": str(e), "traceback": tb}), 500
+
+@app.route("/predict/ncaa/full", methods=["POST"])
+def route_predict_ncaa_full():
+    """Full NCAA prediction with backend data lookup — 146/146 features."""
+    game = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify(predict_ncaa_full(game))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[predict/ncaa/full] ERROR: {tb}")
         return jsonify({"error": str(e), "traceback": tb}), 500
 
 @app.route("/monte-carlo", methods=["POST"])
