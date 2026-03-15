@@ -537,3 +537,4 @@ def route_holdout_mlb():
 @app.route("/backtest/holdout/all")
 def route_holdout_all():
     return jsonify(season_holdout_all())
+# force reload Sun Mar 15 10:55:32 PDT 2026
