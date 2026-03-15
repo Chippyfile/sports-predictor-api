@@ -18,3 +18,27 @@ rolling_player_avg_w10.csv
 sweep_checkpoint_*.json
 referee_profiles.json
 *.backup
+# Training cache (local only, not for Railway)
+ncaa_training_data.parquet
+.ncaa_dump_timestamp
+ncaa_model_local.pkl
+
+# Scraping caches
+clutch_ft_cache.json
+clutch_ft.log
+conf_tourney_cache.json
+odds_api_cache.json
+pickcenter_cache.json
+ncaab_injuries.json
+odds_patches_matched.json
+
+# Logs
+*.log
+rolling_fix.log
+conf_fix.log
+odds_backfill.log
+
+# SHAP outputs
+shap_results.json
+shap_results_*.csv
+shap_top20.json
