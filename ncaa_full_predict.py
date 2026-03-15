@@ -286,91 +286,74 @@ def _fetch_supabase_team_data(team_id, team_name):
     if cached:
         return cached
 
-    # Get most recent game for this team from ncaa_historical
+    _COLS = (
+        "elo,pyth_residual,adj_oe,adj_de,"
+        "efg_pct,twopt_pct,three_rate,assist_rate,drb_pct,ppp,"
+        "opp_efg_pct,opp_to_rate,opp_fta_rate,opp_orb_pct,"
+        "luck,consistency,margin_trend,margin_accel,"
+        "opp_adj_form,wl_momentum,recovery_idx,is_after_loss,"
+        "ceiling,floor,margin_skew,scoring_entropy,bimodal,"
+        "def_stability,opp_suppression,def_versatility,"
+        "steal_foul_ratio,block_foul_ratio,transition_dep,"
+        "paint_pts,fastbreak_pts,fatigue_load,streak,"
+        "season_pct,regression_pressure,info_gain,overreaction,"
+        "scoring_source_entropy,ft_dependency,three_value,"
+        "concentration,to_conversion,three_divergence,"
+        "ppp_divergence,pace_adj_margin,pit_sos,"
+        "scoring_var,score_kurtosis,clutch_ratio,garbage_adj_ppp,"
+        "days_since_loss,games_since_blowout_loss,games_last_14,"
+        "rest_effect,momentum_halflife,win_aging,centrality,"
+        "dow_effect,conf_balance,eff_vol_ratio,"
+        "home_margin,away_margin,"
+        "run_vulnerability,anti_fragility,sos_trajectory,"
+        "margin_autocorr,blowout_asym,clutch_over_exp,ft_pressure,"
+        "fg_divergence,def_improvement,rhythm_disruption,"
+        "fouls,close_win_rate,games_last_7,"
+        "pts_off_to,"
+        "roll_star1_share,roll_top3_share,roll_bench_share,"
+        "roll_bench_pts,roll_largest_run,roll_drought_rate,"
+        "roll_lead_changes,roll_time_with_lead_pct,"
+        "roll_players_used,roll_hhi,roll_minutes_hhi,"
+        "roll_clutch_ft_pct,roll_garbage_pct,"
+        "roll_ats_pct,roll_ats_n,roll_ats_margin"
+    )
+
     try:
-        # Try by team_id first, then team_name
-        rows = sb_get(
+        # Query BOTH home and away appearances, take the most recent
+        home_select = ",".join([f"game_date,home_{c}" for c in _COLS.split(",")])
+        away_select = ",".join([f"game_date,away_{c}" for c in _COLS.split(",")])
+        # Deduplicate game_date in select
+        home_select = "game_date," + ",".join([f"home_{c}" for c in _COLS.split(",")])
+        away_select = "game_date," + ",".join([f"away_{c}" for c in _COLS.split(",")])
+
+        home_rows = sb_get(
             "ncaa_historical",
-            f"home_team_id=eq.{team_id}&order=game_date.desc&limit=1&select="
-            "home_elo,home_pyth_residual,home_adj_oe,home_adj_de,"
-            "home_efg_pct,home_twopt_pct,home_three_rate,home_assist_rate,home_drb_pct,home_ppp,"
-            "home_opp_efg_pct,home_opp_to_rate,home_opp_fta_rate,home_opp_orb_pct,"
-            "home_luck,home_consistency,home_margin_trend,home_margin_accel,"
-            "home_opp_adj_form,home_wl_momentum,home_recovery_idx,home_is_after_loss,"
-            "home_ceiling,home_floor,home_margin_skew,home_scoring_entropy,home_bimodal,"
-            "home_def_stability,home_opp_suppression,home_def_versatility,"
-            "home_steal_foul_ratio,home_block_foul_ratio,home_transition_dep,"
-            "home_paint_pts,home_fastbreak_pts,home_fatigue_load,home_streak,"
-            "home_season_pct,home_regression_pressure,home_info_gain,home_overreaction,"
-            "home_scoring_source_entropy,home_ft_dependency,home_three_value,"
-            "home_concentration,home_to_conversion,home_three_divergence,"
-            "home_ppp_divergence,home_pace_adj_margin,home_pit_sos,"
-            "home_scoring_var,home_score_kurtosis,home_clutch_ratio,home_garbage_adj_ppp,"
-            "home_days_since_loss,home_games_since_blowout_loss,home_games_last_14,"
-            "home_rest_effect,home_momentum_halflife,home_win_aging,home_centrality,"
-            "home_dow_effect,home_conf_balance,home_eff_vol_ratio,"
-            "home_home_margin,home_away_margin,"
-            "home_run_vulnerability,home_anti_fragility,home_sos_trajectory,"
-            "home_margin_autocorr,home_blowout_asym,home_clutch_over_exp,home_ft_pressure,"
-            "home_fg_divergence,home_def_improvement,home_rhythm_disruption,"
-            "home_fouls,home_close_win_rate,home_games_last_7,"
-            "home_pts_off_to,"
-            "home_roll_star1_share,home_roll_top3_share,home_roll_bench_share,"
-            "home_roll_bench_pts,home_roll_largest_run,home_roll_drought_rate,"
-            "home_roll_lead_changes,home_roll_time_with_lead_pct,"
-            "home_roll_players_used,home_roll_hhi,home_roll_minutes_hhi,"
-            "home_roll_clutch_ft_pct,home_roll_garbage_pct,"
-            "home_roll_ats_pct,home_roll_ats_n,home_roll_ats_margin"
+            f"home_team_id=eq.{team_id}&order=game_date.desc&limit=1&select={home_select}"
+        )
+        away_rows = sb_get(
+            "ncaa_historical",
+            f"away_team_id=eq.{team_id}&order=game_date.desc&limit=1&select={away_select}"
         )
 
-        if not rows:
-            # Try as away team
-            rows = sb_get(
-                "ncaa_historical",
-                f"away_team_id=eq.{team_id}&order=game_date.desc&limit=1&select="
-                "away_elo,away_pyth_residual,away_adj_oe,away_adj_de,"
-                "away_efg_pct,away_twopt_pct,away_three_rate,away_assist_rate,away_drb_pct,away_ppp,"
-                "away_opp_efg_pct,away_opp_to_rate,away_opp_fta_rate,away_opp_orb_pct,"
-                "away_luck,away_consistency,away_margin_trend,away_margin_accel,"
-                "away_opp_adj_form,away_wl_momentum,away_recovery_idx,away_is_after_loss,"
-                "away_ceiling,away_floor,away_margin_skew,away_scoring_entropy,away_bimodal,"
-                "away_def_stability,away_opp_suppression,away_def_versatility,"
-                "away_steal_foul_ratio,away_block_foul_ratio,away_transition_dep,"
-                "away_paint_pts,away_fastbreak_pts,away_fatigue_load,away_streak,"
-                "away_season_pct,away_regression_pressure,away_info_gain,away_overreaction,"
-                "away_scoring_source_entropy,away_ft_dependency,away_three_value,"
-                "away_concentration,away_to_conversion,away_three_divergence,"
-                "away_ppp_divergence,away_pace_adj_margin,away_pit_sos,"
-                "away_scoring_var,away_score_kurtosis,away_clutch_ratio,away_garbage_adj_ppp,"
-                "away_days_since_loss,away_games_since_blowout_loss,away_games_last_14,"
-                "away_rest_effect,away_momentum_halflife,away_win_aging,away_centrality,"
-                "away_dow_effect,away_conf_balance,away_eff_vol_ratio,"
-                "away_home_margin,away_away_margin,"
-                "away_run_vulnerability,away_anti_fragility,away_sos_trajectory,"
-                "away_margin_autocorr,away_blowout_asym,away_clutch_over_exp,away_ft_pressure,"
-                "away_fg_divergence,away_def_improvement,away_rhythm_disruption,"
-                "away_fouls,away_close_win_rate,away_games_last_7,"
-                "away_pts_off_to,"
-                "away_roll_star1_share,away_roll_top3_share,away_roll_bench_share,"
-                "away_roll_bench_pts,away_roll_largest_run,away_roll_drought_rate,"
-                "away_roll_lead_changes,away_roll_time_with_lead_pct,"
-                "away_roll_players_used,away_roll_hhi,away_roll_minutes_hhi,"
-                "away_roll_clutch_ft_pct,away_roll_garbage_pct,"
-                "away_roll_ats_pct,away_roll_ats_n,away_roll_ats_margin"
-            )
-            if rows:
-                # Rename away_ to home_ for consistency
-                row = rows[0]
-                result = {}
-                for k, v in row.items():
-                    new_key = k.replace("away_", "home_") if k.startswith("away_") else k
-                    result[new_key] = v
-                _cache_set(cache_key, result)
-                return result
+        # Pick the more recent one
+        home_date = (home_rows[0].get("game_date", "") or "") if home_rows else ""
+        away_date = (away_rows[0].get("game_date", "") or "") if away_rows else ""
+
+        if away_date > home_date and away_rows:
+            # Most recent game was as away — rename away_ to home_
+            row = away_rows[0]
+            result = {}
+            for k, v in row.items():
+                if k == "game_date":
+                    continue
+                new_key = k.replace("away_", "home_") if k.startswith("away_") else k
+                result[new_key] = v
+        elif home_rows:
+            result = {k: v for k, v in home_rows[0].items() if k != "game_date"}
+        else:
             _cache_set(cache_key, {})
             return {}
 
-        result = rows[0]
         _cache_set(cache_key, result)
         return result
     except Exception as e:
@@ -675,15 +658,6 @@ def predict_ncaa_full(request_data):
         "is_bubble_game": request_data.get("is_bubble_game", 0),
         "is_early_season": request_data.get("is_early_season", 0),
         "importance_multiplier": request_data.get("importance_multiplier", 1.0),
-# Matchup/situational features (computed features, default to neutral)
-        "n_common_opps": 0, "common_opp_diff": 0.0,
-        "is_lookahead": 0, "is_revenge_game": 0, "revenge_margin": 0.0,
-        "is_sandwich": 0, "def_rest_advantage": 0.0, "luck_x_spread": 0.0,
-        "spread_regime": 1, "is_midweek": 0,
-        "style_familiarity": 0.5, "pace_leverage": 0.0, "pace_control_diff": 0.0,
-        "matchup_efg": 0.0, "matchup_to": 0.0, "matchup_orb": 0.0, "matchup_ft": 0.0,
-        "fatigue_x_quality": 0.0, "rest_x_defense": 0.0,
-        "form_x_familiarity": 0.0, "consistency_x_spread": 0.0,
 
         # Form (from ESPN stats if available)
         "home_form": home_stats.get("form", 0), "away_form": away_stats.get("form", 0),
