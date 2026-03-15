@@ -87,7 +87,21 @@ def health():
         "mlb_dispersion": disp if disp else "not calibrated — POST /calibrate/mlb",
         "timestamp": datetime.utcnow().isoformat(),
     })
-
+    
+@app.route("/reload-model/<sport>", methods=["POST"])
+def route_reload_model(sport):
+    """Force reload model from Supabase (bypasses in-memory cache)."""
+    from db import _models
+    _models.pop(sport, None)
+    path = os.path.join(MODEL_DIR, f"{sport}.pkl")
+    if os.path.exists(path):
+        os.remove(path)
+    bundle = load_model(sport)
+    if bundle:
+        return jsonify({"status": "reloaded", "sport": sport,
+                       "mae_cv": bundle.get("mae_cv"),
+                       "trained_at": bundle.get("trained_at")})
+    return jsonify({"error": f"No model found for {sport}"}), 404
 
 # ═══════════════════════════════════════════════════════════════
 # ROUTES — Training
