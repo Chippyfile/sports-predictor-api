@@ -490,11 +490,15 @@ def ncaa_build_features(df):
     # ═══════════════════════════════════════════════════════════════
 
     # ── ESPN Odds — UNIFIED into mkt_spread/mkt_total above ──
-    # ESPN win probability edge is still a unique signal (not just spread)
-    _espn_wp = df["espn_home_win_pct"]
-    _espn_pred = df["espn_predictor_home_pct"]
-    df["espn_wp_edge"] = (_espn_wp - 0.5) * df["has_mkt"]
-    df["espn_predictor_edge"] = (_espn_pred - 0.5) * df["has_mkt"]
+    # ESPN win probability edge is a unique signal (not just spread)
+    # AUDIT FIX: Removed has_mkt gating — ESPN predictor is independent of spread data.
+    # Prefer predictor (BPI, available pre-game) over win_pct (in-game/post-game only).
+    _espn_wp = pd.to_numeric(df["espn_home_win_pct"], errors="coerce").fillna(0.5)
+    _espn_pred = pd.to_numeric(df["espn_predictor_home_pct"], errors="coerce").fillna(0.5)
+    # Use predictor when it has real data (!=0.5), else fall back to win_pct
+    _best_wp = np.where(_espn_pred != 0.5, _espn_pred, _espn_wp)
+    df["espn_wp_edge"] = _best_wp - 0.5
+    df["espn_predictor_edge"] = _espn_pred - 0.5
 
     # ── PBP Half Split Features ──
     df["half_margin_swing"] = df["home_2h_margin"] - df["home_1h_margin"]

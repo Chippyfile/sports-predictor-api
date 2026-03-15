@@ -105,6 +105,13 @@ def _fetch_espn_team_stats(team_id):
             for stat in cat.get("stats", []):
                 stat_map[stat.get("name", "")] = stat.get("value", 0)
 
+        # AUDIT: Log stat names containing poss/tempo/pace/point for debugging
+        _tempo_keys = [k for k in stat_map if any(w in k.lower() for w in ['poss', 'tempo', 'pace'])]
+        if _tempo_keys:
+            print(f"  [full_predict] ESPN tempo-related keys for {team_id}: {_tempo_keys}")
+        else:
+            print(f"  [full_predict] WARNING: No tempo/poss fields in ESPN stats for {team_id}. Available: {list(stat_map.keys())[:15]}...")
+
         stats = {
             "ppg": stat_map.get("avgPoints", 75),
             "opp_ppg": stat_map.get("avgPointsAllowed", stat_map.get("oppPoints", 72)),
@@ -114,7 +121,14 @@ def _fetch_espn_team_stats(team_id):
             "ftpct": stat_map.get("freeThrowPct", 72.0) / 100.0,
             "assists": stat_map.get("avgAssists", 14),
             "turnovers": stat_map.get("avgTurnovers", 12),
-            "tempo": stat_map.get("avgPossessions", 68),
+            # AUDIT FIX: ESPN uses different field names for tempo/possessions across endpoints.
+            # Try multiple names, then estimate from box score stats if all fail.
+            "tempo": (stat_map.get("avgPossessions")
+                      or stat_map.get("possessions")
+                      or stat_map.get("possessionsPerGame")
+                      or stat_map.get("totalPossessions")
+                      or stat_map.get("paceOfPlay")
+                      or 0),  # 0 = signal to estimate below
             "steals": stat_map.get("avgSteals", 7),
             "blocks": stat_map.get("avgBlocks", 3.5),
             # Derived stats for model features
@@ -140,6 +154,14 @@ def _fetch_espn_team_stats(team_id):
         total_reb = stats["total_reb"] or 35
         orb = stats["orb"] or 10
         drb = stats["drb"] or 25
+        turnovers = stats["turnovers"] or 12
+        
+        # AUDIT FIX: Estimate tempo from box score if ESPN didn't provide it
+        # Standard formula: possessions ≈ FGA - ORB + TO + 0.44 * FTA
+        if stats["tempo"] == 0 or stats["tempo"] is None:
+            estimated_tempo = fga - orb + turnovers + 0.44 * fta
+            stats["tempo"] = round(estimated_tempo, 1) if estimated_tempo > 40 else 68
+            print(f"  [full_predict] Tempo estimated from box score: {stats['tempo']}")
         
         # eFG% = (FGM + 0.5 * 3PM) / FGA
         stats["efg_pct"] = (fgm + 0.5 * three_made) / max(fga, 1)
@@ -393,6 +415,7 @@ def _fetch_supabase_team_data(team_id, team_name):
         "elo,pyth_residual,adj_oe,adj_de,"
         "efg_pct,twopt_pct,three_rate,assist_rate,drb_pct,ppp,"
         "opp_efg_pct,opp_to_rate,opp_fta_rate,opp_orb_pct,"
+        "opp_fgpct,opp_threepct,opp_ppg,sos,form,tempo,"
         "luck,consistency,margin_trend,margin_accel,"
         "opp_adj_form,wl_momentum,recovery_idx,is_after_loss,"
         "ceiling,floor,margin_skew,scoring_entropy,bimodal,"
@@ -593,7 +616,9 @@ def predict_ncaa_full(request_data):
         "home_ftpct": home_stats.get("ftpct", 0.72), "away_ftpct": away_stats.get("ftpct", 0.72),
         "home_assists": home_stats.get("assists", 14), "away_assists": away_stats.get("assists", 14),
         "home_turnovers": home_stats.get("turnovers", 12), "away_turnovers": away_stats.get("turnovers", 12),
-        "home_tempo": home_stats.get("tempo", 68), "away_tempo": away_stats.get("tempo", 68),
+        # AUDIT FIX: ESPN tempo often fails — use Supabase as fallback
+        "home_tempo": home_stats.get("tempo", 0) or sb("home_tempo", 68),
+        "away_tempo": away_stats.get("tempo", 0) or sb_away("home_tempo", 68),
         "home_orb_pct": home_stats.get("orb_pct", 0.28), "away_orb_pct": away_stats.get("orb_pct", 0.28),
         "home_steals": home_stats.get("steals", 7), "away_steals": away_stats.get("steals", 7),
         "home_blocks": home_stats.get("blocks", 3.5), "away_blocks": away_stats.get("blocks", 3.5),
@@ -618,7 +643,9 @@ def predict_ncaa_full(request_data):
         # Record
         "home_wins": home_record["wins"], "away_wins": away_record["wins"],
         "home_losses": home_record["losses"], "away_losses": away_record["losses"],
-        "home_sos": home_record.get("sos", 0.5), "away_sos": away_record.get("sos", 0.5),
+        # AUDIT FIX: Supabase sos is more reliable than ESPN record endpoint
+        "home_sos": sb("home_sos", 0) or home_record.get("sos", 0.5),
+        "away_sos": sb_away("home_sos", 0) or away_record.get("sos", 0.5),
         "home_rank": request_data.get("home_rank", 200), "away_rank": request_data.get("away_rank", 200),
         "home_rest_days": home_rest, "away_rest_days": away_rest,
 
@@ -792,19 +819,26 @@ def predict_ncaa_full(request_data):
         "matchup_orb": (home_stats.get("orb_pct", 0.28) - away_stats.get("orb_pct", 0.28)),
         "matchup_ft": (home_stats.get("fta_rate", 0.34) - away_stats.get("fta_rate", 0.34)),
         # Interaction features
+        # AUDIT FIX: These must match how ncaa_build_features sees them during training.
+        # ncaa_build_features just passes these through from raw columns, so we compute them here.
         "def_rest_advantage": (home_rest - away_rest) * sb("home_def_stability", 0) * 0.1,
         "luck_x_spread": sb("home_luck", 0) * market_spread * 0.01,
-        "fatigue_x_quality": sb("home_fatigue_load", 0) * request_data.get("away_adj_em", 0) * 0.01,
-        "rest_x_defense": (home_rest - away_rest) * sb("home_def_stability", 0) * 0.05,
-        "form_x_familiarity": 0.0,  # Set in post-processing
-        "consistency_x_spread": sb("home_consistency", 0) * market_spread * 0.01,
+        # AUDIT FIX: was one-sided (home fatigue only). Match training: differential concept.
+        "fatigue_x_quality": (sb("home_fatigue_load", 0) * request_data.get("away_adj_em", 0)
+                             - sb_away("home_fatigue_load", 0) * request_data.get("home_adj_em", 0)) * 0.01,
+        "rest_x_defense": (home_rest - away_rest) * (sb("home_def_stability", 0) + sb_away("home_def_stability", 0)) * 0.025,
+        "form_x_familiarity": 0.0,  # Set in post-processing after form_diff is computed
+        "consistency_x_spread": (sb("home_consistency", 0) - sb_away("home_consistency", 0)) * market_spread * 0.01,
 
         # ESPN opponent FG% (for def_fgpct_diff)
-        "home_opp_fgpct": sb("home_opp_efg_pct", 0.44), "away_opp_fgpct": sb_away("home_opp_efg_pct", 0.44),
-        "home_opp_threepct": sb("home_opp_fta_rate", 0.33), "away_opp_threepct": sb_away("home_opp_fta_rate", 0.33),
+        # AUDIT FIX: was using opp_efg_pct (eFG%) instead of actual opp_fgpct (FG%)
+        "home_opp_fgpct": sb("home_opp_fgpct", 0.43), "away_opp_fgpct": sb_away("home_opp_fgpct", 0.43),
+        # AUDIT FIX: was using opp_fta_rate instead of opp_threepct
+        "home_opp_threepct": sb("home_opp_threepct", 0.33), "away_opp_threepct": sb_away("home_opp_threepct", 0.33),
 
         # Form: from Supabase (ESPN doesn't have team form scores)
-        "home_form": sb("home_opp_adj_form", 0), "away_form": sb_away("home_opp_adj_form", 0),
+        # AUDIT FIX: was using home_opp_adj_form which duplicated opp_adj_form_diff
+        "home_form": sb("home_form", 0), "away_form": sb_away("home_form", 0),
     }
 
     # ── Build features and predict ──
@@ -896,9 +930,12 @@ def predict_ncaa_full(request_data):
         if h_sos != a_sos:
             X.loc[:, "sos_diff"] = h_sos - a_sos
 
-    # espn_wp_edge: from ESPN predictor
-    if "espn_wp_edge" in X.columns and r["espn_wp_edge"] == 0 and espn_wp != 0.5:
-        X.loc[:, "espn_wp_edge"] = espn_wp - 0.5
+    # espn_wp_edge: from ESPN predictor (BPI preferred, available pre-game)
+    # AUDIT FIX: prefer espn_pred over espn_wp, matching ncaa.py fix
+    if "espn_wp_edge" in X.columns and r["espn_wp_edge"] == 0:
+        best_wp = espn_pred if espn_pred != 0.5 else espn_wp
+        if best_wp != 0.5:
+            X.loc[:, "espn_wp_edge"] = best_wp - 0.5
 
     # games_last_14_diff: from Supabase
     if "games_last_14_diff" in X.columns and r["games_last_14_diff"] == 0:
