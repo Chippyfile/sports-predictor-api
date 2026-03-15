@@ -740,10 +740,13 @@ def predict_ncaa_full(request_data):
     margin_prob = 1.0 / (1.0 + 10.0 ** (-margin / SIGMA))
     margin_prob = max(0.05, min(0.95, margin_prob))
     classifier_disagrees = (margin > 2 and win_prob < 0.40) or (margin < -2 and win_prob > 0.60)
-    if classifier_disagrees:
-        # Blend: 70% margin-based, 30% classifier (don't fully discard classifier)
-        win_prob = 0.70 * margin_prob + 0.30 * win_prob
-        win_prob = max(0.05, min(0.95, win_prob))
+    # Dynamic blend: margin-based probability is more robust when features are missing;
+    # classifier is better-calibrated when all features are present.
+    # At 100% coverage → pure classifier. At 50% coverage → 50/50 blend.
+    coverage_ratio = non_zero / max(total, 1)
+    margin_weight = max(0.0, 1.0 - coverage_ratio)
+    win_prob = margin_weight * margin_prob + (1 - margin_weight) * win_prob
+    win_prob = max(0.05, min(0.95, win_prob))
 
     # SHAP
     shap_out = []
@@ -771,6 +774,7 @@ def predict_ncaa_full(request_data):
         "ml_win_prob_raw": round(raw_win_prob, 4),
         "margin_based_prob": round(margin_prob, 4),
         "classifier_overridden": classifier_disagrees,
+        "margin_weight": round(margin_weight, 3),
         "bias_correction_applied": round(bias, 3),
         "shap": shap_out,
         "feature_coverage": f"{non_zero}/{total}",
