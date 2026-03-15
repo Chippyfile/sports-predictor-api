@@ -202,7 +202,7 @@ def _fetch_espn_team_record(team_id):
 
 
 def _fetch_espn_game_info(game_id, game_date, pregame=False):
-    """Fetch referee, attendance, venue from ESPN game summary."""
+    """Fetch referee, attendance, venue, ESPN odds, win probs from ESPN game summary."""
     ttl = CACHE_TTL_PREGAME if pregame else CACHE_TTL_LONG
     cache_key = f"espn_game_{game_id}"
     cached = _cache_get(cache_key, ttl)
@@ -212,6 +212,8 @@ def _fetch_espn_game_info(game_id, game_date, pregame=False):
     info = {
         "referee_1": "", "referee_2": "", "referee_3": "",
         "attendance": 0, "venue_capacity": 8000, "venue_name": "",
+        "espn_spread": 0, "espn_over_under": 0,
+        "espn_home_win_pct": 0.5, "espn_predictor_home_pct": 0.5,
     }
 
     try:
@@ -232,11 +234,31 @@ def _fetch_espn_game_info(game_id, game_date, pregame=False):
             info[f"referee_{i+1}"] = name
 
         # Attendance & Venue
-        game_info = data.get("gameInfo", {})
-        info["attendance"] = game_info.get("attendance", 0) or 0
-        venue = game_info.get("venue", {})
+        gi = data.get("gameInfo", {})
+        info["attendance"] = gi.get("attendance", 0) or 0
+        venue = gi.get("venue", {})
         info["venue_capacity"] = venue.get("capacity", 8000) or 8000
         info["venue_name"] = venue.get("fullName", "")
+
+        # ESPN Odds (pickcenter / odds array)
+        odds = data.get("odds", [])
+        if odds:
+            primary = odds[0]
+            info["espn_spread"] = primary.get("spread", 0) or 0
+            info["espn_over_under"] = primary.get("overUnder", 0) or 0
+
+        # ESPN Predictor (win probability model)
+        predictor = data.get("predictor", {})
+        if predictor:
+            home_pred = predictor.get("homeTeam", {})
+            info["espn_predictor_home_pct"] = home_pred.get("gameProjection", 50) / 100.0
+
+        # ESPN Win Probability (BPI or similar)
+        winprob = data.get("winprobability", [])
+        if winprob:
+            # Last entry is current/final win probability
+            last = winprob[-1] if winprob else {}
+            info["espn_home_win_pct"] = last.get("homeWinPercentage", 0.5)
 
         _cache_set(cache_key, info)
         return info
@@ -273,6 +295,87 @@ def _compute_rest_days(team_id, game_date_str):
         return result
     except:
         return 3
+
+
+def _fetch_schedule_situations(team_id, game_date_str, opp_rank=200):
+    """Detect lookahead, sandwich, revenge situations from schedule."""
+    cache_key = f"sched_sit_{team_id}_{game_date_str}"
+    cached = _cache_get(cache_key, CACHE_TTL_LONG)
+    if cached:
+        return cached
+
+    result = {"is_lookahead": 0, "is_sandwich": 0, "is_revenge_game": 0, "revenge_margin": 0.0}
+
+    try:
+        r = requests.get(f"{ESPN_BASE}/teams/{team_id}/schedule", timeout=10)
+        if not r.ok:
+            return result
+        data = r.json()
+        game_date = datetime.fromisoformat(f"{game_date_str}T00:00:00")
+        events = data.get("events", [])
+
+        # Sort events by date
+        dated_events = []
+        for ev in events:
+            try:
+                ev_date = datetime.fromisoformat(ev["date"][:19])
+                comp = ev.get("competitions", [{}])[0]
+                completed = comp.get("status", {}).get("type", {}).get("completed", False)
+                # Get opponent rank if available
+                opp_r = 200
+                for team in comp.get("competitors", []):
+                    if str(team.get("id")) != str(team_id):
+                        opp_r = team.get("curatedRank", {}).get("current", 200) or 200
+                # Get score for revenge detection
+                score_h, score_a = 0, 0
+                is_home = False
+                for team in comp.get("competitors", []):
+                    if str(team.get("id")) == str(team_id):
+                        is_home = team.get("homeAway") == "home"
+                        if is_home:
+                            score_h = int(team.get("score", {}).get("value", 0) or 0)
+                        else:
+                            score_a = int(team.get("score", {}).get("value", 0) or 0)
+                    else:
+                        if team.get("homeAway") == "home":
+                            score_h = int(team.get("score", {}).get("value", 0) or 0)
+                        else:
+                            score_a = int(team.get("score", {}).get("value", 0) or 0)
+                winner_id = comp.get("competitors", [{}])[0].get("winner", False)
+                dated_events.append({
+                    "date": ev_date, "completed": completed, "opp_rank": opp_r,
+                    "score_h": score_h, "score_a": score_a, "is_home": is_home,
+                })
+            except:
+                continue
+
+        dated_events.sort(key=lambda x: x["date"])
+
+        # Find this game's position in schedule
+        prev_game = None
+        next_game = None
+        for i, ev in enumerate(dated_events):
+            if abs((ev["date"] - game_date).days) <= 1:
+                if i > 0:
+                    prev_game = dated_events[i - 1]
+                if i < len(dated_events) - 1:
+                    next_game = dated_events[i + 1]
+                break
+
+        # Lookahead: next game is against a top-25 team
+        if next_game and next_game["opp_rank"] <= 25:
+            result["is_lookahead"] = 1
+
+        # Sandwich: game between two games within 5 days
+        if prev_game and next_game:
+            days_span = (next_game["date"] - prev_game["date"]).days
+            if days_span <= 5:
+                result["is_sandwich"] = 1
+
+        _cache_set(cache_key, result)
+        return result
+    except:
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -413,7 +516,7 @@ def predict_ncaa_full(request_data):
 
     # ── Fetch all data in parallel-ish (Python threads for I/O) ──
     import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         fut_home_stats = executor.submit(_fetch_espn_team_stats, home_team_id)
         fut_away_stats = executor.submit(_fetch_espn_team_stats, away_team_id)
         fut_home_record = executor.submit(_fetch_espn_team_record, home_team_id)
@@ -424,6 +527,8 @@ def predict_ncaa_full(request_data):
         fut_home_sb = executor.submit(_fetch_supabase_team_data, home_team_id, home_team_name)
         fut_away_sb = executor.submit(_fetch_supabase_team_data, away_team_id, away_team_name)
         fut_spread = executor.submit(_fetch_spread_movement, game_id)
+        fut_home_sched = executor.submit(_fetch_schedule_situations, home_team_id, game_date, request_data.get("away_rank", 200))
+        fut_away_sched = executor.submit(_fetch_schedule_situations, away_team_id, game_date, request_data.get("home_rank", 200))
 
     home_stats = fut_home_stats.result() or {}
     away_stats = fut_away_stats.result() or {}
@@ -435,18 +540,20 @@ def predict_ncaa_full(request_data):
     home_sb = fut_home_sb.result()
     away_sb = fut_away_sb.result()
     spread_mvmt = fut_spread.result()
+    home_sched = fut_home_sched.result()
+    away_sched = fut_away_sched.result()
 
     # Injury data
     home_inj = get_team_injuries(home_team_name) if HAS_INJURY_CACHE else {"missing_starters": 0, "injury_penalty": 0.0}
     away_inj = get_team_injuries(away_team_name) if HAS_INJURY_CACHE else {"missing_starters": 0, "injury_penalty": 0.0}
 
-    # Market odds from request (frontend still passes these from Odds API)
-    market_spread = request_data.get("market_spread_home", 0)
-    market_total = request_data.get("market_ou_total", 0)
-    espn_spread = request_data.get("espn_spread", 0)
-    espn_ou = request_data.get("espn_over_under", 0)
-    espn_wp = request_data.get("espn_home_win_pct", 0.5)
-    espn_pred = request_data.get("espn_predictor_home_pct", 0.5)
+    # Market odds: ESPN game summary first, then request data fallback
+    espn_spread = game_info.get("espn_spread", 0) or request_data.get("espn_spread", 0)
+    espn_ou = game_info.get("espn_over_under", 0) or request_data.get("espn_over_under", 0)
+    espn_wp = game_info.get("espn_home_win_pct", 0.5)
+    espn_pred = game_info.get("espn_predictor_home_pct", 0.5)
+    market_spread = request_data.get("market_spread_home") or espn_spread or 0
+    market_total = request_data.get("market_ou_total") or espn_ou or 0
 
     # Helper to get from Supabase data with fallback
     def sb(key, default=0):
@@ -477,8 +584,10 @@ def predict_ncaa_full(request_data):
         "neutral_site": neutral_site,
 
         # ESPN base stats (normalized to decimal format)
+        # Use Supabase for opp_ppg since ESPN doesn't have avgPointsAllowed
         "home_ppg": home_stats.get("ppg", 75), "away_ppg": away_stats.get("ppg", 75),
-        "home_opp_ppg": home_stats.get("opp_ppg", 72), "away_opp_ppg": away_stats.get("opp_ppg", 72),
+        "home_opp_ppg": sb("home_opp_ppg") or home_stats.get("opp_ppg", 72),
+        "away_opp_ppg": sb_away("home_opp_ppg") or away_stats.get("opp_ppg", 72),
         "home_fgpct": home_stats.get("fgpct", 0.44), "away_fgpct": away_stats.get("fgpct", 0.44),
         "home_threepct": home_stats.get("threepct", 0.34), "away_threepct": away_stats.get("threepct", 0.34),
         "home_ftpct": home_stats.get("ftpct", 0.72), "away_ftpct": away_stats.get("ftpct", 0.72),
@@ -659,18 +768,43 @@ def predict_ncaa_full(request_data):
         "is_early_season": request_data.get("is_early_season", 0),
         "importance_multiplier": request_data.get("importance_multiplier", 1.0),
 
-# Matchup/situational features (computed, default to neutral)
-        "n_common_opps": 0, "common_opp_diff": 0.0,
-        "is_lookahead": 0, "is_revenge_game": 0, "revenge_margin": 0.0,
-        "is_sandwich": 0, "def_rest_advantage": 0.0, "luck_x_spread": 0.0,
-        "spread_regime": 1, "is_midweek": 0,
-        "style_familiarity": 0.5, "pace_leverage": 0.0, "pace_control_diff": 0.0,
-        "matchup_efg": 0.0, "matchup_to": 0.0, "matchup_orb": 0.0, "matchup_ft": 0.0,
-        "fatigue_x_quality": 0.0, "rest_x_defense": 0.0,
-        "form_x_familiarity": 0.0, "consistency_x_spread": 0.0,
+        # Matchup/situational features — computed from available data
+        "n_common_opps": 0,  # Would need full game-by-game comparison
+        "common_opp_diff": 0.0,
+        # Schedule situations (from ESPN schedule analysis)
+        "is_lookahead": home_sched.get("is_lookahead", 0) or away_sched.get("is_lookahead", 0),
+        "is_revenge_game": home_sched.get("is_revenge_game", 0),
+        "revenge_margin": home_sched.get("revenge_margin", 0.0),
+        "is_sandwich": home_sched.get("is_sandwich", 0) or away_sched.get("is_sandwich", 0),
+        # Spread regime: close game (1), medium (2), blowout (3)
+        "spread_regime": 1 if abs(market_spread) < 5 else (2 if abs(market_spread) < 12 else 3),
+        # Midweek: Mon-Thu = 1
+        "is_midweek": 1 if datetime.fromisoformat(f"{game_date}T00:00:00").weekday() < 4 else 0,
+        # Style familiarity: approximate from tempo similarity
+        "style_familiarity": min(1.0, 1.0 - abs(home_stats.get("tempo", 68) - away_stats.get("tempo", 68)) / 20.0),
+        # Pace leverage: how much pace mismatch benefits the faster team
+        "pace_leverage": (home_stats.get("tempo", 68) - away_stats.get("tempo", 68)) * 0.1,
+        # Pace control diff
+        "pace_control_diff": (sb("home_pace_adj_margin") - sb_away("home_pace_adj_margin")) * 0.1 if sb("home_pace_adj_margin") else 0.0,
+        # Matchup Four Factors (approximate from team stats)
+        "matchup_efg": (home_stats.get("efg_pct", 0.50) - away_stats.get("efg_pct", 0.50)),
+        "matchup_to": (away_stats.get("turnovers", 12) - home_stats.get("turnovers", 12)) / 20.0,
+        "matchup_orb": (home_stats.get("orb_pct", 0.28) - away_stats.get("orb_pct", 0.28)),
+        "matchup_ft": (home_stats.get("fta_rate", 0.34) - away_stats.get("fta_rate", 0.34)),
+        # Interaction features
+        "def_rest_advantage": (home_rest - away_rest) * sb("home_def_stability", 0) * 0.1,
+        "luck_x_spread": sb("home_luck", 0) * market_spread * 0.01,
+        "fatigue_x_quality": sb("home_fatigue_load", 0) * request_data.get("away_adj_em", 0) * 0.01,
+        "rest_x_defense": (home_rest - away_rest) * sb("home_def_stability", 0) * 0.05,
+        "form_x_familiarity": 0.0,  # Set in post-processing
+        "consistency_x_spread": sb("home_consistency", 0) * market_spread * 0.01,
 
-        # Form (from ESPN stats if available)
-        "home_form": home_stats.get("form", 0), "away_form": away_stats.get("form", 0),
+        # ESPN opponent FG% (for def_fgpct_diff)
+        "home_opp_fgpct": sb("home_opp_efg_pct", 0.44), "away_opp_fgpct": sb_away("home_opp_efg_pct", 0.44),
+        "home_opp_threepct": sb("home_opp_fta_rate", 0.33), "away_opp_threepct": sb_away("home_opp_fta_rate", 0.33),
+
+        # Form: from Supabase (ESPN doesn't have team form scores)
+        "home_form": sb("home_opp_adj_form", 0), "away_form": sb_away("home_opp_adj_form", 0),
     }
 
     # ── Build features and predict ──
@@ -715,6 +849,90 @@ def predict_ncaa_full(request_data):
             X.loc[:, "ref_foul_rate"] = avg_fr
         if "ref_ou_bias" in X.columns and X["ref_ou_bias"].iloc[0] == 0:
             X.loc[:, "ref_ou_bias"] = avg_ou
+
+    # ═══ Post-processing: fill remaining zero features from available data ═══
+    r = X.iloc[0]  # Single row reference
+
+    # after_loss_either: should be 1 if either team just lost
+    if "after_loss_either" in X.columns and r["after_loss_either"] == 0:
+        h_after = sb("home_is_after_loss", 0)
+        a_after = sb_away("home_is_after_loss", 0)
+        if h_after or a_after:
+            X.loc[:, "after_loss_either"] = 1
+
+    # form_x_familiarity: form_diff * style_familiarity
+    if "form_x_familiarity" in X.columns and "form_diff" in X.columns and "style_familiarity" in X.columns:
+        X.loc[:, "form_x_familiarity"] = r["form_diff"] * r["style_familiarity"]
+
+    # opp_ppg_diff: if 0, fill from Supabase
+    if "opp_ppg_diff" in X.columns and r["opp_ppg_diff"] == 0:
+        h_opp = sb("home_opp_ppg") or 72
+        a_opp = sb_away("home_opp_ppg") or 72
+        if h_opp and a_opp:
+            X.loc[:, "opp_ppg_diff"] = h_opp - a_opp
+
+    # def_fgpct_diff: opponent FG% differential
+    if "def_fgpct_diff" in X.columns and r["def_fgpct_diff"] == 0:
+        h_opp_fg = sb("home_opp_efg_pct", 0.44)
+        a_opp_fg = sb_away("home_opp_efg_pct", 0.44)
+        X.loc[:, "def_fgpct_diff"] = h_opp_fg - a_opp_fg
+
+    # win_pct_diff: from record
+    if "win_pct_diff" in X.columns and r["win_pct_diff"] == 0:
+        h_w, h_l = home_record["wins"], home_record["losses"]
+        a_w, a_l = away_record["wins"], away_record["losses"]
+        h_pct = h_w / max(h_w + h_l, 1)
+        a_pct = a_w / max(a_w + a_l, 1)
+        X.loc[:, "win_pct_diff"] = h_pct - a_pct
+
+    # hca_pts: 0 for neutral is correct, but for non-neutral fill conference HCA
+    if "hca_pts" in X.columns and r["hca_pts"] == 0 and not neutral_site:
+        X.loc[:, "hca_pts"] = 3.0  # Default HCA
+
+    # sos_diff: from ESPN record
+    if "sos_diff" in X.columns and r["sos_diff"] == 0:
+        h_sos = home_record.get("sos", 0.5)
+        a_sos = away_record.get("sos", 0.5)
+        if h_sos != a_sos:
+            X.loc[:, "sos_diff"] = h_sos - a_sos
+
+    # espn_wp_edge: from ESPN predictor
+    if "espn_wp_edge" in X.columns and r["espn_wp_edge"] == 0 and espn_wp != 0.5:
+        X.loc[:, "espn_wp_edge"] = espn_wp - 0.5
+
+    # games_last_14_diff: from Supabase
+    if "games_last_14_diff" in X.columns and r["games_last_14_diff"] == 0:
+        h_g14 = sb("home_games_last_14", 4)
+        a_g14 = sb_away("home_games_last_14", 4)
+        X.loc[:, "games_last_14_diff"] = h_g14 - a_g14
+
+    # conf_balance_diff: from Supabase
+    if "conf_balance_diff" in X.columns and r["conf_balance_diff"] == 0:
+        h_cb = sb("home_conf_balance", 0)
+        a_cb = sb_away("home_conf_balance", 0)
+        if h_cb or a_cb:
+            X.loc[:, "conf_balance_diff"] = h_cb - a_cb
+
+    # anti_fragility_diff: from Supabase
+    if "anti_fragility_diff" in X.columns and r["anti_fragility_diff"] == 0:
+        h_af = sb("home_anti_fragility", 0)
+        a_af = sb_away("home_anti_fragility", 0)
+        if h_af or a_af:
+            X.loc[:, "anti_fragility_diff"] = h_af - a_af
+
+    # roll_clutch_ft_diff: from Supabase rolling data
+    if "roll_clutch_ft_diff" in X.columns and r["roll_clutch_ft_diff"] == 0:
+        h_cft = sb("home_roll_clutch_ft_pct", 0.70)
+        a_cft = sb_away("home_roll_clutch_ft_pct", 0.70)
+        if h_cft != 0.70 or a_cft != 0.70:
+            X.loc[:, "roll_clutch_ft_diff"] = h_cft - a_cft
+
+    # centrality_diff: from Supabase
+    if "centrality_diff" in X.columns and r["centrality_diff"] == 0:
+        h_c = sb("home_centrality", 1.0)
+        a_c = sb_away("home_centrality", 1.0)
+        if h_c != a_c:
+            X.loc[:, "centrality_diff"] = h_c - a_c
 
     # Count real vs default features
     non_zero = (X.iloc[0] != 0).sum()
