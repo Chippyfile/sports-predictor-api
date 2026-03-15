@@ -1428,6 +1428,13 @@ def train_ncaa():
         }
 
 def predict_ncaa(game: dict):
+    # Auto-inject injury data from Covers.com (refreshes every 4h)
+    try:
+        from injury_cache import inject_injuries
+        game = inject_injuries(game)
+    except Exception:
+        pass  # Graceful fallback — injuries default to 0
+
     bundle = load_model("ncaa")
     if not bundle:
         return {"error": "NCAAB model not trained — call /train/ncaa first"}

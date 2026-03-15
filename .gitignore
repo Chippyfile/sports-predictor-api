@@ -42,3 +42,4 @@ odds_backfill.log
 shap_results.json
 shap_results_*.csv
 shap_top20.json
+injury_update_log.json

@@ -168,12 +168,12 @@ for feat, val in sorted_new:
 results = {
     "n_features": len(feature_cols),
     "n_games": len(X),
-    "top_20": [(f, round(float(v), 4), round(v/total_shap*100, 2)) for f, v in feature_importance[:20]],
-    "new_features": [(f, round(float(v), 4), round(v/total_shap*100, 2)) for f, v in sorted_new],
+    "top_20": [(f, round(float(v.item() if hasattr(v, "item") else v), 4), round(v/total_shap*100, 2)) for f, v in feature_importance[:20]],
+    "new_features": [(f, round(float(v.item() if hasattr(v, "item") else v), 4), round(v/total_shap*100, 2)) for f, v in sorted_new],
     "new_features_total_pct": round(total_new_pct, 2),
 }
 
 import json
 with open("shap_results.json", "w") as f:
-    json.dump(results, f, indent=2)
+    json.dump(results, f, indent=2, default=lambda x: float(x))
 print(f"\n  Saved to shap_results.json")

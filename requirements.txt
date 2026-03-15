@@ -43,3 +43,4 @@ Werkzeug==3.1.6
 xgboost==2.1.1
 # force redeploy Sun Mar  8 14:02:24 PDT 2026
 # redeploy 1773007329
+beautifulsoup4
