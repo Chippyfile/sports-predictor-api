@@ -236,6 +236,7 @@ def _fetch_espn_game_info(game_id, game_date, pregame=False):
         "attendance": 0, "venue_capacity": 8000, "venue_name": "",
         "espn_spread": 0, "espn_over_under": 0,
         "espn_home_win_pct": 0.5, "espn_predictor_home_pct": 0.5,
+        "is_conference_competition": 0,
     }
 
     try:
@@ -281,6 +282,19 @@ def _fetch_espn_game_info(game_id, game_date, pregame=False):
             first = winprob[0]
             info["espn_home_win_pct"] = first.get("homeWinPercentage", 0.5)
 
+        # Conference tournament detection from header/competition
+        header = data.get("header", {})
+        for comp in header.get("competitions", []):
+            if comp.get("conferenceCompetition", False):
+                info["is_conference_competition"] = 1
+        # Also check notes for tournament keywords
+        notes = header.get("gameNote", "") or ""
+        season_notes = data.get("seasonseries", {})
+        for note in header.get("competitions", [{}])[0].get("notes", []):
+            headline = note.get("headline", "") or ""
+            if any(kw in headline.lower() for kw in ["tournament", "semifinal", "quarterfinal", "championship", "final"]):
+                info["is_conference_competition"] = 1
+
         _cache_set(cache_key, info)
         return info
     except:
@@ -319,13 +333,17 @@ def _compute_rest_days(team_id, game_date_str):
 
 
 def _fetch_schedule_situations(team_id, game_date_str, opp_rank=200):
-    """Detect lookahead, sandwich, revenge situations from schedule."""
+    """Detect lookahead, sandwich, revenge, after_loss, games_last_14, record, opponents."""
     cache_key = f"sched_sit_{team_id}_{game_date_str}"
     cached = _cache_get(cache_key, CACHE_TTL_LONG)
     if cached:
         return cached
 
-    result = {"is_lookahead": 0, "is_sandwich": 0, "is_revenge_game": 0, "revenge_margin": 0.0}
+    result = {
+        "is_lookahead": 0, "is_sandwich": 0, "is_revenge_game": 0, "revenge_margin": 0.0,
+        "after_loss": 0, "games_last_14": 0, "wins": 0, "losses": 0,
+        "opponents": [],  # list of {"opp_id": str, "margin": float, "completed": bool}
+    }
 
     try:
         r = requests.get(f"{ESPN_BASE}/teams/{team_id}/schedule", timeout=10)
@@ -335,44 +353,63 @@ def _fetch_schedule_situations(team_id, game_date_str, opp_rank=200):
         game_date = datetime.fromisoformat(f"{game_date_str}T00:00:00")
         events = data.get("events", [])
 
-        # Sort events by date
+        # Parse all events
         dated_events = []
         for ev in events:
             try:
                 ev_date = datetime.fromisoformat(ev["date"][:19])
                 comp = ev.get("competitions", [{}])[0]
                 completed = comp.get("status", {}).get("type", {}).get("completed", False)
-                # Get opponent rank if available
                 opp_r = 200
-                for team in comp.get("competitors", []):
-                    if str(team.get("id")) != str(team_id):
-                        opp_r = team.get("curatedRank", {}).get("current", 200) or 200
-                # Get score for revenge detection
-                score_h, score_a = 0, 0
+                opp_id = ""
+                score_team, score_opp = 0, 0
                 is_home = False
                 for team in comp.get("competitors", []):
-                    if str(team.get("id")) == str(team_id):
-                        is_home = team.get("homeAway") == "home"
-                        if is_home:
-                            score_h = int(team.get("score", {}).get("value", 0) or 0)
-                        else:
-                            score_a = int(team.get("score", {}).get("value", 0) or 0)
+                    tid = str(team.get("id", ""))
+                    if tid != str(team_id):
+                        opp_r = team.get("curatedRank", {}).get("current", 200) or 200
+                        opp_id = tid
+                        score_opp = int(team.get("score", {}).get("value", 0) or 0)
                     else:
-                        if team.get("homeAway") == "home":
-                            score_h = int(team.get("score", {}).get("value", 0) or 0)
-                        else:
-                            score_a = int(team.get("score", {}).get("value", 0) or 0)
-                winner_id = comp.get("competitors", [{}])[0].get("winner", False)
+                        is_home = team.get("homeAway") == "home"
+                        score_team = int(team.get("score", {}).get("value", 0) or 0)
                 dated_events.append({
                     "date": ev_date, "completed": completed, "opp_rank": opp_r,
-                    "score_h": score_h, "score_a": score_a, "is_home": is_home,
+                    "opp_id": opp_id, "score_team": score_team, "score_opp": score_opp,
+                    "is_home": is_home,
                 })
             except:
                 continue
 
         dated_events.sort(key=lambda x: x["date"])
 
-        # Find this game's position in schedule
+        # Compute record, opponents list, games_last_14, after_loss
+        completed_before = [e for e in dated_events if e["completed"] and e["date"] < game_date]
+        for e in completed_before:
+            if e["score_team"] > e["score_opp"]:
+                result["wins"] += 1
+            elif e["score_team"] < e["score_opp"]:
+                result["losses"] += 1
+            if e["opp_id"]:
+                result["opponents"].append({
+                    "opp_id": e["opp_id"],
+                    "margin": e["score_team"] - e["score_opp"],
+                    "completed": True,
+                })
+
+        # After loss: did the last completed game end in a loss?
+        if completed_before:
+            last = completed_before[-1]
+            if last["score_team"] < last["score_opp"]:
+                result["after_loss"] = 1
+
+        # Games in last 14 days
+        cutoff_14 = game_date - timedelta(days=14)
+        result["games_last_14"] = sum(
+            1 for e in completed_before if e["date"] >= cutoff_14
+        )
+
+        # Find this game's position for lookahead/sandwich
         prev_game = None
         next_game = None
         for i, ev in enumerate(dated_events):
@@ -397,6 +434,22 @@ def _fetch_schedule_situations(team_id, game_date_str, opp_rank=200):
         return result
     except:
         return result
+
+
+def _compute_common_opponents(home_sched, away_sched):
+    """Find common opponents and compute margin differential."""
+    home_opps = {o["opp_id"]: o["margin"] for o in home_sched.get("opponents", []) if o.get("completed")}
+    away_opps = {o["opp_id"]: o["margin"] for o in away_sched.get("opponents", []) if o.get("completed")}
+
+    common_ids = set(home_opps.keys()) & set(away_opps.keys())
+    n_common = len(common_ids)
+    if n_common == 0:
+        return 0, 0.0
+
+    # Average margin difference against common opponents
+    margin_diffs = [home_opps[cid] - away_opps[cid] for cid in common_ids]
+    avg_diff = sum(margin_diffs) / len(margin_diffs)
+    return n_common, round(avg_diff, 2)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -565,6 +618,15 @@ def predict_ncaa_full(request_data):
     home_sched = fut_home_sched.result()
     away_sched = fut_away_sched.result()
 
+    # Common opponents from schedule data
+    n_common_opps, common_opp_diff = _compute_common_opponents(home_sched, away_sched)
+
+    # Conference tournament: auto-detect from ESPN game summary, fallback to request
+    is_conf_tourney = (
+        game_info.get("is_conference_competition", 0)
+        or request_data.get("is_conference_tournament", 0)
+    )
+
     # Injury data
     home_inj = get_team_injuries(home_team_name) if HAS_INJURY_CACHE else {"missing_starters": 0, "injury_penalty": 0.0}
     away_inj = get_team_injuries(away_team_name) if HAS_INJURY_CACHE else {"missing_starters": 0, "injury_penalty": 0.0}
@@ -639,9 +701,11 @@ def predict_ncaa_full(request_data):
         "home_ato_ratio": home_stats.get("ato_ratio", 1.2), "away_ato_ratio": away_stats.get("ato_ratio", 1.2),
         "home_ts_pct": home_stats.get("ts_pct", 0.53), "away_ts_pct": away_stats.get("ts_pct", 0.53),
 
-        # Record
-        "home_wins": home_record["wins"], "away_wins": away_record["wins"],
-        "home_losses": home_record["losses"], "away_losses": away_record["losses"],
+        # Record — prefer ESPN record, but if it returned defaults (15/10), use schedule
+        "home_wins": home_record["wins"] if home_record["wins"] != 15 else home_sched.get("wins", 15),
+        "away_wins": away_record["wins"] if away_record["wins"] != 15 else away_sched.get("wins", 15),
+        "home_losses": home_record["losses"] if home_record["losses"] != 10 else home_sched.get("losses", 10),
+        "away_losses": away_record["losses"] if away_record["losses"] != 10 else away_sched.get("losses", 10),
         # AUDIT FIX: Supabase sos is more reliable than ESPN record endpoint
         "home_sos": sb("home_sos", 0) or home_record.get("sos", 0.5),
         "away_sos": sb_away("home_sos", 0) or away_record.get("sos", 0.5),
@@ -676,7 +740,8 @@ def predict_ncaa_full(request_data):
         "home_opp_adj_form": sb("home_opp_adj_form"), "away_opp_adj_form": sb_away("home_opp_adj_form"),
         "home_wl_momentum": sb("home_wl_momentum"), "away_wl_momentum": sb_away("home_wl_momentum"),
         "home_recovery_idx": sb("home_recovery_idx"), "away_recovery_idx": sb_away("home_recovery_idx"),
-        "home_is_after_loss": sb("home_is_after_loss"), "away_is_after_loss": sb_away("home_is_after_loss"),
+        "home_is_after_loss": sb("home_is_after_loss") or home_sched.get("after_loss", 0),
+        "away_is_after_loss": sb_away("home_is_after_loss") or away_sched.get("after_loss", 0),
         "home_ceiling": sb("home_ceiling", 15), "away_ceiling": sb_away("home_ceiling", 15),
         "home_floor": sb("home_floor", -10), "away_floor": sb_away("home_floor", -10),
         "home_margin_skew": sb("home_margin_skew"), "away_margin_skew": sb_away("home_margin_skew"),
@@ -711,7 +776,8 @@ def predict_ncaa_full(request_data):
         "home_garbage_adj_ppp": sb("home_garbage_adj_ppp", 1.0), "away_garbage_adj_ppp": sb_away("home_garbage_adj_ppp", 1.0),
         "home_days_since_loss": sb("home_days_since_loss", 5), "away_days_since_loss": sb_away("home_days_since_loss", 5),
         "home_games_since_blowout_loss": sb("home_games_since_blowout_loss", 10), "away_games_since_blowout_loss": sb_away("home_games_since_blowout_loss", 10),
-        "home_games_last_14": sb("home_games_last_14", 4), "away_games_last_14": sb_away("home_games_last_14", 4),
+        "home_games_last_14": sb("home_games_last_14") or home_sched.get("games_last_14", 4),
+        "away_games_last_14": sb_away("home_games_last_14") or away_sched.get("games_last_14", 4),
         "home_rest_effect": sb("home_rest_effect"), "away_rest_effect": sb_away("home_rest_effect"),
         "home_momentum_halflife": sb("home_momentum_halflife", 1.0), "away_momentum_halflife": sb_away("home_momentum_halflife", 1.0),
         "home_win_aging": sb("home_win_aging", 1.0), "away_win_aging": sb_away("home_win_aging", 1.0),
@@ -788,15 +854,15 @@ def predict_ncaa_full(request_data):
         "away_missing_starters": away_inj["missing_starters"],
 
         # Context
-        "is_conference_tournament": request_data.get("is_conference_tournament", 0),
+        "is_conference_tournament": is_conf_tourney,
         "is_ncaa_tournament": request_data.get("is_ncaa_tournament", 0),
         "is_bubble_game": request_data.get("is_bubble_game", 0),
         "is_early_season": request_data.get("is_early_season", 0),
         "importance_multiplier": request_data.get("importance_multiplier", 1.0),
 
         # Matchup/situational features — computed from available data
-        "n_common_opps": 0,  # Would need full game-by-game comparison
-        "common_opp_diff": 0.0,
+        "n_common_opps": n_common_opps,
+        "common_opp_diff": common_opp_diff,
         # Schedule situations (from ESPN schedule analysis)
         "is_lookahead": home_sched.get("is_lookahead", 0) or away_sched.get("is_lookahead", 0),
         "is_revenge_game": home_sched.get("is_revenge_game", 0),
@@ -820,12 +886,12 @@ def predict_ncaa_full(request_data):
         # Interaction features
         # AUDIT FIX: These must match how ncaa_build_features sees them during training.
         # ncaa_build_features just passes these through from raw columns, so we compute them here.
-        "def_rest_advantage": (home_rest - away_rest) * sb("home_def_stability", 0) * 0.1,
+        "def_rest_advantage": (home_rest - away_rest) * (sb("home_def_stability") or 0.5) * 0.1,
         "luck_x_spread": sb("home_luck", 0) * market_spread * 0.01,
         # AUDIT FIX: was one-sided (home fatigue only). Match training: differential concept.
         "fatigue_x_quality": (sb("home_fatigue_load", 0) * request_data.get("away_adj_em", 0)
                              - sb_away("home_fatigue_load", 0) * request_data.get("home_adj_em", 0)) * 0.01,
-        "rest_x_defense": (home_rest - away_rest) * (sb("home_def_stability", 0) + sb_away("home_def_stability", 0)) * 0.025,
+        "rest_x_defense": (home_rest - away_rest) * ((sb("home_def_stability") or 0.5) + (sb_away("home_def_stability") or 0.5)) * 0.025,
         "form_x_familiarity": 0.0,  # Set in post-processing after form_diff is computed
         "consistency_x_spread": (sb("home_consistency", 0) - sb_away("home_consistency", 0)) * market_spread * 0.01,
 
@@ -888,8 +954,8 @@ def predict_ncaa_full(request_data):
 
     # after_loss_either: should be 1 if either team just lost
     if "after_loss_either" in X.columns and r["after_loss_either"] == 0:
-        h_after = sb("home_is_after_loss", 0)
-        a_after = sb_away("home_is_after_loss", 0)
+        h_after = sb("home_is_after_loss", 0) or home_sched.get("after_loss", 0)
+        a_after = sb_away("home_is_after_loss", 0) or away_sched.get("after_loss", 0)
         if h_after or a_after:
             X.loc[:, "after_loss_either"] = 1
 
@@ -910,13 +976,17 @@ def predict_ncaa_full(request_data):
         a_opp_fg = sb_away("home_opp_efg_pct", 0.44)
         X.loc[:, "def_fgpct_diff"] = h_opp_fg - a_opp_fg
 
-    # win_pct_diff: from record
+    # win_pct_diff: from record — prefer schedule data over ESPN record defaults
     if "win_pct_diff" in X.columns and r["win_pct_diff"] == 0:
-        h_w, h_l = home_record["wins"], home_record["losses"]
-        a_w, a_l = away_record["wins"], away_record["losses"]
+        # Use schedule-derived record if ESPN returned defaults (15/10)
+        h_w = home_sched.get("wins", 0) or home_record["wins"]
+        h_l = home_sched.get("losses", 0) or home_record["losses"]
+        a_w = away_sched.get("wins", 0) or away_record["wins"]
+        a_l = away_sched.get("losses", 0) or away_record["losses"]
         h_pct = h_w / max(h_w + h_l, 1)
         a_pct = a_w / max(a_w + a_l, 1)
-        X.loc[:, "win_pct_diff"] = h_pct - a_pct
+        if h_pct != a_pct:
+            X.loc[:, "win_pct_diff"] = h_pct - a_pct
 
     # hca_pts: 0 for neutral is correct, but for non-neutral fill conference HCA
     if "hca_pts" in X.columns and r["hca_pts"] == 0 and not neutral_site:
@@ -936,11 +1006,12 @@ def predict_ncaa_full(request_data):
         if best_wp != 0.5:
             X.loc[:, "espn_wp_edge"] = best_wp - 0.5
 
-    # games_last_14_diff: from Supabase
+    # games_last_14_diff: Supabase first, then schedule fallback
     if "games_last_14_diff" in X.columns and r["games_last_14_diff"] == 0:
-        h_g14 = sb("home_games_last_14", 4)
-        a_g14 = sb_away("home_games_last_14", 4)
-        X.loc[:, "games_last_14_diff"] = h_g14 - a_g14
+        h_g14 = sb("home_games_last_14") or home_sched.get("games_last_14", 4)
+        a_g14 = sb_away("home_games_last_14") or away_sched.get("games_last_14", 4)
+        if h_g14 != a_g14:
+            X.loc[:, "games_last_14_diff"] = h_g14 - a_g14
 
     # conf_balance_diff: from Supabase
     if "conf_balance_diff" in X.columns and r["conf_balance_diff"] == 0:
