@@ -302,58 +302,44 @@ def _fetch_espn_game_info(game_id, game_date, pregame=False):
         return info
 
 
-def _compute_rest_days(team_id, game_date_str):
-    """Compute days since last game."""
-    cache_key = f"rest_{team_id}_{game_date_str}"
-    cached = _cache_get(cache_key, CACHE_TTL_LONG)
-    if cached is not None:
-        return cached
+def _fetch_team_schedule_data(team_id, game_date_str, opp_rank=200):
+    """
+    Single ESPN /schedule call → rest days + all schedule situation features.
+    Replaces both _compute_rest_days() and _fetch_schedule_situations().
 
-    try:
-        r = requests.get(f"{ESPN_BASE}/teams/{team_id}/schedule", timeout=10)
-        if not r.ok:
-            return 3
-        data = r.json()
-        game_date = datetime.fromisoformat(f"{game_date_str}T00:00:00")
-        last_game = None
-        for ev in data.get("events", []):
-            ev_date = datetime.fromisoformat(ev["date"][:19])
-            completed = ev.get("competitions", [{}])[0].get("status", {}).get("type", {}).get("completed", False)
-            if completed and ev_date < game_date:
-                if not last_game or ev_date > last_game:
-                    last_game = ev_date
-        if not last_game:
-            result = 7
-        else:
-            result = max(0, (game_date - last_game).days)
-        _cache_set(cache_key, result)
-        return result
-    except:
-        return 3
-
-
-def _fetch_schedule_situations(team_id, game_date_str, opp_rank=200):
-    """Detect lookahead, sandwich, revenge, after_loss, games_last_14, record, opponents."""
-    cache_key = f"sched_sit_{team_id}_{game_date_str}"
+    Returns: {
+        "rest_days": int,
+        "is_lookahead": 0/1, "is_sandwich": 0/1,
+        "is_revenge_game": 0/1, "revenge_margin": float,
+        "after_loss": 0/1, "games_last_14": int,
+        "wins": int, "losses": int,
+        "opponents": [{"opp_id": str, "margin": float, "completed": bool}, ...]
+    }
+    """
+    cache_key = f"team_sched_{team_id}_{game_date_str}"
     cached = _cache_get(cache_key, CACHE_TTL_LONG)
     if cached:
         return cached
 
     result = {
-        "is_lookahead": 0, "is_sandwich": 0, "is_revenge_game": 0, "revenge_margin": 0.0,
-        "after_loss": 0, "games_last_14": 0, "wins": 0, "losses": 0,
-        "opponents": [],  # list of {"opp_id": str, "margin": float, "completed": bool}
+        "rest_days": 3,
+        "is_lookahead": 0, "is_sandwich": 0,
+        "is_revenge_game": 0, "revenge_margin": 0.0,
+        "after_loss": 0, "games_last_14": 0,
+        "wins": 0, "losses": 0,
+        "opponents": [],
     }
 
     try:
         r = requests.get(f"{ESPN_BASE}/teams/{team_id}/schedule", timeout=10)
         if not r.ok:
+            print(f"  [full_predict] Schedule fetch failed for {team_id}: HTTP {r.status_code}")
             return result
         data = r.json()
         game_date = datetime.fromisoformat(f"{game_date_str}T00:00:00")
         events = data.get("events", [])
 
-        # Parse all events
+        # ── Parse all events ──
         dated_events = []
         for ev in events:
             try:
@@ -378,12 +364,23 @@ def _fetch_schedule_situations(team_id, game_date_str, opp_rank=200):
                     "opp_id": opp_id, "score_team": score_team, "score_opp": score_opp,
                     "is_home": is_home,
                 })
-            except:
+            except Exception:
                 continue
 
         dated_events.sort(key=lambda x: x["date"])
 
-        # Compute record, opponents list, games_last_14, after_loss
+        # ── Rest days ──
+        last_game = None
+        for e in dated_events:
+            if e["completed"] and e["date"] < game_date:
+                if not last_game or e["date"] > last_game:
+                    last_game = e["date"]
+        if last_game:
+            result["rest_days"] = max(0, (game_date - last_game).days)
+        else:
+            result["rest_days"] = 7
+
+        # ── Record, opponents list, games_last_14, after_loss ──
         completed_before = [e for e in dated_events if e["completed"] and e["date"] < game_date]
         for e in completed_before:
             if e["score_team"] > e["score_opp"]:
@@ -409,7 +406,7 @@ def _fetch_schedule_situations(team_id, game_date_str, opp_rank=200):
             1 for e in completed_before if e["date"] >= cutoff_14
         )
 
-        # Find this game's position for lookahead/sandwich
+        # ── Lookahead / Sandwich / Revenge ──
         prev_game = None
         next_game = None
         for i, ev in enumerate(dated_events):
@@ -432,7 +429,9 @@ def _fetch_schedule_situations(team_id, game_date_str, opp_rank=200):
 
         _cache_set(cache_key, result)
         return result
-    except:
+
+    except Exception as e:
+        print(f"  [full_predict] Schedule data error for {team_id}: {e}")
         return result
 
 
@@ -591,32 +590,32 @@ def predict_ncaa_full(request_data):
 
     # ── Fetch all data in parallel-ish (Python threads for I/O) ──
     import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         fut_home_stats = executor.submit(_fetch_espn_team_stats, home_team_id)
         fut_away_stats = executor.submit(_fetch_espn_team_stats, away_team_id)
         fut_home_record = executor.submit(_fetch_espn_team_record, home_team_id)
         fut_away_record = executor.submit(_fetch_espn_team_record, away_team_id)
-        fut_home_rest = executor.submit(_compute_rest_days, home_team_id, game_date)
-        fut_away_rest = executor.submit(_compute_rest_days, away_team_id, game_date)
         fut_game_info = executor.submit(_fetch_espn_game_info, game_id, game_date, pregame)
         fut_home_sb = executor.submit(_fetch_supabase_team_data, home_team_id, home_team_name)
         fut_away_sb = executor.submit(_fetch_supabase_team_data, away_team_id, away_team_name)
         fut_spread = executor.submit(_fetch_spread_movement, game_id)
-        fut_home_sched = executor.submit(_fetch_schedule_situations, home_team_id, game_date, request_data.get("away_rank", 200))
-        fut_away_sched = executor.submit(_fetch_schedule_situations, away_team_id, game_date, request_data.get("home_rank", 200))
+        fut_home_sched = executor.submit(_fetch_team_schedule_data, home_team_id, game_date, request_data.get("away_rank", 200))
+        fut_away_sched = executor.submit(_fetch_team_schedule_data, away_team_id, game_date, request_data.get("home_rank", 200))
 
     home_stats = fut_home_stats.result() or {}
     away_stats = fut_away_stats.result() or {}
     home_record = fut_home_record.result()
     away_record = fut_away_record.result()
-    home_rest = fut_home_rest.result()
-    away_rest = fut_away_rest.result()
     game_info = fut_game_info.result()
     home_sb = fut_home_sb.result()
     away_sb = fut_away_sb.result()
     spread_mvmt = fut_spread.result()
     home_sched = fut_home_sched.result()
     away_sched = fut_away_sched.result()
+
+    # Rest days extracted from consolidated schedule data
+    home_rest = home_sched.get("rest_days", 3)
+    away_rest = away_sched.get("rest_days", 3)
 
     # Common opponents from schedule data
     n_common_opps, common_opp_diff = _compute_common_opponents(home_sched, away_sched)
