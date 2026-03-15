@@ -103,6 +103,32 @@ def route_reload_model(sport):
                        "trained_at": bundle.get("trained_at")})
     return jsonify({"error": f"No model found for {sport}"}), 404
 
+@app.route("/debug/reload-model/<sport>", methods=["POST"])
+def route_debug_reload(sport):
+    import base64, io, traceback
+    from db import _models
+    _models.pop(sport, None)
+    path = os.path.join(MODEL_DIR, f"{sport}.pkl")
+    if os.path.exists(path):
+        os.remove(path)
+    try:
+        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/model_store?name=eq.{sport}&select=data",
+            headers=headers, timeout=120)
+        if not resp.ok:
+            return jsonify({"error": "supabase_fetch_failed", "status": resp.status_code, "body": resp.text[:500]})
+        rows = resp.json()
+        if not rows or not rows[0].get("data"):
+            return jsonify({"error": "no_data_in_response", "rows_count": len(rows)})
+        data_len = len(rows[0]["data"])
+        raw = base64.b64decode(rows[0]["data"])
+        obj = joblib.load(io.BytesIO(raw))
+        _models[sport] = obj
+        return jsonify({"status": "ok", "mae": obj.get("mae_cv"), "data_len": data_len, "features": len(obj.get("feature_cols", []))})
+    except Exception as e:
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
 # ═══════════════════════════════════════════════════════════════
 # ROUTES — Training
 # ═══════════════════════════════════════════════════════════════
@@ -128,7 +154,6 @@ def route_train_all():
         "mlb": train_mlb(), "nba": train_nba(), "ncaa": train_ncaa(),
         "nfl": train_nfl(), "ncaaf": train_ncaaf(),
     })
-
 
 # ═══════════════════════════════════════════════════════════════
 # ROUTES — Async Training (bypasses proxy timeout)
