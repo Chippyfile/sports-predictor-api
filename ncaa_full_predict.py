@@ -343,7 +343,7 @@ def _fetch_team_schedule_data(team_id, game_date_str, opp_rank=200):
         dated_events = []
         for ev in events:
             try:
-                ev_date = datetime.fromisoformat(ev["date"][:19])
+                ev_date = datetime.fromisoformat(ev["date"][:19].replace("Z", "")).replace(tzinfo=None)
                 comp = ev.get("competitions", [{}])[0]
                 completed = comp.get("status", {}).get("type", {}).get("completed", False)
                 opp_r = 200
