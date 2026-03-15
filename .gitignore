@@ -43,3 +43,13 @@ shap_results.json
 shap_results_*.csv
 shap_top20.json
 injury_update_log.json
+.venv/
+__pycache__/
+sports/__pycache__/
+*.pyc
+.DS_Store
+*.backup
+*.pre_orphaned
+main_monolith.py
+sweep_checkpoint_ncaa_partial.json
+hhi_fix.log
