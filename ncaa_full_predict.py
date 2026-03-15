@@ -659,6 +659,16 @@ def predict_ncaa_full(request_data):
         "is_early_season": request_data.get("is_early_season", 0),
         "importance_multiplier": request_data.get("importance_multiplier", 1.0),
 
+# Matchup/situational features (computed, default to neutral)
+        "n_common_opps": 0, "common_opp_diff": 0.0,
+        "is_lookahead": 0, "is_revenge_game": 0, "revenge_margin": 0.0,
+        "is_sandwich": 0, "def_rest_advantage": 0.0, "luck_x_spread": 0.0,
+        "spread_regime": 1, "is_midweek": 0,
+        "style_familiarity": 0.5, "pace_leverage": 0.0, "pace_control_diff": 0.0,
+        "matchup_efg": 0.0, "matchup_to": 0.0, "matchup_orb": 0.0, "matchup_ft": 0.0,
+        "fatigue_x_quality": 0.0, "rest_x_defense": 0.0,
+        "form_x_familiarity": 0.0, "consistency_x_spread": 0.0,
+
         # Form (from ESPN stats if available)
         "home_form": home_stats.get("form", 0), "away_form": away_stats.get("form", 0),
     }
