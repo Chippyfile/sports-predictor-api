@@ -1,0 +1,82 @@
+[
+  {
+    "feature": "mkt_spread",
+    "importance_pct": 27.04
+  },
+  {
+    "feature": "elo_diff",
+    "importance_pct": 7.12
+  },
+  {
+    "feature": "mkt_spread_vs_model",
+    "importance_pct": 5.35
+  },
+  {
+    "feature": "ref_home_whistle",
+    "importance_pct": 2.85
+  },
+  {
+    "feature": "fatigue_x_quality",
+    "importance_pct": 2.05
+  },
+  {
+    "feature": "orb_pct_diff",
+    "importance_pct": 1.96
+  },
+  {
+    "feature": "neutral_em_diff",
+    "importance_pct": 1.82
+  },
+  {
+    "feature": "pit_sos_diff",
+    "importance_pct": 1.7
+  },
+  {
+    "feature": "pace_adj_margin_diff",
+    "importance_pct": 1.58
+  },
+  {
+    "feature": "threepct_diff",
+    "importance_pct": 1.42
+  },
+  {
+    "feature": "roll_dominance_diff",
+    "importance_pct": 1.39
+  },
+  {
+    "feature": "crowd_pct",
+    "importance_pct": 1.24
+  },
+  {
+    "feature": "opp_suppression_diff",
+    "importance_pct": 1.16
+  },
+  {
+    "feature": "roll_ats_margin_gated",
+    "importance_pct": 1.11
+  },
+  {
+    "feature": "venue_advantage",
+    "importance_pct": 1.07
+  },
+  {
+    "feature": "ato_diff",
+    "importance_pct": 1.03
+  },
+  {
+    "feature": "win_pct_diff",
+    "importance_pct": 0.91
+  },
+  {
+    "feature": "adj_oe_diff",
+    "importance_pct": 0.87
+  },
+  {
+    "feature": "drb_pct_diff",
+    "importance_pct": 0.87
+  },
+  {
+    "feature": "opp_to_rate_diff",
+    "importance_pct": 0.85
+  }
+]

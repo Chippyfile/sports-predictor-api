@@ -1,0 +1,440 @@
+======================================================================
+  EXTRACT CLUTCH FREE THROW DATA
+  Clutch = last 5min, margin <= 8pts
+======================================================================
+
+  Loading game IDs...
+  Loaded 5000 rows...
+  Loaded 10000 rows...
+  Loaded 15000 rows...
+  Loaded 20000 rows...
+  Loaded 25000 rows...
+  Loaded 30000 rows...
+  Loaded 35000 rows...
+  Loaded 40000 rows...
+  Loaded 45000 rows...
+  Loaded 50000 rows...
+  Loaded 55000 rows...
+  Loaded 60000 rows...
+Total rows fetched: 64881
+  Total games: 64881
+  Already have clutch data: 0
+  Loaded cache: 20 entries
+  Games to extract: 64861
+    500/64861 (0.8%) | with_clutch: 166 | avg_fta: 9.8 | ~161min left
+    1000/64861 (1.5%) | with_clutch: 357 | avg_fta: 10.4 | ~160min left
+    1500/64861 (2.3%) | with_clutch: 566 | avg_fta: 10.2 | ~158min left
+    2000/64861 (3.1%) | with_clutch: 795 | avg_fta: 10.3 | ~157min left
+    2500/64861 (3.9%) | with_clutch: 1010 | avg_fta: 10.6 | ~156min left
+    3000/64861 (4.6%) | with_clutch: 1278 | avg_fta: 10.7 | ~155min left
+    3500/64861 (5.4%) | with_clutch: 1567 | avg_fta: 10.7 | ~153min left
+    4000/64861 (6.2%) | with_clutch: 1848 | avg_fta: 10.7 | ~152min left
+    4500/64861 (6.9%) | with_clutch: 2123 | avg_fta: 10.7 | ~151min left
+    5000/64861 (7.7%) | with_clutch: 2396 | avg_fta: 10.7 | ~150min left
+    5500/64861 (8.5%) | with_clutch: 2656 | avg_fta: 10.8 | ~148min left
+    6000/64861 (9.3%) | with_clutch: 2959 | avg_fta: 10.7 | ~147min left
+    6500/64861 (10.0%) | with_clutch: 3128 | avg_fta: 10.7 | ~146min left
+    7000/64861 (10.8%) | with_clutch: 3349 | avg_fta: 10.7 | ~145min left
+    7500/64861 (11.6%) | with_clutch: 3572 | avg_fta: 10.7 | ~143min left
+    8000/64861 (12.3%) | with_clutch: 3781 | avg_fta: 10.7 | ~142min left
+    8500/64861 (13.1%) | with_clutch: 3998 | avg_fta: 10.7 | ~141min left
+    9000/64861 (13.9%) | with_clutch: 4265 | avg_fta: 10.7 | ~140min left
+    9500/64861 (14.6%) | with_clutch: 4549 | avg_fta: 10.7 | ~138min left
+    10000/64861 (15.4%) | with_clutch: 4842 | avg_fta: 10.7 | ~137min left
+    10500/64861 (16.2%) | with_clutch: 5129 | avg_fta: 10.8 | ~136min left
+    11000/64861 (17.0%) | with_clutch: 5407 | avg_fta: 10.8 | ~135min left
+    11500/64861 (17.7%) | with_clutch: 5697 | avg_fta: 10.8 | ~133min left
+    12000/64861 (18.5%) | with_clutch: 5944 | avg_fta: 10.8 | ~132min left
+    12500/64861 (19.3%) | with_clutch: 6117 | avg_fta: 10.8 | ~131min left
+    13000/64861 (20.0%) | with_clutch: 6341 | avg_fta: 10.8 | ~130min left
+    13500/64861 (20.8%) | with_clutch: 6552 | avg_fta: 10.8 | ~128min left
+    14000/64861 (21.6%) | with_clutch: 6768 | avg_fta: 10.7 | ~127min left
+    14500/64861 (22.4%) | with_clutch: 6984 | avg_fta: 10.8 | ~126min left
+    15000/64861 (23.1%) | with_clutch: 7256 | avg_fta: 10.7 | ~125min left
+    15500/64861 (23.9%) | with_clutch: 7547 | avg_fta: 10.7 | ~123min left
+    16000/64861 (24.7%) | with_clutch: 7840 | avg_fta: 10.7 | ~122min left
+    16500/64861 (25.4%) | with_clutch: 8136 | avg_fta: 10.7 | ~121min left
+    17000/64861 (26.2%) | with_clutch: 8414 | avg_fta: 10.7 | ~120min left
+    17500/64861 (27.0%) | with_clutch: 8701 | avg_fta: 10.7 | ~118min left
+    18000/64861 (27.8%) | with_clutch: 8940 | avg_fta: 10.7 | ~117min left
+    18500/64861 (28.5%) | with_clutch: 9105 | avg_fta: 10.7 | ~116min left
+    19000/64861 (29.3%) | with_clutch: 9332 | avg_fta: 10.7 | ~115min left
+    19500/64861 (30.1%) | with_clutch: 9566 | avg_fta: 10.7 | ~113min left
+    20000/64861 (30.8%) | with_clutch: 9772 | avg_fta: 10.7 | ~112min left
+    20500/64861 (31.6%) | with_clutch: 9991 | avg_fta: 10.6 | ~111min left
+    21000/64861 (32.4%) | with_clutch: 10290 | avg_fta: 10.6 | ~110min left
+    21500/64861 (33.1%) | with_clutch: 10567 | avg_fta: 10.6 | ~108min left
+    22000/64861 (33.9%) | with_clutch: 10862 | avg_fta: 10.6 | ~107min left
+    22500/64861 (34.7%) | with_clutch: 11140 | avg_fta: 10.6 | ~106min left
+    23000/64861 (35.5%) | with_clutch: 11443 | avg_fta: 10.6 | ~105min left
+    23500/64861 (36.2%) | with_clutch: 11740 | avg_fta: 10.6 | ~103min left
+    24000/64861 (37.0%) | with_clutch: 11974 | avg_fta: 10.6 | ~102min left
+    24500/64861 (37.8%) | with_clutch: 12126 | avg_fta: 10.6 | ~101min left
+    25000/64861 (38.5%) | with_clutch: 12317 | avg_fta: 10.6 | ~100min left
+    25500/64861 (39.3%) | with_clutch: 12537 | avg_fta: 10.6 | ~98min left
+    26000/64861 (40.1%) | with_clutch: 12757 | avg_fta: 10.6 | ~97min left
+    26500/64861 (40.9%) | with_clutch: 12972 | avg_fta: 10.5 | ~96min left
+    27000/64861 (41.6%) | with_clutch: 13256 | avg_fta: 10.5 | ~95min left
+    27500/64861 (42.4%) | with_clutch: 13536 | avg_fta: 10.5 | ~93min left
+    28000/64861 (43.2%) | with_clutch: 13803 | avg_fta: 10.5 | ~92min left
+    28500/64861 (43.9%) | with_clutch: 14121 | avg_fta: 10.5 | ~91min left
+    29000/64861 (44.7%) | with_clutch: 14393 | avg_fta: 10.5 | ~90min left
+    29500/64861 (45.5%) | with_clutch: 14680 | avg_fta: 10.5 | ~88min left
+    30000/64861 (46.3%) | with_clutch: 14942 | avg_fta: 10.5 | ~87min left
+    30500/64861 (47.0%) | with_clutch: 15107 | avg_fta: 10.5 | ~86min left
+    31000/64861 (47.8%) | with_clutch: 15314 | avg_fta: 10.5 | ~85min left
+    31500/64861 (48.6%) | with_clutch: 15569 | avg_fta: 10.4 | ~83min left
+    32000/64861 (49.3%) | with_clutch: 15846 | avg_fta: 10.4 | ~82min left
+    32500/64861 (50.1%) | with_clutch: 16138 | avg_fta: 10.4 | ~81min left
+    33000/64861 (50.9%) | with_clutch: 16426 | avg_fta: 10.4 | ~80min left
+    33500/64861 (51.6%) | with_clutch: 16702 | avg_fta: 10.4 | ~78min left
+    34000/64861 (52.4%) | with_clutch: 16997 | avg_fta: 10.4 | ~77min left
+    34500/64861 (53.2%) | with_clutch: 17195 | avg_fta: 10.3 | ~76min left
+    35000/64861 (54.0%) | with_clutch: 17389 | avg_fta: 10.3 | ~75min left
+    35500/64861 (54.7%) | with_clutch: 17629 | avg_fta: 10.3 | ~73min left
+    36000/64861 (55.5%) | with_clutch: 17854 | avg_fta: 10.3 | ~72min left
+    36500/64861 (56.3%) | with_clutch: 18041 | avg_fta: 10.3 | ~71min left
+    37000/64861 (57.0%) | with_clutch: 18324 | avg_fta: 10.2 | ~70min left
+    37500/64861 (57.8%) | with_clutch: 18618 | avg_fta: 10.2 | ~68min left
+    38000/64861 (58.6%) | with_clutch: 18925 | avg_fta: 10.2 | ~67min left
+    38500/64861 (59.4%) | with_clutch: 19222 | avg_fta: 10.2 | ~66min left
+    39000/64861 (60.1%) | with_clutch: 19524 | avg_fta: 10.2 | ~65min left
+    39500/64861 (60.9%) | with_clutch: 19817 | avg_fta: 10.2 | ~63min left
+    40000/64861 (61.7%) | with_clutch: 20129 | avg_fta: 10.2 | ~62min left
+    40500/64861 (62.4%) | with_clutch: 20309 | avg_fta: 10.2 | ~61min left
+    41000/64861 (63.2%) | with_clutch: 20526 | avg_fta: 10.2 | ~60min left
+    41500/64861 (64.0%) | with_clutch: 20756 | avg_fta: 10.2 | ~58min left
+    42000/64861 (64.8%) | with_clutch: 20972 | avg_fta: 10.2 | ~57min left
+    42500/64861 (65.5%) | with_clutch: 21193 | avg_fta: 10.2 | ~56min left
+    43000/64861 (66.3%) | with_clutch: 21457 | avg_fta: 10.1 | ~55min left
+    43500/64861 (67.1%) | with_clutch: 21768 | avg_fta: 10.1 | ~53min left
+    44000/64861 (67.8%) | with_clutch: 22072 | avg_fta: 10.1 | ~52min left
+    44500/64861 (68.6%) | with_clutch: 22365 | avg_fta: 10.1 | ~51min left
+    45000/64861 (69.4%) | with_clutch: 22675 | avg_fta: 10.1 | ~50min left
+    45500/64861 (70.2%) | with_clutch: 22980 | avg_fta: 10.1 | ~48min left
+    46000/64861 (70.9%) | with_clutch: 23270 | avg_fta: 10.1 | ~47min left
+    46500/64861 (71.7%) | with_clutch: 23523 | avg_fta: 10.1 | ~46min left
+    47000/64861 (72.5%) | with_clutch: 23691 | avg_fta: 10.1 | ~45min left
+    47500/64861 (73.2%) | with_clutch: 23935 | avg_fta: 10.1 | ~43min left
+    48000/64861 (74.0%) | with_clutch: 24150 | avg_fta: 10.1 | ~42min left
+    48500/64861 (74.8%) | with_clutch: 24372 | avg_fta: 10.1 | ~41min left
+    49000/64861 (75.5%) | with_clutch: 24556 | avg_fta: 10.1 | ~40min left
+    49500/64861 (76.3%) | with_clutch: 24851 | avg_fta: 10.1 | ~38min left
+    50000/64861 (77.1%) | with_clutch: 25158 | avg_fta: 10.1 | ~37min left
+    50500/64861 (77.9%) | with_clutch: 25460 | avg_fta: 10.1 | ~36min left
+    51000/64861 (78.6%) | with_clutch: 25776 | avg_fta: 10.1 | ~35min left
+    51500/64861 (79.4%) | with_clutch: 26062 | avg_fta: 10.1 | ~33min left
+    52000/64861 (80.2%) | with_clutch: 26330 | avg_fta: 10.1 | ~32min left
+    52500/64861 (80.9%) | with_clutch: 26647 | avg_fta: 10.1 | ~31min left
+    53000/64861 (81.7%) | with_clutch: 26785 | avg_fta: 10.1 | ~30min left
+    53500/64861 (82.5%) | with_clutch: 26968 | avg_fta: 10.1 | ~28min left
+    54000/64861 (83.3%) | with_clutch: 27207 | avg_fta: 10.1 | ~27min left
+    54500/64861 (84.0%) | with_clutch: 27449 | avg_fta: 10.1 | ~26min left
+    55000/64861 (84.8%) | with_clutch: 27662 | avg_fta: 10.1 | ~25min left
+    55500/64861 (85.6%) | with_clutch: 27875 | avg_fta: 10.1 | ~23min left
+    56000/64861 (86.3%) | with_clutch: 28174 | avg_fta: 10.1 | ~22min left
+    56500/64861 (87.1%) | with_clutch: 28491 | avg_fta: 10.1 | ~21min left
+    57000/64861 (87.9%) | with_clutch: 28810 | avg_fta: 10.1 | ~20min left
+    57500/64861 (88.7%) | with_clutch: 29115 | avg_fta: 10.1 | ~18min left
+    58000/64861 (89.4%) | with_clutch: 29419 | avg_fta: 10.1 | ~17min left
+    58500/64861 (90.2%) | with_clutch: 29704 | avg_fta: 10.1 | ~16min left
+    59000/64861 (91.0%) | with_clutch: 29968 | avg_fta: 10.1 | ~15min left
+    59500/64861 (91.7%) | with_clutch: 30115 | avg_fta: 10.1 | ~13min left
+    60000/64861 (92.5%) | with_clutch: 30325 | avg_fta: 10.1 | ~12min left
+    60500/64861 (93.3%) | with_clutch: 30541 | avg_fta: 10.1 | ~11min left
+    61000/64861 (94.0%) | with_clutch: 30765 | avg_fta: 10.1 | ~10min left
+    61500/64861 (94.8%) | with_clutch: 30948 | avg_fta: 10.1 | ~8min left
+    62000/64861 (95.6%) | with_clutch: 31247 | avg_fta: 10.1 | ~7min left
+    62500/64861 (96.4%) | with_clutch: 31572 | avg_fta: 10.1 | ~6min left
+    63000/64861 (97.1%) | with_clutch: 31886 | avg_fta: 10.1 | ~5min left
+    63500/64861 (97.9%) | with_clutch: 32201 | avg_fta: 10.1 | ~3min left
+    64000/64861 (98.7%) | with_clutch: 32505 | avg_fta: 10.1 | ~2min left
+    64500/64861 (99.4%) | with_clutch: 32804 | avg_fta: 10.1 | ~1min left
+    64861/64861 (100.0%) | with_clutch: 33023 | avg_fta: 10.1 | ~0min left
+
+  Extraction complete: 33023/61697 games had clutch FTs
+  Average clutch FTA per game (when present): 10.1
+
+  Pushing 61697 per-game clutch patches...
+    500/61697 | success:500 errors:0
+    1000/61697 | success:1000 errors:0
+    1500/61697 | success:1500 errors:0
+    2000/61697 | success:2000 errors:0
+    2500/61697 | success:2500 errors:0
+    3000/61697 | success:3000 errors:0
+    3500/61697 | success:3500 errors:0
+    4000/61697 | success:4000 errors:0
+    4500/61697 | success:4500 errors:0
+    5000/61697 | success:5000 errors:0
+    5500/61697 | success:5500 errors:0
+    6000/61697 | success:6000 errors:0
+    6500/61697 | success:6500 errors:0
+    7000/61697 | success:7000 errors:0
+    7500/61697 | success:7500 errors:0
+    8000/61697 | success:8000 errors:0
+    8500/61697 | success:8500 errors:0
+    9000/61697 | success:9000 errors:0
+    9500/61697 | success:9500 errors:0
+    10000/61697 | success:10000 errors:0
+    10500/61697 | success:10500 errors:0
+    11000/61697 | success:11000 errors:0
+    11500/61697 | success:11500 errors:0
+    12000/61697 | success:12000 errors:0
+    12500/61697 | success:12500 errors:0
+    13000/61697 | success:13000 errors:0
+    13500/61697 | success:13500 errors:0
+    14000/61697 | success:14000 errors:0
+    14500/61697 | success:14500 errors:0
+    15000/61697 | success:15000 errors:0
+    15500/61697 | success:15500 errors:0
+    16000/61697 | success:16000 errors:0
+    16500/61697 | success:16500 errors:0
+    17000/61697 | success:17000 errors:0
+    17500/61697 | success:17500 errors:0
+    18000/61697 | success:18000 errors:0
+    18500/61697 | success:18500 errors:0
+    19000/61697 | success:19000 errors:0
+    19500/61697 | success:19500 errors:0
+    20000/61697 | success:20000 errors:0
+    20500/61697 | success:20500 errors:0
+    21000/61697 | success:21000 errors:0
+    21500/61697 | success:21500 errors:0
+    22000/61697 | success:22000 errors:0
+    22500/61697 | success:22500 errors:0
+    23000/61697 | success:23000 errors:0
+    23500/61697 | success:23500 errors:0
+    24000/61697 | success:24000 errors:0
+    24500/61697 | success:24500 errors:0
+    25000/61697 | success:25000 errors:0
+    25500/61697 | success:25500 errors:0
+    26000/61697 | success:26000 errors:0
+    26500/61697 | success:26500 errors:0
+    27000/61697 | success:27000 errors:0
+    27500/61697 | success:27500 errors:0
+    28000/61697 | success:28000 errors:0
+    28500/61697 | success:28500 errors:0
+    29000/61697 | success:29000 errors:0
+    29500/61697 | success:29500 errors:0
+    30000/61697 | success:30000 errors:0
+    30500/61697 | success:30500 errors:0
+    31000/61697 | success:31000 errors:0
+    31500/61697 | success:31500 errors:0
+    32000/61697 | success:32000 errors:0
+    32500/61697 | success:32500 errors:0
+    33000/61697 | success:33000 errors:0
+    33500/61697 | success:33500 errors:0
+    34000/61697 | success:34000 errors:0
+    34500/61697 | success:34500 errors:0
+    35000/61697 | success:35000 errors:0
+    35500/61697 | success:35500 errors:0
+    36000/61697 | success:36000 errors:0
+    36500/61697 | success:36500 errors:0
+    37000/61697 | success:37000 errors:0
+    37500/61697 | success:37500 errors:0
+    38000/61697 | success:38000 errors:0
+    38500/61697 | success:38500 errors:0
+    39000/61697 | success:39000 errors:0
+    39500/61697 | success:39500 errors:0
+    40000/61697 | success:40000 errors:0
+    40500/61697 | success:40500 errors:0
+    41000/61697 | success:41000 errors:0
+    41500/61697 | success:41500 errors:0
+    42000/61697 | success:42000 errors:0
+    42500/61697 | success:42500 errors:0
+    43000/61697 | success:43000 errors:0
+    43500/61697 | success:43500 errors:0
+    44000/61697 | success:44000 errors:0
+    44500/61697 | success:44500 errors:0
+    45000/61697 | success:45000 errors:0
+    45500/61697 | success:45500 errors:0
+    46000/61697 | success:46000 errors:0
+    46500/61697 | success:46500 errors:0
+    47000/61697 | success:47000 errors:0
+    47500/61697 | success:47500 errors:0
+    48000/61697 | success:48000 errors:0
+    48500/61697 | success:48500 errors:0
+    49000/61697 | success:49000 errors:0
+    49500/61697 | success:49500 errors:0
+    50000/61697 | success:50000 errors:0
+    50500/61697 | success:50500 errors:0
+    51000/61697 | success:51000 errors:0
+    51500/61697 | success:51500 errors:0
+    52000/61697 | success:52000 errors:0
+    52500/61697 | success:52500 errors:0
+    53000/61697 | success:53000 errors:0
+    53500/61697 | success:53500 errors:0
+    54000/61697 | success:54000 errors:0
+    54500/61697 | success:54500 errors:0
+    55000/61697 | success:55000 errors:0
+    55500/61697 | success:55500 errors:0
+    56000/61697 | success:56000 errors:0
+    56500/61697 | success:56500 errors:0
+    57000/61697 | success:57000 errors:0
+    57500/61697 | success:57500 errors:0
+    58000/61697 | success:58000 errors:0
+    58500/61697 | success:58500 errors:0
+    59000/61697 | success:59000 errors:0
+    59500/61697 | success:59500 errors:0
+    60000/61697 | success:60000 errors:0
+    60500/61697 | success:60500 errors:0
+    61000/61697 | success:61000 errors:0
+    61500/61697 | success:61500 errors:0
+    61697/61697 | success:61697 errors:0
+  Per-game push complete: 61697 success, 0 errors
+
+======================================================================
+  COMPUTING ROLLING CLUTCH FT%
+======================================================================
+  Loading clutch data...
+  Loaded 5000 rows...
+  Loaded 10000 rows...
+  Loaded 15000 rows...
+  Loaded 20000 rows...
+  Loaded 25000 rows...
+  Loaded 30000 rows...
+  Loaded 35000 rows...
+  Loaded 40000 rows...
+  Loaded 45000 rows...
+  Loaded 50000 rows...
+  Loaded 55000 rows...
+  Loaded 60000 rows...
+Total rows fetched: 64881
+  Loaded 64881 games
+  Games with clutch FT data: 33023/64881 (50.9%)
+  Computed rolling clutch FT% for 64881 games
+  home_roll_clutch_ft_pct: mean=nan std=nan range=[nan, nan]
+
+  Pushing 64881 rolling clutch patches...
+    500/64881 | success:197 errors:303
+    1000/64881 | success:398 errors:602
+    1500/64881 | success:686 errors:814
+    2000/64881 | success:987 errors:1013
+    2500/64881 | success:1260 errors:1240
+    3000/64881 | success:1577 errors:1423
+    3500/64881 | success:1922 errors:1578
+    4000/64881 | success:2157 errors:1843
+    4500/64881 | success:2440 errors:2060
+    5000/64881 | success:2757 errors:2243
+    5500/64881 | success:3052 errors:2448
+    6000/64881 | success:3411 errors:2589
+    6500/64881 | success:3720 errors:2780
+    7000/64881 | success:4044 errors:2956
+    7500/64881 | success:4342 errors:3158
+    8000/64881 | success:4707 errors:3293
+    8500/64881 | success:5129 errors:3371
+    9000/64881 | success:5427 errors:3573
+    9500/64881 | success:5737 errors:3763
+    10000/64881 | success:6037 errors:3963
+    10500/64881 | success:6375 errors:4125
+    11000/64881 | success:6706 errors:4294
+    11500/64881 | success:7038 errors:4462
+    12000/64881 | success:7243 errors:4757
+    12500/64881 | success:7526 errors:4974
+    13000/64881 | success:7788 errors:5212
+    13500/64881 | success:8105 errors:5395
+    14000/64881 | success:8424 errors:5576
+    14500/64881 | success:8713 errors:5787
+    15000/64881 | success:9007 errors:5993
+    15500/64881 | success:9319 errors:6181
+    16000/64881 | success:9605 errors:6395
+    16500/64881 | success:9910 errors:6590
+    17000/64881 | success:10232 errors:6768
+    17500/64881 | success:10544 errors:6956
+    18000/64881 | success:10897 errors:7103
+    18500/64881 | success:11213 errors:7287
+    19000/64881 | success:11501 errors:7499
+    19500/64881 | success:11808 errors:7692
+    20000/64881 | success:12136 errors:7864
+    20500/64881 | success:12421 errors:8079
+    21000/64881 | success:12631 errors:8369
+    21500/64881 | success:12948 errors:8552
+    22000/64881 | success:13221 errors:8779
+    22500/64881 | success:13518 errors:8982
+    23000/64881 | success:13776 errors:9224
+    23500/64881 | success:14123 errors:9377
+    24000/64881 | success:14407 errors:9593
+    24500/64881 | success:14736 errors:9764
+    25000/64881 | success:15053 errors:9947
+    25500/64881 | success:15346 errors:10154
+    26000/64881 | success:15666 errors:10334
+    26500/64881 | success:15988 errors:10512
+    27000/64881 | success:16311 errors:10689
+    27500/64881 | success:16564 errors:10936
+    28000/64881 | success:16826 errors:11174
+    28500/64881 | success:17071 errors:11429
+    29000/64881 | success:17386 errors:11614
+    29500/64881 | success:17732 errors:11768
+    30000/64881 | success:18116 errors:11884
+    30500/64881 | success:18407 errors:12093
+    31000/64881 | success:18725 errors:12275
+    31500/64881 | success:19015 errors:12485
+    32000/64881 | success:19279 errors:12721
+    32500/64881 | success:19514 errors:12986
+    33000/64881 | success:19779 errors:13221
+    33500/64881 | success:20043 errors:13457
+    34000/64881 | success:20320 errors:13680
+    34500/64881 | success:20624 errors:13876
+    35000/64881 | success:20993 errors:14007
+    35500/64881 | success:21240 errors:14260
+    36000/64881 | success:21528 errors:14472
+    36500/64881 | success:21762 errors:14738
+    37000/64881 | success:22108 errors:14892
+    37500/64881 | success:22456 errors:15044
+    38000/64881 | success:22741 errors:15259
+    38500/64881 | success:22989 errors:15511
+    39000/64881 | success:23135 errors:15865
+    39500/64881 | success:23379 errors:16121
+    40000/64881 | success:23708 errors:16292
+    40500/64881 | success:24020 errors:16480
+    41000/64881 | success:24290 errors:16710
+    41500/64881 | success:24566 errors:16934
+    42000/64881 | success:24775 errors:17225
+    42500/64881 | success:25043 errors:17457
+    43000/64881 | success:25325 errors:17675
+    43500/64881 | success:25706 errors:17794
+    44000/64881 | success:25954 errors:18046
+    44500/64881 | success:26229 errors:18271
+    45000/64881 | success:26556 errors:18444
+    45500/64881 | success:26879 errors:18621
+    46000/64881 | success:27163 errors:18837
+    46500/64881 | success:27444 errors:19056
+    47000/64881 | success:27702 errors:19298
+    47500/64881 | success:27973 errors:19527
+    48000/64881 | success:28276 errors:19724
+    48500/64881 | success:28584 errors:19916
+    49000/64881 | success:28861 errors:20139
+    49500/64881 | success:29133 errors:20367
+    50000/64881 | success:29350 errors:20650
+    50500/64881 | success:29592 errors:20908
+    51000/64881 | success:29792 errors:21208
+    51500/64881 | success:30082 errors:21418
+    52000/64881 | success:30418 errors:21582
+    52500/64881 | success:30730 errors:21770
+    53000/64881 | success:30940 errors:22060
+    53500/64881 | success:31209 errors:22291
+    54000/64881 | success:31485 errors:22515
+    54500/64881 | success:31773 errors:22727
+    55000/64881 | success:32079 errors:22921
+    55500/64881 | success:32340 errors:23160
+    56000/64881 | success:32633 errors:23367
+    56500/64881 | success:32924 errors:23576
+    57000/64881 | success:33181 errors:23819
+    57500/64881 | success:33474 errors:24026
+    58000/64881 | success:33729 errors:24271
+    58500/64881 | success:34057 errors:24443
+    59000/64881 | success:34362 errors:24638
+    59500/64881 | success:34650 errors:24850
+    60000/64881 | success:34943 errors:25057
+    60500/64881 | success:35186 errors:25314
+    61000/64881 | success:35478 errors:25522
+    61500/64881 | success:35724 errors:25776
+    62000/64881 | success:36007 errors:25993
+    62500/64881 | success:36226 errors:26274
+    63000/64881 | success:36523 errors:26477
+    63500/64881 | success:36823 errors:26677
+    64000/64881 | success:37120 errors:26880
+    64500/64881 | success:37394 errors:27106
+    64881/64881 | success:37638 errors:27243
+  Rolling push complete: 37638 success, 27243 errors
+
+  Done.
