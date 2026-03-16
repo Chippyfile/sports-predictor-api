@@ -43,6 +43,9 @@ def sb_get(table, params=""):
     return all_data
 
 def sb_patch(table, match_col, match_val, patch_data):
+    import math
+    patch_data = {k: v for k, v in patch_data.items() if not (isinstance(v, float) and (math.isnan(v) or math.isinf(v)))}
+    if not patch_data: return True
     url = f"{SUPABASE_URL}/rest/v1/{table}?{match_col}=eq.{match_val}"
     r = requests.patch(url, headers=HEADERS, json=patch_data, timeout=15)
     return r.ok
@@ -713,8 +716,7 @@ def main():
     print("  Designed by Claude Opus 4.6")
     print("=" * 70)
 
-    all_games = sb_get("ncaa_historical",
-                       "actual_home_score=not.is.null&select=*&order=game_date.asc,game_id.asc")
+    all_games = __import__("pandas").read_parquet("ncaa_training_data.parquet").dropna(subset=["actual_home_score"]).sort_values(["game_date","game_id"]).to_dict("records")
     print(f"  Loaded {len(all_games)} games")
     if not all_games: return
 
@@ -774,8 +776,8 @@ def main():
             game_date = g.get("game_date", "")
             h_score = float(g.get("actual_home_score", 0) or 0)
             a_score = float(g.get("actual_away_score", 0) or 0)
-            h_rank = int(g.get("home_rank", 200) or 200)
-            a_rank = int(g.get("away_rank", 200) or 200)
+            h_rank = int(float(g.get("home_rank", 200) or 200)) if g.get("home_rank") == g.get("home_rank") else 200
+            a_rank = int(float(g.get("away_rank", 200) or 200)) if g.get("away_rank") == g.get("away_rank") else 200
             h_conf = str(g.get("home_conference", "") or "")
             a_conf = str(g.get("away_conference", "") or "")
 
@@ -920,9 +922,9 @@ def main():
                         if si > current_gi:
                             ng = games[si]
                             if str(ng.get("home_team_id", "")) == tid:
-                                return int(ng.get("away_rank", 200) or 200)
+                                return int(float(ng.get("away_rank", 200) or 200)) if ng.get("away_rank") == ng.get("away_rank") else 200
                             else:
-                                return int(ng.get("home_rank", 200) or 200)
+                                return int(float(ng.get("home_rank", 200) or 200)) if ng.get("home_rank") == ng.get("home_rank") else 200
                     return 200
 
                 h_next_rank = get_next_opp_rank(h_tid, gi)

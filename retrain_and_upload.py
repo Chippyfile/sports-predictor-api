@@ -179,34 +179,72 @@ stacked_preds = meta_reg.predict(oof_stacked)
 mae = mean_absolute_error(y_margin, stacked_preds)
 print(f"  Stacked MAE: {mae:.3f}")
 
-meta_clf = LogisticRegression(max_iter=2000)
-meta_clf.fit(oof_stacked, y_win)
-
 bias = float(np.mean(y_margin - stacked_preds))
-oof_probs = meta_clf.predict_proba(oof_stacked)[:, 1]
-isotonic = IsotonicRegression(out_of_bounds="clip")
-isotonic.fit(oof_probs, y_win)
 
 explainer = shap.TreeExplainer(xgb)
 
-# Build with ml_utils classes (THIS IS THE KEY FIX)
+# Build with ml_utils classes
 reg = StackedRegressor([xgb, cat, mlp], meta_reg)
-# Train classifiers (StackedClassifier needs predict_proba)
+
+# ═══ CLASSIFIER: proper OOF to avoid overfit meta ═══
 from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
 from sklearn.neural_network import MLPClassifier
-print("  Training classifiers...")
-xgb_c = XGBClassifier(n_estimators=175, max_depth=7, learning_rate=0.10, random_state=42, tree_method="hist", eval_metric="logloss")
-xgb_c.fit(X_s, y_win, sample_weight=weights)
-cat_c = CatBoostClassifier(n_estimators=175, depth=7, learning_rate=0.10, random_seed=42, verbose=0)
-cat_c.fit(X_s, y_win, sample_weight=weights)
+print("  Training classifiers (OOF)...")
 
+xgb_c = XGBClassifier(n_estimators=175, max_depth=7, learning_rate=0.10, random_state=42, tree_method="hist", eval_metric="logloss")
+cat_c = CatBoostClassifier(n_estimators=175, depth=7, learning_rate=0.10, random_seed=42, verbose=0)
 mlp_c = MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, early_stopping=True,
                       validation_fraction=0.1, random_state=42)
-mlp_c.fit(X_s, y_win)
-oof_probs_stack = np.column_stack([xgb_c.predict_proba(X_s)[:,1], cat_c.predict_proba(X_s)[:,1], mlp_c.predict_proba(X_s)[:,1]])
+
+# OOF probabilities for meta-learner (NOT in-sample)
+oof_probs_xgb = np.zeros(n)
+oof_probs_cat = np.zeros(n)
+oof_probs_mlp = np.zeros(n)
+fold_size = n // 51  # 50-fold time series
+for i in range(50):
+    train_end = fold_size * (i + 2)
+    val_start = train_end
+    val_end = min(train_end + fold_size, n)
+    if val_start >= n:
+        break
+    X_tr, X_val = X_s[:train_end], X_s[val_start:val_end]
+    y_tr, w_tr = y_win[:train_end], weights[:train_end]
+    import copy
+    xc = copy.deepcopy(xgb_c); xc.fit(X_tr, y_tr, sample_weight=w_tr)
+    cc = copy.deepcopy(cat_c); cc.fit(X_tr, y_tr, sample_weight=w_tr)
+    mc = copy.deepcopy(mlp_c); mc.fit(X_tr, y_tr)
+    oof_probs_xgb[val_start:val_end] = xc.predict_proba(X_val)[:, 1]
+    oof_probs_cat[val_start:val_end] = cc.predict_proba(X_val)[:, 1]
+    oof_probs_mlp[val_start:val_end] = mc.predict_proba(X_val)[:, 1]
+
+# Only use folds that were filled (skip first fold_size*2 rows)
+valid_mask = (oof_probs_xgb != 0) | (oof_probs_cat != 0) | (oof_probs_mlp != 0)
+oof_probs_stack = np.column_stack([oof_probs_xgb[valid_mask],
+                                    oof_probs_cat[valid_mask],
+                                    oof_probs_mlp[valid_mask]])
+y_win_valid = y_win[valid_mask]
+
 meta_clf = LogisticRegression(max_iter=2000)
-meta_clf.fit(oof_probs_stack, y_win)
+meta_clf.fit(oof_probs_stack, y_win_valid)
+print(f"  Clf meta weights: {list(meta_clf.coef_[0].round(4))}")
+
+# OOF combined probs → isotonic calibration (trained on correct classifier output)
+oof_combined_probs = meta_clf.predict_proba(oof_probs_stack)[:, 1]
+isotonic = IsotonicRegression(out_of_bounds="clip")
+isotonic.fit(oof_combined_probs, y_win_valid)
+
+# Brier score check
+from sklearn.metrics import brier_score_loss
+brier_raw = brier_score_loss(y_win_valid, oof_combined_probs)
+brier_cal = brier_score_loss(y_win_valid, isotonic.predict(oof_combined_probs))
+print(f"  Brier (raw): {brier_raw:.4f}  Brier (calibrated): {brier_cal:.4f}")
+
+# Refit classifiers on FULL data for the production bundle
+print("  Refitting classifiers on full data...")
+xgb_c.fit(X_s, y_win, sample_weight=weights)
+cat_c.fit(X_s, y_win, sample_weight=weights)
+mlp_c.fit(X_s, y_win)
 clf = StackedClassifier([xgb_c, cat_c, mlp_c], meta_clf)
 
 bundle = {
