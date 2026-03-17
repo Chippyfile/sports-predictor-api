@@ -163,13 +163,13 @@ scaler = StandardScaler()
 X_s = scaler.fit_transform(X)
 
 print("\n  XGBoost...", end=" ", flush=True)
-xgb = XGBRegressor(n_estimators=175, max_depth=4, learning_rate=0.10, random_state=42, tree_method="hist")
+xgb = XGBRegressor(n_estimators=175, max_depth=10, learning_rate=0.10, random_state=42, tree_method="hist")
 oof_xgb = time_series_oof(xgb, X_s, y_margin, n_splits=50)
 xgb.fit(X_s, y_margin, sample_weight=weights)
 print(f"MAE: {mean_absolute_error(y_margin, oof_xgb):.3f}")
 
 print("  CatBoost...", end=" ", flush=True)
-cat = CatBoostRegressor(n_estimators=175, depth=4, learning_rate=0.10, random_seed=42, verbose=0)
+cat = CatBoostRegressor(n_estimators=175, depth=10, learning_rate=0.10, random_seed=42, verbose=0)
 oof_cat = time_series_oof(cat, X_s, y_margin, n_splits=50)
 cat.fit(X_s, y_margin, sample_weight=weights)
 print(f"MAE: {mean_absolute_error(y_margin, oof_cat):.3f}")
@@ -205,8 +205,8 @@ from catboost import CatBoostClassifier
 from sklearn.neural_network import MLPClassifier
 print("  Training classifiers (OOF)...")
 
-xgb_c = XGBClassifier(n_estimators=175, max_depth=4, learning_rate=0.10, random_state=42, tree_method="hist", eval_metric="logloss")
-cat_c = CatBoostClassifier(n_estimators=175, depth=4, learning_rate=0.10, random_seed=42, verbose=0)
+xgb_c = XGBClassifier(n_estimators=175, max_depth=10, learning_rate=0.10, random_state=42, tree_method="hist", eval_metric="logloss")
+cat_c = CatBoostClassifier(n_estimators=175, depth=10, learning_rate=0.10, random_seed=42, verbose=0)
 mlp_c = MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, early_stopping=True,
                       validation_fraction=0.1, random_state=42)
 
