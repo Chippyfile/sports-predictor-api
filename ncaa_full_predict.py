@@ -932,10 +932,18 @@ def predict_ncaa_full(request_data):
         "home_weakest_starter": 0.0, "away_weakest_starter": 0.0,
         "home_starter_variance": 0.0, "away_starter_variance": 0.0,
         # Head-to-head
-        "h2h_margin_avg": 0.0, "h2h_home_win_rate": 0.5,
+        "h2h_margin_avg": 0.0, "h2h_home_win_rate": 0.0,
+        # Conference strength
+        "conf_strength_diff": 0.0, "cross_conf_flag": 0,
         # Spread / line movement
         "odds_api_spread_movement": 0.0, "odds_api_total_movement": 0.0,
         "dk_spread_movement": 0.0, "dk_total_movement": 0.0,
+        # Tempo / scoring (used in pace features)
+        "home_tempo": 70.0, "away_tempo": 70.0,
+        "home_ppg": 0.0, "away_ppg": 0.0,
+        "home_opp_ppg": 0.0, "away_opp_ppg": 0.0,
+        # Recent form diff
+        "recent_form_diff": 0.0,
         # Clutch / rolling features
         "home_clutch_ftm": 0.0, "away_clutch_ftm": 0.0,
         "home_clutch_fta": 1.0, "away_clutch_fta": 1.0,
