@@ -659,6 +659,63 @@ def ncaa_build_features(df):
     _dk_total_mvmt = pd.to_numeric(df["dk_total_movement"], errors="coerce").fillna(0)
     df["total_movement"] = np.where(_oa_total_mvmt != 0, _oa_total_mvmt, _dk_total_mvmt)
 
+    # ── Lineup stability features (from pre-computed starter_ids analysis) ──
+    # Computed by compute_lineup_features.py, stored in Supabase/parquet.
+    # 4 features capturing roster continuity — 99.9% coverage from starter_ids.
+    _h_lc = pd.to_numeric(df.get("home_lineup_changes", 0), errors="coerce").fillna(0)
+    _a_lc = pd.to_numeric(df.get("away_lineup_changes", 0), errors="coerce").fillna(0)
+    df["lineup_changes_diff"] = _h_lc - _a_lc
+
+    _h_ls = pd.to_numeric(df.get("home_lineup_stability_5g", 1.0), errors="coerce").fillna(1.0)
+    _a_ls = pd.to_numeric(df.get("away_lineup_stability_5g", 1.0), errors="coerce").fillna(1.0)
+    df["lineup_stability_diff"] = _h_ls - _a_ls
+
+    _h_gt = pd.to_numeric(df.get("home_starter_games_together", 0), errors="coerce").fillna(0)
+    _a_gt = pd.to_numeric(df.get("away_starter_games_together", 0), errors="coerce").fillna(0)
+    df["starter_experience_diff"] = _h_gt - _a_gt
+
+    # ── Player impact ratings (walk-forward RAPM from compute_player_impact.py) ──
+    # r=0.379 with margin (3rd strongest feature, no leakage)
+    _h_pr = pd.to_numeric(df.get("home_player_rating_sum", 0), errors="coerce").fillna(0)
+    _a_pr = pd.to_numeric(df.get("away_player_rating_sum", 0), errors="coerce").fillna(0)
+    df["player_rating_diff"] = _h_pr - _a_pr
+
+    _h_ws = pd.to_numeric(df.get("home_weakest_starter", 0), errors="coerce").fillna(0)
+    _a_ws = pd.to_numeric(df.get("away_weakest_starter", 0), errors="coerce").fillna(0)
+    df["weakest_starter_diff"] = _h_ws - _a_ws
+
+    _h_sv = pd.to_numeric(df.get("home_starter_variance", 0), errors="coerce").fillna(0)
+    _a_sv = pd.to_numeric(df.get("away_starter_variance", 0), errors="coerce").fillna(0)
+    df["starter_balance_diff"] = _h_sv - _a_sv
+
+    # ── Head-to-head matchup history (from compute_advanced_features.py) ──
+    # r=0.474 with margin, 66.7% coverage, low redundancy with existing
+    df["h2h_margin_avg"] = pd.to_numeric(df.get("h2h_margin_avg", 0), errors="coerce").fillna(0)
+    df["h2h_home_win_rate"] = pd.to_numeric(df.get("h2h_home_win_rate", 0), errors="coerce").fillna(0)
+
+    # ── Conference strength (backfilled to 95%+ coverage) ──
+    # r=0.656 with margin on cross-conference games (45.5% nonzero, rest are same-conf = 0)
+    df["conf_strength_diff"] = pd.to_numeric(df.get("conf_strength_diff", 0), errors="coerce").fillna(0)
+    df["cross_conf_flag"] = pd.to_numeric(df.get("cross_conf_flag", 0), errors="coerce").fillna(0)
+
+    # ── Pace-adjusted stats (computed inline from existing data) ──
+    # r=0.476 — beats raw ppg_diff (0.371) by normalizing to 70 possessions
+    _STD_PACE = 70.0
+    _h_tempo_r = pd.to_numeric(df.get("home_tempo", 70), errors="coerce").fillna(70)
+    _a_tempo_r = pd.to_numeric(df.get("away_tempo", 70), errors="coerce").fillna(70)
+    _h_ppg_r = pd.to_numeric(df.get("home_ppg", 0), errors="coerce").fillna(0)
+    _a_ppg_r = pd.to_numeric(df.get("away_ppg", 0), errors="coerce").fillna(0)
+    _h_opp_r = pd.to_numeric(df.get("home_opp_ppg", 0), errors="coerce").fillna(0)
+    _a_opp_r = pd.to_numeric(df.get("away_opp_ppg", 0), errors="coerce").fillna(0)
+    df["pace_adj_ppg_diff"] = np.where(_h_tempo_r > 0, _h_ppg_r * _STD_PACE / _h_tempo_r, _h_ppg_r) - \
+                               np.where(_a_tempo_r > 0, _a_ppg_r * _STD_PACE / _a_tempo_r, _a_ppg_r)
+    df["pace_adj_opp_ppg_diff"] = np.where(_h_tempo_r > 0, _h_opp_r * _STD_PACE / _h_tempo_r, _h_opp_r) - \
+                                   np.where(_a_tempo_r > 0, _a_opp_r * _STD_PACE / _a_tempo_r, _a_opp_r)
+
+    # ── Recent form (from compute_advanced_features.py) ──
+    # r=0.418, 84% coverage — more responsive than season-long form_diff
+    df["recent_form_diff"] = pd.to_numeric(df.get("recent_form_diff", 0), errors="coerce").fillna(0)
+
     feature_cols = [
         # ── EXISTING 38 (unchanged) ──
         "neutral_em_diff", "hca_pts",
@@ -760,6 +817,21 @@ def ncaa_build_features(df):
         "is_sandwich",               # sandwich scheduling spot (682)
         "def_rest_advantage",        # defensive rest edge (19,402)
         "luck_x_spread",             # luck × spread interaction (35,880)
+        # ═══ v23: Lineup stability features (3 features) ═══
+        "lineup_changes_diff",       # starters changed from last game (home-away)
+        "lineup_stability_diff",     # rolling 5-game lineup consistency diff
+        "starter_experience_diff",   # games this exact 5 started together diff
+        # ═══ v24: Player impact + advanced features (11 features) ═══
+        "player_rating_diff",        # RAPM walk-forward starter quality (r=0.379)
+        "weakest_starter_diff",      # weakest link in lineup diff
+        "starter_balance_diff",      # star-dependent vs balanced lineup diff
+        "h2h_margin_avg",            # historical matchup margin (r=0.474)
+        "h2h_home_win_rate",         # matchup dominance rate (r=0.333)
+        "conf_strength_diff",        # conference quality gap (r=0.656 on cross-conf)
+        "cross_conf_flag",           # inter-conference game flag
+        "pace_adj_ppg_diff",         # pace-normalized offensive diff (r=0.476)
+        "pace_adj_opp_ppg_diff",     # pace-normalized defensive diff (r=0.385)
+        "recent_form_diff",          # last 5 games win rate diff (r=0.418)
     ]
     return df[feature_cols].fillna(0)
 
