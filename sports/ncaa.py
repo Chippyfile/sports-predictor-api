@@ -1770,6 +1770,46 @@ def predict_ncaa(game: dict):
         "home_roll_ats_margin": game.get("home_roll_ats_margin", 0.0),
         "away_roll_ats_margin": game.get("away_roll_ats_margin", 0.0),
     }
+    # ═══ v24: Compute player ratings from starter_ids + player_ratings.json ═══
+    _player_ratings = getattr(predict_ncaa, "_player_ratings", None)
+    if _player_ratings is None:
+        try:
+            import json as _json
+            with open("player_ratings.json") as _pf:
+                predict_ncaa._player_ratings = _json.load(_pf)
+            _player_ratings = predict_ncaa._player_ratings
+        except FileNotFoundError:
+            predict_ncaa._player_ratings = {}
+            _player_ratings = {}
+
+    for side in ["home", "away"]:
+        ids_str = game.get(f"{side}_starter_ids", "")
+        if isinstance(ids_str, str) and ids_str.strip():
+            pids = ids_str.strip().split(",")
+            ratings = [_player_ratings.get(pid, 0.0) for pid in pids]
+            row_data[f"{side}_player_rating_sum"] = sum(ratings)
+            row_data[f"{side}_player_rating_avg"] = np.mean(ratings) if ratings else 0.0
+            row_data[f"{side}_weakest_starter"] = min(ratings) if ratings else 0.0
+            row_data[f"{side}_starter_variance"] = float(np.std(ratings)) if len(ratings) > 1 else 0.0
+        else:
+            row_data[f"{side}_player_rating_sum"] = 0.0
+            row_data[f"{side}_player_rating_avg"] = 0.0
+            row_data[f"{side}_weakest_starter"] = 0.0
+            row_data[f"{side}_starter_variance"] = 0.0
+
+    # ═══ v24: Pass-through features (from compute_advanced_features.py / compute_lineup_features.py) ═══
+    row_data["h2h_margin_avg"] = game.get("h2h_margin_avg", 0.0)
+    row_data["h2h_home_win_rate"] = game.get("h2h_home_win_rate", 0.0)
+    row_data["conf_strength_diff"] = game.get("conf_strength_diff", 0.0)
+    row_data["cross_conf_flag"] = game.get("cross_conf_flag", 0)
+    row_data["recent_form_diff"] = game.get("recent_form_diff", 0.0)
+    row_data["home_lineup_changes"] = game.get("home_lineup_changes", 0)
+    row_data["away_lineup_changes"] = game.get("away_lineup_changes", 0)
+    row_data["home_lineup_stability_5g"] = game.get("home_lineup_stability_5g", 1.0)
+    row_data["away_lineup_stability_5g"] = game.get("away_lineup_stability_5g", 1.0)
+    row_data["home_starter_games_together"] = game.get("home_starter_games_together", 0)
+    row_data["away_starter_games_together"] = game.get("away_starter_games_together", 0)
+
     row = pd.DataFrame([row_data])
     X_built = ncaa_build_features(row)
 
