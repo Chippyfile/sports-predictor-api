@@ -915,6 +915,39 @@ def predict_ncaa_full(request_data):
 
     # Backfill heuristic (generates spread_home, win_pct_home, etc.)
     df = pd.DataFrame([game])
+
+    # ── Ensure all df.get() columns exist as Series before ncaa_build_features ──
+    # ncaa_build_features uses df.get(col, scalar) which returns a scalar (not a
+    # Series) when the column is missing from a single-row DataFrame, causing
+    # AttributeError: 'int' object has no attribute 'fillna'.
+    # Adding defaults here avoids touching ncaa.py.
+    _col_defaults = {
+        # Lineup stability features
+        "home_lineup_changes": 0, "away_lineup_changes": 0,
+        "home_lineup_stability_5g": 1.0, "away_lineup_stability_5g": 1.0,
+        "home_starter_games_together": 0, "away_starter_games_together": 0,
+        "home_new_starter_impact": 0.0, "away_new_starter_impact": 0.0,
+        # Player impact ratings
+        "home_player_rating_sum": 0.0, "away_player_rating_sum": 0.0,
+        "home_weakest_starter": 0.0, "away_weakest_starter": 0.0,
+        "home_starter_variance": 0.0, "away_starter_variance": 0.0,
+        # Head-to-head
+        "h2h_margin_avg": 0.0, "h2h_home_win_rate": 0.5,
+        # Spread / line movement
+        "odds_api_spread_movement": 0.0, "odds_api_total_movement": 0.0,
+        "dk_spread_movement": 0.0, "dk_total_movement": 0.0,
+        # Clutch / rolling features
+        "home_clutch_ftm": 0.0, "away_clutch_ftm": 0.0,
+        "home_clutch_fta": 1.0, "away_clutch_fta": 1.0,
+        # ESPN win probability
+        "espn_home_win_pct": 0.5, "espn_predictor_home_pct": 0.5,
+        # Halftime
+        "halftime_home_win_prob": 0.5,
+    }
+    for _col, _default in _col_defaults.items():
+        if _col not in df.columns:
+            df[_col] = _default
+
     df["home_record_wins"] = df["home_wins"]
     df["away_record_wins"] = df["away_wins"]
     df["home_record_losses"] = df["home_losses"]
