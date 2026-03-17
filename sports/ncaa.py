@@ -1797,12 +1797,65 @@ def predict_ncaa(game: dict):
             row_data[f"{side}_weakest_starter"] = 0.0
             row_data[f"{side}_starter_variance"] = 0.0
 
-    # ═══ v24: Pass-through features (from compute_advanced_features.py / compute_lineup_features.py) ═══
-    row_data["h2h_margin_avg"] = game.get("h2h_margin_avg", 0.0)
-    row_data["h2h_home_win_rate"] = game.get("h2h_home_win_rate", 0.0)
-    row_data["conf_strength_diff"] = game.get("conf_strength_diff", 0.0)
-    row_data["cross_conf_flag"] = game.get("cross_conf_flag", 0)
-    row_data["recent_form_diff"] = game.get("recent_form_diff", 0.0)
+    # ═══ v24: Lookup h2h, conference, recent form from JSON caches ═══
+    import json as _json
+
+    # H2H lookup
+    _h2h = getattr(predict_ncaa, "_h2h_lookup", None)
+    if _h2h is None:
+        try:
+            with open("h2h_lookup.json") as _f:
+                predict_ncaa._h2h_lookup = _json.load(_f)
+            _h2h = predict_ncaa._h2h_lookup
+        except FileNotFoundError:
+            predict_ncaa._h2h_lookup = {}
+            _h2h = {}
+
+    h_tid = str(game.get("home_team_id", ""))
+    a_tid = str(game.get("away_team_id", ""))
+    h2h_key = f"{h_tid}:{a_tid}"
+    h2h_data = _h2h.get(h2h_key, {})
+    row_data["h2h_margin_avg"] = h2h_data.get("margin_avg", 0.0)
+    row_data["h2h_home_win_rate"] = h2h_data.get("home_win_rate", 0.0)
+
+    # Conference lookup
+    _conf = getattr(predict_ncaa, "_conf_lookup", None)
+    if _conf is None:
+        try:
+            with open("conference_lookup.json") as _f:
+                predict_ncaa._conf_lookup = _json.load(_f)
+            _conf = predict_ncaa._conf_lookup
+        except FileNotFoundError:
+            predict_ncaa._conf_lookup = {"teams": {}, "strength": {}}
+            _conf = predict_ncaa._conf_lookup
+
+    _conf_teams = _conf.get("teams", {})
+    _conf_strength = _conf.get("strength", {})
+    h_conf = _conf_teams.get(h_tid, "")
+    a_conf = _conf_teams.get(a_tid, "")
+    if h_conf and a_conf and h_conf != a_conf:
+        row_data["conf_strength_diff"] = _conf_strength.get(h_conf, 0) - _conf_strength.get(a_conf, 0)
+        row_data["cross_conf_flag"] = 1
+    else:
+        row_data["conf_strength_diff"] = 0.0
+        row_data["cross_conf_flag"] = 0
+
+    # Recent form lookup
+    _form = getattr(predict_ncaa, "_form_lookup", None)
+    if _form is None:
+        try:
+            with open("recent_form_lookup.json") as _f:
+                predict_ncaa._form_lookup = _json.load(_f)
+            _form = predict_ncaa._form_lookup
+        except FileNotFoundError:
+            predict_ncaa._form_lookup = {}
+            _form = {}
+
+    h_form = _form.get(h_tid, 0.5)
+    a_form = _form.get(a_tid, 0.5)
+    row_data["recent_form_diff"] = h_form - a_form
+
+    # Lineup features (pass-through — computed by frontend/sync if available)
     row_data["home_lineup_changes"] = game.get("home_lineup_changes", 0)
     row_data["away_lineup_changes"] = game.get("away_lineup_changes", 0)
     row_data["home_lineup_stability_5g"] = game.get("home_lineup_stability_5g", 1.0)
