@@ -486,8 +486,10 @@ def _fetch_team_schedule_data(team_id, game_date_str, opp_rank=200):
 
 def _compute_common_opponents(home_sched, away_sched):
     """Find common opponents and compute margin differential."""
-    home_opps = {o["opp_id"]: o["margin"] for o in home_sched.get("opponents", []) if o.get("completed")}
-    away_opps = {o["opp_id"]: o["margin"] for o in away_sched.get("opponents", []) if o.get("completed")}
+    home_opps = {o["opp_id"]: o["margin"] for o in home_sched.get("opponents", []) if o.get("completed") and o.get("opp_id")}
+    away_opps = {o["opp_id"]: o["margin"] for o in away_sched.get("opponents", []) if o.get("completed") and o.get("opp_id")}
+
+    print(f"  [full_predict] Common opps: home has {len(home_opps)} opponents, away has {len(away_opps)} opponents")
 
     common_ids = set(home_opps.keys()) & set(away_opps.keys())
     n_common = len(common_ids)
@@ -497,6 +499,7 @@ def _compute_common_opponents(home_sched, away_sched):
     # Average margin difference against common opponents
     margin_diffs = [home_opps[cid] - away_opps[cid] for cid in common_ids]
     avg_diff = sum(margin_diffs) / len(margin_diffs)
+    print(f"  [full_predict] Common opps: {n_common} shared, avg_diff={avg_diff:.2f}")
     return n_common, round(avg_diff, 2)
 
 
@@ -670,8 +673,36 @@ def predict_ncaa_full(request_data):
     home_rest = home_sched.get("rest_days", 3)
     away_rest = away_sched.get("rest_days", 3)
 
-    # Common opponents from schedule data
+    # Common opponents from schedule data (live computation)
     n_common_opps, common_opp_diff = _compute_common_opponents(home_sched, away_sched)
+
+    # Historical fallback: if live computation found no common opponents,
+    # check if ncaa_historical has pre-computed values for this matchup
+    if n_common_opps == 0:
+        try:
+            hist_rows = sb_get(
+                "ncaa_historical",
+                f"home_team_id=eq.{home_team_id}&away_team_id=eq.{away_team_id}"
+                f"&n_common_opps=gt.0&select=n_common_opps,common_opp_diff"
+                f"&order=game_date.desc&limit=1"
+            )
+            if not hist_rows:
+                # Try reverse matchup
+                hist_rows = sb_get(
+                    "ncaa_historical",
+                    f"home_team_id=eq.{away_team_id}&away_team_id=eq.{home_team_id}"
+                    f"&n_common_opps=gt.0&select=n_common_opps,common_opp_diff"
+                    f"&order=game_date.desc&limit=1"
+                )
+                if hist_rows:
+                    # Flip sign for common_opp_diff since perspective is reversed
+                    hist_rows[0]["common_opp_diff"] = -(hist_rows[0].get("common_opp_diff") or 0)
+            if hist_rows and hist_rows[0].get("n_common_opps"):
+                n_common_opps = int(hist_rows[0]["n_common_opps"])
+                common_opp_diff = float(hist_rows[0].get("common_opp_diff") or 0)
+                print(f"  [full_predict] Common opps from historical: n={n_common_opps}, diff={common_opp_diff:.2f}")
+        except Exception as e:
+            print(f"  [full_predict] Historical common opps lookup error: {e}")
 
     # Conference tournament: auto-detect from ESPN game summary, fallback to request
     is_conf_tourney = (
@@ -753,11 +784,13 @@ def predict_ncaa_full(request_data):
         "home_ato_ratio": home_stats.get("ato_ratio", 1.2), "away_ato_ratio": away_stats.get("ato_ratio", 1.2),
         "home_ts_pct": home_stats.get("ts_pct", 0.53), "away_ts_pct": away_stats.get("ts_pct", 0.53),
 
-        # Record — prefer ESPN record, but if it returned defaults (15/10), use schedule
-        "home_wins": home_record["wins"] if home_record["wins"] != 15 else home_sched.get("wins", 15),
-        "away_wins": away_record["wins"] if away_record["wins"] != 15 else away_sched.get("wins", 15),
-        "home_losses": home_record["losses"] if home_record["losses"] != 10 else home_sched.get("losses", 10),
-        "away_losses": away_record["losses"] if away_record["losses"] != 10 else away_sched.get("losses", 10),
+        # Record — ALWAYS prefer schedule data (ESPN record endpoint returns
+        # tournament-only records in March, e.g. Howard showing 1-0).
+        # Schedule-derived wins/losses are computed from actual completed games.
+        "home_wins": home_sched.get("wins") or home_record["wins"],
+        "away_wins": away_sched.get("wins") or away_record["wins"],
+        "home_losses": home_sched.get("losses") or home_record["losses"],
+        "away_losses": away_sched.get("losses") or away_record["losses"],
         # AUDIT FIX: Supabase sos is more reliable than ESPN record endpoint
         "home_sos": sb("home_sos", 0) or home_record.get("sos", 0.5),
         "away_sos": sb_away("home_sos", 0) or away_record.get("sos", 0.5),
@@ -960,13 +993,15 @@ def predict_ncaa_full(request_data):
 
     # ═══ v28: Compute game-level features that aren't stored per-team ═══
 
-    # 1. Fix wins/losses — prefer schedule data (more reliable than ESPN record endpoint)
-    if home_sched.get("wins", 0) > 0 or home_sched.get("losses", 0) > 0:
+    # 1. Fix wins/losses — schedule data is primary source (ESPN record endpoint
+    # returns tournament-only records in March). Only override if schedule has data.
+    if home_sched.get("wins", 0) + home_sched.get("losses", 0) > 0:
         game["home_wins"] = home_sched["wins"]
         game["home_losses"] = home_sched["losses"]
-    if away_sched.get("wins", 0) > 0 or away_sched.get("losses", 0) > 0:
+    if away_sched.get("wins", 0) + away_sched.get("losses", 0) > 0:
         game["away_wins"] = away_sched["wins"]
         game["away_losses"] = away_sched["losses"]
+    print(f"  [full_predict] Record: home={game['home_wins']}-{game['home_losses']}, away={game['away_wins']}-{game['away_losses']} (sched_h={home_sched.get('wins')}-{home_sched.get('losses')}, espn_h={home_record['wins']}-{home_record['losses']})")
 
     # 2. Conference strength diff + cross-conference flag
     _CONF_STRENGTH = {
@@ -1012,32 +1047,41 @@ def predict_ncaa_full(request_data):
         h2h_rows = sb_get(
             "ncaa_historical",
             f"home_team_id=eq.{home_team_id}&away_team_id=eq.{away_team_id}"
+            f"&actual_home_score=not.is.null&actual_away_score=not.is.null"
             f"&select=actual_home_score,actual_away_score&order=game_date.desc&limit=5"
         )
         # Also check reverse matchup
         h2h_reverse = sb_get(
             "ncaa_historical",
             f"home_team_id=eq.{away_team_id}&away_team_id=eq.{home_team_id}"
+            f"&actual_home_score=not.is.null&actual_away_score=not.is.null"
             f"&select=actual_home_score,actual_away_score&order=game_date.desc&limit=5"
         )
         h2h_margins = []
         h2h_home_wins = 0
         h2h_total = 0
         for r in (h2h_rows or []):
-            if r.get("actual_home_score") and r.get("actual_away_score"):
-                margin = r["actual_home_score"] - r["actual_away_score"]
+            hs = r.get("actual_home_score")
+            aws = r.get("actual_away_score")
+            if hs is not None and aws is not None:
+                margin = float(hs) - float(aws)
                 h2h_margins.append(margin)
                 if margin > 0: h2h_home_wins += 1
                 h2h_total += 1
         for r in (h2h_reverse or []):
-            if r.get("actual_home_score") and r.get("actual_away_score"):
-                margin = -(r["actual_home_score"] - r["actual_away_score"])  # flip perspective
+            hs = r.get("actual_home_score")
+            aws = r.get("actual_away_score")
+            if hs is not None and aws is not None:
+                margin = -(float(hs) - float(aws))  # flip perspective
                 h2h_margins.append(margin)
                 if margin > 0: h2h_home_wins += 1
                 h2h_total += 1
         if h2h_total > 0:
             game["h2h_margin_avg"] = sum(h2h_margins) / len(h2h_margins)
             game["h2h_home_win_rate"] = h2h_home_wins / h2h_total
+            print(f"  [full_predict] H2H: {h2h_total} games, avg_margin={game['h2h_margin_avg']:.1f}, win_rate={game['h2h_home_win_rate']:.2f}")
+        else:
+            print(f"  [full_predict] H2H: no historical matchups found")
     except Exception as e:
         print(f"  [full_predict] H2H lookup error: {e}")
 
@@ -1055,6 +1099,23 @@ def predict_ncaa_full(request_data):
     # 5. Recent form from Supabase (not in team-level _COLS)
     game["home_recent_form"] = sb("home_form", 0)  # alias
     game["away_recent_form"] = sb_away("home_form", 0)
+    # recent_form_diff in training = last-5-game WIN RATE diff (from compute_advanced_features.py).
+    # This is distinct from form_diff (season-long). Compute from schedule opponents.
+    def _last5_win_rate(sched):
+        opps = [o for o in sched.get("opponents", []) if o.get("completed")]
+        if len(opps) < 3:
+            return None  # not enough data — let ncaa_build_features use default
+        last5 = opps[-5:]
+        wins = sum(1 for o in last5 if o.get("margin", 0) > 0)
+        return wins / len(last5)
+
+    h_rf = _last5_win_rate(home_sched)
+    a_rf = _last5_win_rate(away_sched)
+    if h_rf is not None and a_rf is not None:
+        game["recent_form_diff"] = round(h_rf - a_rf, 4)
+        print(f"  [full_predict] recent_form_diff: {game['recent_form_diff']:.3f} (home_5g={h_rf:.2f}, away_5g={a_rf:.2f})")
+    else:
+        print(f"  [full_predict] recent_form_diff: insufficient schedule data (home={h_rf}, away={a_rf})")
 
     # 6. Revenge game detection using schedule opponents
     for opp in home_sched.get("opponents", []):
@@ -1062,6 +1123,42 @@ def predict_ncaa_full(request_data):
             game["is_revenge_game"] = 1
             game["revenge_margin"] = abs(opp["margin"])
             break
+
+    # 7. Compute pyth_residual and luck when Supabase returns 0
+    # Formula confirmed from fix_conf_tourney_and_pyth.py:
+    #   pyth_pct = ppg^11.5 / (ppg^11.5 + opp_ppg^11.5)
+    #   residual = actual_win_pct - pyth_pct
+    # In KenPom, "luck" IS the Pythagorean residual (same formula).
+    _PYTH_EXP = 11.5
+    for side, stats_dict, sb_fn, sched in [
+        ("home", home_stats, sb, home_sched),
+        ("away", away_stats, sb_away, away_sched),
+    ]:
+        ppg = stats_dict.get("ppg", 75) or 75
+        opp_ppg = sb_fn("home_opp_ppg") or stats_dict.get("opp_ppg", 72) or 72
+        w = game.get(f"{side}_wins", 15)
+        l = game.get(f"{side}_losses", 10)
+        total_games = w + l
+        if total_games > 0 and ppg > 0 and opp_ppg > 0:
+            actual_pct = w / total_games
+            ppg_exp = ppg ** _PYTH_EXP
+            opp_exp = opp_ppg ** _PYTH_EXP
+            pyth_pct = ppg_exp / (ppg_exp + opp_exp)
+            computed_residual = round(actual_pct - pyth_pct, 4)
+
+            # Fill pyth_residual if Supabase returned 0
+            if game.get(f"{side}_pyth_residual", 0) == 0:
+                game[f"{side}_pyth_residual"] = computed_residual
+
+            # Fill luck if Supabase returned 0
+            if game.get(f"{side}_luck", 0) == 0:
+                game[f"{side}_luck"] = computed_residual
+
+    print(f"  [full_predict] pyth_residual: home={game['home_pyth_residual']:.4f}, away={game['away_pyth_residual']:.4f}")
+    print(f"  [full_predict] luck: home={game['home_luck']:.4f}, away={game['away_luck']:.4f}")
+
+    # 8. Recompute luck_x_spread now that luck has a real value
+    game["luck_x_spread"] = game.get("home_luck", 0) * market_spread * 0.01
 
     # ── Build features and predict ──
     import json as _json
@@ -1165,8 +1262,7 @@ def predict_ncaa_full(request_data):
     if "opp_ppg_diff" in X.columns and r["opp_ppg_diff"] == 0:
         h_opp = sb("home_opp_ppg") or 72
         a_opp = sb_away("home_opp_ppg") or 72
-        if h_opp and a_opp:
-            X.loc[:, "opp_ppg_diff"] = h_opp - a_opp
+        X.loc[:, "opp_ppg_diff"] = h_opp - a_opp
 
     # def_fgpct_diff: opponent FG% differential
     if "def_fgpct_diff" in X.columns and r["def_fgpct_diff"] == 0:
@@ -1176,15 +1272,15 @@ def predict_ncaa_full(request_data):
 
     # win_pct_diff: from record — prefer schedule data over ESPN record defaults
     if "win_pct_diff" in X.columns and r["win_pct_diff"] == 0:
-        # Use schedule-derived record if ESPN returned defaults (15/10)
-        h_w = home_sched.get("wins", 0) or home_record["wins"]
-        h_l = home_sched.get("losses", 0) or home_record["losses"]
-        a_w = away_sched.get("wins", 0) or away_record["wins"]
-        a_l = away_sched.get("losses", 0) or away_record["losses"]
+        # Use schedule wins/losses (already validated as primary source above)
+        h_w = game.get("home_wins", 0)
+        h_l = game.get("home_losses", 0)
+        a_w = game.get("away_wins", 0)
+        a_l = game.get("away_losses", 0)
         h_pct = h_w / max(h_w + h_l, 1)
         a_pct = a_w / max(a_w + a_l, 1)
-        if h_pct != a_pct:
-            X.loc[:, "win_pct_diff"] = h_pct - a_pct
+        X.loc[:, "win_pct_diff"] = h_pct - a_pct
+        print(f"  [full_predict] win_pct_diff patched: {h_w}/{h_w+h_l} - {a_w}/{a_w+a_l} = {h_pct - a_pct:.3f}")
 
     # hca_pts: 0 for neutral is correct, but for non-neutral fill conference HCA
     if "hca_pts" in X.columns and r["hca_pts"] == 0 and not neutral_site:
@@ -1194,8 +1290,7 @@ def predict_ncaa_full(request_data):
     if "sos_diff" in X.columns and r["sos_diff"] == 0:
         h_sos = home_record.get("sos", 0.5)
         a_sos = away_record.get("sos", 0.5)
-        if h_sos != a_sos:
-            X.loc[:, "sos_diff"] = h_sos - a_sos
+        X.loc[:, "sos_diff"] = h_sos - a_sos
 
     # espn_wp_edge: from ESPN predictor (BPI preferred, available pre-game)
     # AUDIT FIX: prefer espn_pred over espn_wp, matching ncaa.py fix
@@ -1206,42 +1301,60 @@ def predict_ncaa_full(request_data):
 
     # games_last_14_diff: Supabase first, then schedule fallback
     if "games_last_14_diff" in X.columns and r["games_last_14_diff"] == 0:
-        h_g14 = sb("home_games_last_14") or home_sched.get("games_last_14", 4)
-        a_g14 = sb_away("home_games_last_14") or away_sched.get("games_last_14", 4)
-        if h_g14 != a_g14:
-            X.loc[:, "games_last_14_diff"] = h_g14 - a_g14
+        h_g14_sb = sb("home_games_last_14")
+        a_g14_sb = sb_away("home_games_last_14")
+        # FIX: use `is not None` check instead of `or` — 0 games is a valid value
+        h_g14 = h_g14_sb if h_g14_sb else home_sched.get("games_last_14", 4)
+        a_g14 = a_g14_sb if a_g14_sb else away_sched.get("games_last_14", 4)
+        X.loc[:, "games_last_14_diff"] = h_g14 - a_g14
 
     # conf_balance_diff: from Supabase
+    # FIX: removed `if h_cb or a_cb` guard — 0.0 is falsy but valid
     if "conf_balance_diff" in X.columns and r["conf_balance_diff"] == 0:
         h_cb = sb("home_conf_balance", 0)
         a_cb = sb_away("home_conf_balance", 0)
-        if h_cb or a_cb:
-            X.loc[:, "conf_balance_diff"] = h_cb - a_cb
+        X.loc[:, "conf_balance_diff"] = h_cb - a_cb
+        if h_cb != 0 or a_cb != 0:
+            print(f"  [full_predict] conf_balance_diff patched: {h_cb:.4f} - {a_cb:.4f} = {h_cb - a_cb:.4f}")
 
     # anti_fragility_diff: from Supabase
+    # FIX: removed `if h_af or a_af` guard — same truthiness issue
     if "anti_fragility_diff" in X.columns and r["anti_fragility_diff"] == 0:
         h_af = sb("home_anti_fragility", 0)
         a_af = sb_away("home_anti_fragility", 0)
-        if h_af or a_af:
-            X.loc[:, "anti_fragility_diff"] = h_af - a_af
+        X.loc[:, "anti_fragility_diff"] = h_af - a_af
 
     # roll_clutch_ft_diff: from Supabase rolling data
+    # FIX: Use actual Supabase values even if they match the default (0.70).
+    # The old guard `if h_cft != 0.70 or a_cft != 0.70` blocked valid data when
+    # both teams had exactly the default value, but it also blocked the diff=0 case
+    # which is correct. Now always compute the diff.
     if "roll_clutch_ft_diff" in X.columns and r["roll_clutch_ft_diff"] == 0:
         h_cft = sb("home_roll_clutch_ft_pct", 0.70)
         a_cft = sb_away("home_roll_clutch_ft_pct", 0.70)
-        if h_cft != 0.70 or a_cft != 0.70:
-            X.loc[:, "roll_clutch_ft_diff"] = h_cft - a_cft
+        X.loc[:, "roll_clutch_ft_diff"] = h_cft - a_cft
+
+    # roll_garbage_diff: from Supabase rolling data
+    if "roll_garbage_diff" in X.columns and r["roll_garbage_diff"] == 0:
+        h_rg = sb("home_roll_garbage_pct", 0.15)
+        a_rg = sb_away("home_roll_garbage_pct", 0.15)
+        X.loc[:, "roll_garbage_diff"] = h_rg - a_rg
 
     # centrality_diff: from Supabase
     if "centrality_diff" in X.columns and r["centrality_diff"] == 0:
         h_c = sb("home_centrality", 1.0)
         a_c = sb_away("home_centrality", 1.0)
-        if h_c != a_c:
-            X.loc[:, "centrality_diff"] = h_c - a_c
+        X.loc[:, "centrality_diff"] = h_c - a_c
 
     # Count real vs default features
     non_zero = (X.iloc[0] != 0).sum()
     total = len(feature_cols)
+
+    # Diagnostic: log which features are still zero
+    zero_features = [col for col in feature_cols if X[col].iloc[0] == 0]
+    print(f"  [full_predict] Feature coverage: {non_zero}/{total} non-zero")
+    if zero_features:
+        print(f"  [full_predict] Zero features ({len(zero_features)}): {zero_features}")
 
     X_s = bundle["scaler"].transform(X)
 
