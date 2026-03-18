@@ -958,6 +958,111 @@ def predict_ncaa_full(request_data):
         "home_form": sb("home_form", 0), "away_form": sb_away("home_form", 0),
     }
 
+    # ═══ v28: Compute game-level features that aren't stored per-team ═══
+
+    # 1. Fix wins/losses — prefer schedule data (more reliable than ESPN record endpoint)
+    if home_sched.get("wins", 0) > 0 or home_sched.get("losses", 0) > 0:
+        game["home_wins"] = home_sched["wins"]
+        game["home_losses"] = home_sched["losses"]
+    if away_sched.get("wins", 0) > 0 or away_sched.get("losses", 0) > 0:
+        game["away_wins"] = away_sched["wins"]
+        game["away_losses"] = away_sched["losses"]
+
+    # 2. Conference strength diff + cross-conference flag
+    _CONF_STRENGTH = {
+        "Big 12": 0.65, "SEC": 0.62, "Big Ten": 0.60, "ACC": 0.58,
+        "Big East": 0.55, "Pac-12": 0.52, "Mountain West": 0.45,
+        "American Athletic": 0.42, "AAC": 0.42, "West Coast": 0.40, "WCC": 0.40,
+        "Missouri Valley": 0.38, "MVC": 0.38, "Atlantic 10": 0.38, "A-10": 0.38,
+        "Southeastern Conference": 0.62, "Big Ten Conference": 0.60,
+        "Atlantic Coast Conference": 0.58, "Big East Conference": 0.55,
+        "Mountain West Conference": 0.45, "American Athletic Conference": 0.42,
+        "West Coast Conference": 0.40, "Missouri Valley Conference": 0.38,
+        "Atlantic 10 Conference": 0.38,
+        "Conference USA": 0.32, "C-USA": 0.32, "Sun Belt": 0.30, "Sun Belt Conference": 0.30,
+        "Mid-American": 0.28, "MAC": 0.28, "Mid-American Conference": 0.28,
+        "Southland": 0.22, "Southland Conference": 0.22,
+        "WAC": 0.25, "Western Athletic": 0.25, "Western Athletic Conference": 0.25,
+        "Ivy League": 0.35, "Ivy": 0.35,
+        "Patriot League": 0.25, "Patriot": 0.25,
+        "Colonial Athletic Association": 0.30, "CAA": 0.30,
+        "Southern Conference": 0.28, "SoCon": 0.28,
+        "Ohio Valley": 0.20, "OVC": 0.20, "Ohio Valley Conference": 0.20,
+        "Horizon League": 0.28, "Horizon": 0.28,
+        "MAAC": 0.25, "Metro Atlantic Athletic": 0.25,
+        "Northeast Conference": 0.18, "NEC": 0.18,
+        "MEAC": 0.15, "SWAC": 0.15, "Southland Conference": 0.22,
+        "Summit League": 0.22, "Summit": 0.22,
+        "Big South": 0.20, "Big South Conference": 0.20,
+        "America East": 0.22, "America East Conference": 0.22,
+        "Big West": 0.25, "Big West Conference": 0.25,
+        "Atlantic Sun": 0.22, "ASUN": 0.22, "ASUN Conference": 0.22,
+    }
+    h_conf = game["home_conference"]
+    a_conf = game["away_conference"]
+    if h_conf and a_conf and h_conf != a_conf:
+        game["conf_strength_diff"] = _CONF_STRENGTH.get(h_conf, 0.30) - _CONF_STRENGTH.get(a_conf, 0.30)
+        game["cross_conf_flag"] = 1
+    else:
+        game["conf_strength_diff"] = 0.0
+        game["cross_conf_flag"] = 0
+
+    # 3. H2H lookup from ncaa_historical
+    try:
+        h2h_rows = sb_get(
+            "ncaa_historical",
+            f"home_team_id=eq.{home_team_id}&away_team_id=eq.{away_team_id}"
+            f"&select=actual_home_score,actual_away_score&order=game_date.desc&limit=5"
+        )
+        # Also check reverse matchup
+        h2h_reverse = sb_get(
+            "ncaa_historical",
+            f"home_team_id=eq.{away_team_id}&away_team_id=eq.{home_team_id}"
+            f"&select=actual_home_score,actual_away_score&order=game_date.desc&limit=5"
+        )
+        h2h_margins = []
+        h2h_home_wins = 0
+        h2h_total = 0
+        for r in (h2h_rows or []):
+            if r.get("actual_home_score") and r.get("actual_away_score"):
+                margin = r["actual_home_score"] - r["actual_away_score"]
+                h2h_margins.append(margin)
+                if margin > 0: h2h_home_wins += 1
+                h2h_total += 1
+        for r in (h2h_reverse or []):
+            if r.get("actual_home_score") and r.get("actual_away_score"):
+                margin = -(r["actual_home_score"] - r["actual_away_score"])  # flip perspective
+                h2h_margins.append(margin)
+                if margin > 0: h2h_home_wins += 1
+                h2h_total += 1
+        if h2h_total > 0:
+            game["h2h_margin_avg"] = sum(h2h_margins) / len(h2h_margins)
+            game["h2h_home_win_rate"] = h2h_home_wins / h2h_total
+    except Exception as e:
+        print(f"  [full_predict] H2H lookup error: {e}")
+
+    # 4. ESPN win probability edge
+    if game["espn_home_win_pct"] and game["espn_home_win_pct"] != 0.5:
+        pass  # espn_wp_edge will be computed by ncaa_build_features
+    else:
+        # Try to get from pickcenter implied probability
+        if game["market_spread_home"] and game["market_spread_home"] != 0:
+            # Implied win prob from spread: P(home) ≈ Φ(-spread/10.5) rough estimate
+            import math
+            _sp = game["market_spread_home"]
+            game["espn_home_win_pct"] = 1 / (1 + math.pow(10, _sp / 13.5))
+
+    # 5. Recent form from Supabase (not in team-level _COLS)
+    game["home_recent_form"] = sb("home_form", 0)  # alias
+    game["away_recent_form"] = sb_away("home_form", 0)
+
+    # 6. Revenge game detection using schedule opponents
+    for opp in home_sched.get("opponents", []):
+        if str(opp.get("opp_id")) == str(away_team_id) and opp.get("margin", 0) < 0:
+            game["is_revenge_game"] = 1
+            game["revenge_margin"] = abs(opp["margin"])
+            break
+
     # ── Build features and predict ──
     import json as _json
     try:
