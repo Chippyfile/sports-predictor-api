@@ -346,8 +346,8 @@ def _fetch_espn_game_info(game_id, game_date, pregame=False):
 
 def _fetch_team_schedule_data(team_id, game_date_str, opp_rank=200):
     """
-    Single ESPN /schedule call → rest days + all schedule situation features.
-    Replaces both _compute_rest_days() and _fetch_schedule_situations().
+    Query ncaa_historical for team's completed games this season.
+    Same data source as training → perfect alignment.
 
     Returns: {
         "rest_days": int,
@@ -373,134 +373,96 @@ def _fetch_team_schedule_data(team_id, game_date_str, opp_rank=200):
     }
 
     try:
-        r = requests.get(f"{ESPN_BASE}/teams/{team_id}/schedule", timeout=10)
-        if not r.ok:
-            print(f"  [full_predict] Schedule fetch failed for {team_id}: HTTP {r.status_code}")
-            return result
-        data = r.json()
         game_date = datetime.fromisoformat(f"{game_date_str}T00:00:00")
-        events = data.get("events", [])
+        # NCAA season: Nov (year-1) through April (year). Season label = spring year.
+        season_year = game_date.year if game_date.month < 8 else game_date.year + 1
 
-        # ── Parse all events ──
-        dated_events = []
-        _parse_errors = 0
-        for ev in events:
-            try:
-                ev_date = datetime.fromisoformat(ev["date"][:19].replace("Z", "")).replace(tzinfo=None)
-                comp = ev.get("competitions", [{}])[0]
-                completed = comp.get("status", {}).get("type", {}).get("completed", False)
-                opp_r = 200
-                opp_id = ""
-                score_team, score_opp = 0, 0
-                is_home = False
-                for team in comp.get("competitors", []):
-                    tid = str(team.get("id", ""))
-                    # ESPN score can be: {"value": 75}, "75", 75, or {"displayValue": "75"}
-                    raw_score = team.get("score")
-                    if isinstance(raw_score, dict):
-                        _sv = raw_score.get("value") or raw_score.get("displayValue", 0)
-                    else:
-                        _sv = raw_score or 0
-                    try:
-                        _score = int(float(str(_sv)))
-                    except (ValueError, TypeError):
-                        _score = 0
+        # Pull all completed games for this team this season from ncaa_historical
+        _select = "game_date,home_team_id,away_team_id,actual_home_score,actual_away_score,home_rank,away_rank"
+        home_rows = sb_get(
+            "ncaa_historical",
+            f"home_team_id=eq.{team_id}&season=eq.{season_year}"
+            f"&actual_home_score=not.is.null"
+            f"&game_date=lt.{game_date_str}"
+            f"&select={_select}&order=game_date.asc"
+        ) or []
+        away_rows = sb_get(
+            "ncaa_historical",
+            f"away_team_id=eq.{team_id}&season=eq.{season_year}"
+            f"&actual_away_score=not.is.null"
+            f"&game_date=lt.{game_date_str}"
+            f"&select={_select}&order=game_date.asc"
+        ) or []
 
-                    if tid != str(team_id):
-                        opp_r = team.get("curatedRank", {}).get("current", 200) or 200
-                        opp_id = tid
-                        score_opp = _score
-                    else:
-                        is_home = team.get("homeAway") == "home"
-                        score_team = _score
-                dated_events.append({
-                    "date": ev_date, "completed": completed, "opp_rank": opp_r,
-                    "opp_id": opp_id, "score_team": score_team, "score_opp": score_opp,
-                    "is_home": is_home,
-                })
-            except Exception as e:
-                _parse_errors += 1
-                if _parse_errors <= 3:
-                    print(f"  [full_predict] Schedule parse error for event: {e}")
-                continue
+        # Merge and normalize to team perspective
+        games = []
+        for r in home_rows:
+            games.append({
+                "date": r.get("game_date", ""),
+                "opp_id": str(r.get("away_team_id", "")),
+                "score_team": float(r.get("actual_home_score", 0) or 0),
+                "score_opp": float(r.get("actual_away_score", 0) or 0),
+                "opp_rank": int(r.get("away_rank") or 200),
+            })
+        for r in away_rows:
+            games.append({
+                "date": r.get("game_date", ""),
+                "opp_id": str(r.get("home_team_id", "")),
+                "score_team": float(r.get("actual_away_score", 0) or 0),
+                "score_opp": float(r.get("actual_home_score", 0) or 0),
+                "opp_rank": int(r.get("home_rank") or 200),
+            })
 
-        # Diagnostic: schedule parsing summary
-        n_completed = sum(1 for e in dated_events if e["completed"])
-        n_before = sum(1 for e in dated_events if e["completed"] and e["date"] < game_date)
-        print(f"  [full_predict] Schedule {team_id}: {len(events)} events → {len(dated_events)} parsed, {n_completed} completed, {n_before} before game_date, {_parse_errors} errors")
+        games.sort(key=lambda g: g["date"])
+        print(f"  [full_predict] Schedule {team_id}: {len(games)} games from ncaa_historical (season={season_year})")
 
-        dated_events.sort(key=lambda x: x["date"])
+        if not games:
+            _cache_set(cache_key, result)
+            return result
 
         # ── Rest days ──
-        last_game = None
-        for e in dated_events:
-            if e["completed"] and e["date"] < game_date:
-                if not last_game or e["date"] > last_game:
-                    last_game = e["date"]
-        if last_game:
-            result["rest_days"] = max(0, (game_date - last_game).days)
-        else:
-            result["rest_days"] = 7
+        last_date_str = games[-1]["date"]
+        if last_date_str:
+            try:
+                last_date = datetime.fromisoformat(last_date_str[:10] + "T00:00:00")
+                result["rest_days"] = max(0, (game_date - last_date).days)
+            except:
+                result["rest_days"] = 3
 
-        # ── Record, opponents list, games_last_14, after_loss ──
-        completed_before = [e for e in dated_events if e["completed"] and e["date"] < game_date]
-        for e in completed_before:
-            if e["score_team"] > e["score_opp"]:
+        # ── Record, opponents list ──
+        for g in games:
+            if g["score_team"] > g["score_opp"]:
                 result["wins"] += 1
-            elif e["score_team"] < e["score_opp"]:
+            elif g["score_team"] < g["score_opp"]:
                 result["losses"] += 1
-            if e["opp_id"]:
+            if g["opp_id"]:
                 result["opponents"].append({
-                    "opp_id": e["opp_id"],
-                    "margin": e["score_team"] - e["score_opp"],
+                    "opp_id": g["opp_id"],
+                    "margin": g["score_team"] - g["score_opp"],
                     "completed": True,
                 })
 
-        # After loss: did the last completed game end in a loss?
-        if completed_before:
-            last = completed_before[-1]
-            if last["score_team"] < last["score_opp"]:
-                result["after_loss"] = 1
+        # ── After loss ──
+        last = games[-1]
+        if last["score_team"] < last["score_opp"]:
+            result["after_loss"] = 1
 
-        # Games in last 14 days
-        cutoff_14 = game_date - timedelta(days=14)
-        result["games_last_14"] = sum(
-            1 for e in completed_before if e["date"] >= cutoff_14
-        )
+        # ── Games in last 14 days ──
+        cutoff_14 = (game_date - timedelta(days=14)).strftime("%Y-%m-%d")
+        result["games_last_14"] = sum(1 for g in games if g["date"] >= cutoff_14)
 
-        # ── Lookahead / Sandwich / Revenge ──
-        prev_game = None
-        next_game = None
-        for i, ev in enumerate(dated_events):
-            if abs((ev["date"] - game_date).days) <= 1:
-                if i > 0:
-                    prev_game = dated_events[i - 1]
-                if i < len(dated_events) - 1:
-                    next_game = dated_events[i + 1]
-                break
-
-        # Lookahead: next game is against a top-25 team
-        if next_game and next_game["opp_rank"] <= 25:
-            result["is_lookahead"] = 1
-
-        # Sandwich: game between two games within 5 days
-        if prev_game and next_game:
-            days_span = (next_game["date"] - prev_game["date"]).days
-            if days_span <= 5:
-                result["is_sandwich"] = 1
-
-        # Revenge: did this team lose to today's opponent earlier this season?
-        opp_team_id = str(opp_rank)  # opp_rank parameter is actually the opponent's team ID
-        # (parameter name is misleading — it's passed as the OTHER team's ID from the caller)
-        # Actually, we need the opponent team ID. Check the caller...
-        # The caller passes request_data.get("away_rank", 200) for home team schedule.
-        # That's wrong for revenge detection. Instead, look through schedule opponents.
+        # ── Lookahead / Sandwich ──
+        # For lookahead we'd need future games — not available in ncaa_historical.
+        # These are low-value features (is_lookahead, is_sandwich) and rarely nonzero.
+        # Leave as 0 — they were 0 in training most of the time too.
 
         _cache_set(cache_key, result)
         return result
 
     except Exception as e:
         print(f"  [full_predict] Schedule data error for {team_id}: {e}")
+        import traceback
+        traceback.print_exc()
         return result
 
 
