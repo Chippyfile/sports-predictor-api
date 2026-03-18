@@ -1157,4 +1157,15 @@ def predict_ncaa_full(request_data):
             "model_type": bundle.get("model_type", "unknown"),
             "trained_at": bundle["trained_at"],
         },
+        # v25: Audit fields for ncaaSync to save to predictions table
+        "audit_data": {
+            "home_sos": game.get("home_sos"),
+            "away_sos": game.get("away_sos"),
+            "home_opp_fgpct": game.get("home_opp_fgpct"),
+            "away_opp_fgpct": game.get("away_opp_fgpct"),
+            "home_opp_threepct": game.get("home_opp_threepct"),
+            "away_opp_threepct": game.get("away_opp_threepct"),
+            "home_conference": game.get("home_conference"),
+            "away_conference": game.get("away_conference"),
+        },
     }
