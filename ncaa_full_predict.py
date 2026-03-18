@@ -526,7 +526,9 @@ def _fetch_supabase_team_data(team_id, team_name):
         "roll_lead_changes,roll_time_with_lead_pct,"
         "roll_players_used,roll_hhi,roll_minutes_hhi,"
         "roll_clutch_ft_pct,roll_garbage_pct,"
-        "roll_ats_pct,roll_ats_n,roll_ats_margin"
+        "roll_ats_pct,roll_ats_n,roll_ats_margin,"
+        "player_rating_sum,weakest_starter,starter_variance,"
+        "lineup_changes,lineup_stability_5g,starter_games_together"
     )
 
     try:
