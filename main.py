@@ -649,18 +649,13 @@ def route_ncaa_daily():
 
                 # Call /predict/ncaa/full for this game
                 try:
-                    pred_resp = _req.post(
-                        f"http://localhost:{os.environ.get('PORT', 5000)}/predict/ncaa/full",
-                        json={
-                            "home_team_id": str(home_id),
-                            "away_team_id": str(away_id),
-                            "neutral_site": neutral,
-                            "game_date": today_pst,
-                            "game_id": str(game_id),
-                        },
-                        timeout=30
-                    )
-                    pred = pred_resp.json() if pred_resp.ok else None
+                    pred = predict_ncaa_full({
+                        "home_team_id": str(home_id),
+                        "away_team_id": str(away_id),
+                        "neutral_site": neutral,
+                        "game_date": today_pst,
+                        "game_id": str(game_id),
+                    })
 
                     if pred and not pred.get("error") and pred.get("ml_win_prob_home") is not None:
                         # Build the row to save
