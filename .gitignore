@@ -57,3 +57,9 @@ models/nba.pkl
 models/mlb.pkl
 pickcenter_cache.json
 odds_patches_matched.json
+*.csv
+*.joblib
+backfill_log.json
+walk_forward_*.json
+true_walkforward_*.json
+no_market_*.json
