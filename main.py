@@ -64,6 +64,8 @@ def index():
             "GET  /cron/status",
             "POST /compute/ncaa-efficiency",
             "GET  /ratings/ncaa",
+            "GET  /cron/ncaa-daily?mode=predict|refresh|grade|auto",
+            "GET  /cron/ncaa-ats-record",
         ],
     })
 
@@ -542,6 +544,382 @@ def debug_train_mlb():
         return jsonify(train_mlb())
     except Exception as e:
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# ROUTES — NCAA Daily Cron (fully automated predictions + grading)
+# Schedule in Railway:
+#   8:00 AM PST  (16:00 UTC) → /cron/ncaa-daily?mode=predict  (morning predictions)
+#   12:00 PM PST (20:00 UTC) → /cron/ncaa-daily?mode=refresh  (re-check spreads/starters)
+#   2:00 PM PST  (22:00 UTC) → /cron/ncaa-daily?mode=refresh  (final pre-game update)
+#   11:30 PM EST (04:30 UTC) → /cron/ncaa-daily?mode=grade    (grade results)
+# ═══════════════════════════════════════════════════════════════
+
+_ncaa_cron_lock = False
+
+@app.route("/cron/ncaa-daily", methods=["GET", "POST"])
+def route_ncaa_daily():
+    """
+    Automated NCAA sync — no login required.
+    Modes:
+      predict  — fetch today's games, run ML predictions, save picks + ATS signals
+      refresh  — re-fetch spreads/starters for today's unplayed games, update predictions
+      grade    — fill final scores, grade ML/ATS/O-U for completed games
+      auto     — (default) predict if morning, grade if night, refresh if midday
+    """
+    import time as _time, traceback
+    from datetime import datetime, timezone, timedelta
+    global _ncaa_cron_lock
+
+    if _ncaa_cron_lock:
+        return jsonify({"status": "already_running"}), 429
+
+    _ncaa_cron_lock = True
+    start = _time.time()
+
+    try:
+        mode = request.args.get("mode", "auto")
+        now_utc = datetime.now(timezone.utc)
+        now_pst = now_utc - timedelta(hours=8)
+        today_pst = now_pst.strftime("%Y-%m-%d")
+        hour_pst = now_pst.hour
+
+        # Auto mode: predict in morning, refresh midday, grade at night
+        if mode == "auto":
+            if hour_pst < 11:
+                mode = "predict"
+            elif hour_pst < 17:
+                mode = "refresh"
+            else:
+                mode = "grade"
+
+        import requests as _req
+        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+
+        results = {"mode": mode, "date": today_pst, "hour_pst": hour_pst}
+
+        if mode in ("predict", "refresh"):
+            # Fetch today's games from ESPN
+            compact = today_pst.replace("-", "")
+            espn_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={compact}&groups=50&limit=500"
+            espn_resp = _req.get(espn_url, timeout=30)
+            events = espn_resp.json().get("events", []) if espn_resp.ok else []
+            results["espn_games"] = len(events)
+
+            if not events:
+                results["status"] = "no_games_today"
+                return jsonify(results)
+
+            # Check which games already have predictions
+            existing = _req.get(
+                f"{SUPABASE_URL}/rest/v1/ncaa_predictions?game_date=eq.{today_pst}&select=game_id,result_entered,spread_home,market_spread_home",
+                headers=headers, timeout=30
+            )
+            existing_ids = {r["game_id"]: r for r in (existing.json() if existing.ok else [])}
+            results["existing_predictions"] = len(existing_ids)
+
+            # Run predictions for games without them (predict mode)
+            # or re-predict all unplayed games (refresh mode)
+            predicted = 0
+            refreshed = 0
+            errors = 0
+
+            for event in events:
+                comp = event.get("competitions", [{}])[0]
+                status = comp.get("status", {}).get("type", {})
+                if status.get("completed"):
+                    continue  # skip finished games
+
+                game_id = event.get("id")
+                home = next((c for c in comp.get("competitors", []) if c.get("homeAway") == "home"), None)
+                away = next((c for c in comp.get("competitors", []) if c.get("homeAway") == "away"), None)
+                if not home or not away:
+                    continue
+
+                home_id = home.get("team", {}).get("id")
+                away_id = away.get("team", {}).get("id")
+                neutral = comp.get("neutralSite", False)
+
+                if not home_id or not away_id:
+                    continue
+
+                # Skip if already predicted (predict mode only)
+                if mode == "predict" and game_id in existing_ids:
+                    continue
+
+                # Call /predict/ncaa/full for this game
+                try:
+                    pred_resp = _req.post(
+                        f"http://localhost:{os.environ.get('PORT', 5000)}/predict/ncaa/full",
+                        json={
+                            "home_team_id": str(home_id),
+                            "away_team_id": str(away_id),
+                            "neutral_site": neutral,
+                            "game_date": today_pst,
+                            "game_id": str(game_id),
+                        },
+                        timeout=30
+                    )
+                    pred = pred_resp.json() if pred_resp.ok else None
+
+                    if pred and not pred.get("error") and pred.get("ml_win_prob_home") is not None:
+                        # Build the row to save
+                        home_name = home.get("team", {}).get("displayName", "")
+                        away_name = away.get("team", {}).get("displayName", "")
+                        home_abbr = home.get("team", {}).get("abbreviation", "")
+                        away_abbr = away.get("team", {}).get("abbreviation", "")
+
+                        # Get market spread from pickcenter
+                        audit = pred.get("audit_data", {})
+
+                        # ESPN pickcenter spread
+                        pickcenter = []
+                        try:
+                            summary = _req.get(
+                                f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event={game_id}",
+                                timeout=10
+                            )
+                            if summary.ok:
+                                pickcenter = summary.json().get("pickcenter", [])
+                        except:
+                            pass
+
+                        espn_spread = None
+                        espn_ou = None
+                        for pc in pickcenter:
+                            if pc.get("homeTeamOdds", {}).get("spreadOdds"):
+                                espn_spread = pc.get("spread")
+                                espn_ou = pc.get("overUnder")
+                                break
+                        if espn_spread is None:
+                            for pc in pickcenter:
+                                if pc.get("spread") is not None:
+                                    espn_spread = pc.get("spread")
+                                    espn_ou = pc.get("overUnder")
+                                    break
+
+                        margin = pred["ml_margin"]
+                        win_prob = pred["ml_win_prob_home"]
+
+                        row = {
+                            "game_date": today_pst,
+                            "game_id": str(game_id),
+                            "home_team_id": str(home_id),
+                            "away_team_id": str(away_id),
+                            "home_team_name": home_name,
+                            "away_team_name": away_name,
+                            "home_team": home_abbr,
+                            "away_team": away_abbr,
+                            "neutral_site": neutral,
+                            "spread_home": round(margin, 1),
+                            "win_pct_home": round(win_prob, 4),
+                            "ml_win_prob_home": round(win_prob, 4),
+                            "home_adj_em": audit.get("home_adj_em"),
+                            "away_adj_em": audit.get("away_adj_em"),
+                            "home_sos": audit.get("home_sos"),
+                            "away_sos": audit.get("away_sos"),
+                            "home_opp_fgpct": audit.get("home_opp_fgpct"),
+                            "away_opp_fgpct": audit.get("away_opp_fgpct"),
+                            "home_conference": audit.get("home_conference"),
+                            "away_conference": audit.get("away_conference"),
+                            "confidence": "HIGH",  # will be refined by frontend
+                            "result_entered": False,
+                        }
+
+                        # Market spread
+                        if espn_spread is not None:
+                            row["market_spread_home"] = espn_spread
+                        if espn_ou is not None:
+                            row["market_ou_total"] = espn_ou
+
+                        # ATS pick (v27)
+                        if row.get("spread_home") is not None and row.get("market_spread_home") is not None:
+                            model_margin = row["spread_home"]
+                            mkt_implied = -row["market_spread_home"]
+                            disagree = abs(model_margin - mkt_implied)
+                            row["ats_disagree"] = round(disagree, 2)
+                            if disagree >= 2:
+                                row["ats_side"] = "HOME" if model_margin > mkt_implied else "AWAY"
+                                row["ats_units"] = 3 if disagree >= 4 else 2 if disagree >= 3 else 1
+                                row["ats_pick_spread"] = row["market_spread_home"]
+                            else:
+                                row["ats_units"] = 0
+
+                        # Upsert to Supabase
+                        upsert_resp = _req.post(
+                            f"{SUPABASE_URL}/rest/v1/ncaa_predictions",
+                            headers={**headers, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"},
+                            json=row,
+                            timeout=30
+                        )
+
+                        if mode == "predict":
+                            predicted += 1
+                        else:
+                            refreshed += 1
+
+                except Exception as e:
+                    errors += 1
+                    print(f"  [cron/ncaa] Error predicting {game_id}: {e}")
+
+            results["predicted"] = predicted
+            results["refreshed"] = refreshed
+            results["errors"] = errors
+
+        elif mode == "grade":
+            # Grade all ungraded games (today and recent days)
+            graded = 0
+            for days_ago in range(0, 3):  # check today + last 2 days
+                check_date = (now_pst - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                pending = _req.get(
+                    f"{SUPABASE_URL}/rest/v1/ncaa_predictions?game_date=eq.{check_date}&result_entered=eq.false"
+                    f"&select=id,game_id,home_team_id,away_team_id,win_pct_home,spread_home,market_spread_home,market_ou_total,ou_total,pred_home_score,pred_away_score,ats_units,ats_side",
+                    headers=headers, timeout=30
+                )
+                pending_rows = pending.json() if pending.ok else []
+                if not pending_rows:
+                    continue
+
+                # Fetch scores from ESPN
+                compact_date = check_date.replace("-", "")
+                espn_resp = _req.get(
+                    f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={compact_date}&groups=50&limit=500",
+                    timeout=30
+                )
+                events = espn_resp.json().get("events", []) if espn_resp.ok else []
+
+                for event in events:
+                    comp = event.get("competitions", [{}])[0]
+                    status = comp.get("status", {}).get("type", {})
+                    if not status.get("completed"):
+                        continue
+
+                    game_id = event.get("id")
+                    matched = next((r for r in pending_rows if str(r.get("game_id")) == str(game_id)), None)
+                    if not matched:
+                        continue
+
+                    home = next((c for c in comp.get("competitors", []) if c.get("homeAway") == "home"), None)
+                    away = next((c for c in comp.get("competitors", []) if c.get("homeAway") == "away"), None)
+                    if not home or not away:
+                        continue
+
+                    try:
+                        home_score = int(home.get("score", 0))
+                        away_score = int(away.get("score", 0))
+                    except:
+                        continue
+
+                    actual_margin = home_score - away_score
+                    model_picked_home = (matched.get("win_pct_home") or 0.5) >= 0.5
+                    home_won = home_score > away_score
+                    ml_correct = model_picked_home == home_won
+
+                    # ATS (rl_correct)
+                    mkt_spread = matched.get("market_spread_home")
+                    rl_correct = None
+                    if mkt_spread is not None:
+                        ats_result = actual_margin + mkt_spread
+                        if ats_result > 0:
+                            rl_correct = True
+                        elif ats_result < 0:
+                            rl_correct = False
+
+                    # O/U
+                    total = home_score + away_score
+                    ou_line = matched.get("market_ou_total") or matched.get("ou_total")
+                    pred_total = (matched.get("pred_home_score") or 0) + (matched.get("pred_away_score") or 0)
+                    ou_correct = None
+                    if ou_line and total != ou_line:
+                        ou_correct = "OVER" if (total > ou_line) == (pred_total > ou_line) else "UNDER"
+                    elif ou_line and total == ou_line:
+                        ou_correct = "PUSH"
+
+                    # ATS pick grading (v27)
+                    ats_correct = None
+                    if matched.get("ats_units") and matched.get("ats_units") > 0 and matched.get("ats_side") and mkt_spread is not None:
+                        ats_result = actual_margin + mkt_spread
+                        if ats_result != 0:
+                            home_covered = ats_result > 0
+                            picked_home = matched["ats_side"] == "HOME"
+                            ats_correct = picked_home == home_covered
+
+                    patch = {
+                        "actual_home_score": home_score,
+                        "actual_away_score": away_score,
+                        "result_entered": True,
+                        "ml_correct": ml_correct,
+                        "rl_correct": rl_correct,
+                        "ou_correct": ou_correct,
+                    }
+                    if ats_correct is not None:
+                        patch["ats_correct"] = ats_correct
+
+                    _req.patch(
+                        f"{SUPABASE_URL}/rest/v1/ncaa_predictions?id=eq.{matched['id']}",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json=patch,
+                        timeout=15
+                    )
+                    graded += 1
+
+            results["graded"] = graded
+
+        duration = _time.time() - start
+        results["duration_sec"] = round(duration, 1)
+        results["status"] = "complete"
+        return jsonify(results)
+
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+    finally:
+        _ncaa_cron_lock = False
+
+
+@app.route("/cron/ncaa-ats-record")
+def route_ncaa_ats_record():
+    """Live ATS record — no login required."""
+    import requests as _req
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    r = _req.get(
+        f"{SUPABASE_URL}/rest/v1/ncaa_predictions?ats_units=gt.0&result_entered=eq.true"
+        f"&select=game_date,home_team,away_team,spread_home,market_spread_home,ats_disagree,ats_units,ats_side,ats_correct,actual_home_score,actual_away_score"
+        f"&order=game_date.desc&limit=200",
+        headers=headers, timeout=30
+    )
+    games = r.json() if r.ok else []
+
+    record = {"1u": {"wins": 0, "losses": 0, "pushes": 0},
+              "2u": {"wins": 0, "losses": 0, "pushes": 0},
+              "3u": {"wins": 0, "losses": 0, "pushes": 0}}
+    total_units_won = 0
+
+    for g in games:
+        tier = f"{g.get('ats_units', 0)}u"
+        if tier not in record:
+            continue
+        if g.get("ats_correct") is True:
+            record[tier]["wins"] += 1
+            total_units_won += g["ats_units"] * 0.909  # -110 payout
+        elif g.get("ats_correct") is False:
+            record[tier]["losses"] += 1
+            total_units_won -= g["ats_units"]
+        else:
+            record[tier]["pushes"] += 1
+
+    for tier in record:
+        t = record[tier]
+        total = t["wins"] + t["losses"]
+        t["ats_pct"] = round(t["wins"] / total, 4) if total > 0 else None
+        t["total_graded"] = total
+
+    return jsonify({
+        "record": record,
+        "total_units_profit": round(total_units_won, 2),
+        "recent_picks": games[:20],
+        "total_picks": len(games),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════
