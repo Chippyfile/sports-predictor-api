@@ -53,3 +53,7 @@ sports/__pycache__/
 main_monolith.py
 sweep_checkpoint_ncaa_partial.json
 hhi_fix.log
+models/nba.pkl
+models/mlb.pkl
+pickcenter_cache.json
+odds_patches_matched.json

@@ -1,0 +1,142 @@
+======================================================================
+  ARCHITECTURE SWEEP — Meta-Learners × Feature Subspacing
+======================================================================
+  ⚠️  Training cache is 38h old. Use --refresh if data changed.
+  Loaded 64881 rows × 413 cols from local cache
+  NCAA heuristic backfill (v18 audit fix): 39983 rows | win_pct std=0.271, range=[0.030, 0.970] | spread std=13.1, range=[-95.0, 95.0] | 39974/39983 non-neutral | lg_avg_ppg=74.1
+  39983 games × 159 features
+  Base features: 156
+  Lineup features: ['lineup_changes_diff', 'lineup_stability_diff', 'starter_experience_diff']
+  Market features: ['mkt_spread', 'mkt_total', 'mkt_spread_vs_model', 'has_mkt', 'espn_wp_edge', 'spread_movement', 'total_movement']
+  Non-market features: 149
+
+  Pre-computing OOF predictions for all (model, feature_set) combos...
+  This avoids redundant training across configs.
+
+  Scaled 'base': 156 features
+  Scaled 'full': 159 features
+  Scaled 'no_market': 149 features
+  Scaled 'no_market_plus_lineup': 152 features
+  Scaled 'market_plus_lineup': 10 features
+
+─── Training individual models ───
+  Training xgb on 'base' (156 feat)... MAE: 8.9081 (21s)
+  Training cat on 'base' (156 feat)... MAE: 8.8550 (14s)
+  Training mlp on 'base' (156 feat)... MAE: 8.9224 (34s)
+  Training xgb on 'full' (159 feat)... MAE: 8.8975 (21s)
+  Training cat on 'full' (159 feat)... MAE: 8.8348 (15s)
+  Training mlp on 'full' (159 feat)... MAE: 8.9061 (33s)
+  Training xgb on 'no_market' (149 feat)... MAE: 9.0593 (20s)
+  Training mlp on 'no_market' (149 feat)... MAE: 9.0373 (35s)
+  Training cat on 'market_plus_lineup' (10 feat)... MAE: 8.9172 (6s)
+  Training xgb on 'no_market_plus_lineup' (152 feat)... MAE: 9.0296 (20s)
+
+======================================================================
+  RUNNING STACKING EXPERIMENTS
+======================================================================
+  1A: Production baseline (146 feat, Ridge)          → MAE: 8.8300  w=[np.float64(0.1894), np.float64(0.5524), np.float64(0.247)]
+  2A: All 149 to all, Ridge                          → MAE: 8.8065  w=[np.float64(0.1768), np.float64(0.563), np.float64(0.2507)]
+  2B: All 149 to all, ElasticNet                     → MAE: 8.8065  w=[np.float64(0.1768), np.float64(0.5629), np.float64(0.2507)]
+  2C: All 149 to all, LightGBM meta                  → MAE: 8.8741  w=[0, 0, 0]
+  2D: All 149 to all, Average                        → MAE: 8.8116  w=[0.333, 0.333, 0.333]
+  2E: All 149 to all, OptWeights                     → MAE: 8.8082  w=[np.float64(0.2), np.float64(0.5), np.float64(0.3)]
+  3A: Lineup→Cat only, Ridge                         → MAE: 8.8140  w=[np.float64(0.1263), np.float64(0.6574), np.float64(0.2086)]
+  3B: Lineup→Cat only, ElasticNet                    → MAE: 8.8139  w=[np.float64(0.1341), np.float64(0.6461), np.float64(0.2112)]
+  3C: Lineup→Cat only, LightGBM meta                 → MAE: 8.8824  w=[0, 0, 0]
+  4A: Specialist split, Ridge                        → MAE: 8.8278  w=[np.float64(0.1997), np.float64(0.4964), np.float64(0.3154)]
+  4B: Specialist split, ElasticNet                   → MAE: 8.8276  w=[np.float64(0.2113), np.float64(0.4761), np.float64(0.3183)]
+  4C: Specialist split, LightGBM meta                → MAE: 8.8936  w=[0, 0, 0]
+  5A: Lineup→XGB, Market→Cat, Ridge                  → MAE: 8.8315  w=[np.float64(0.1276), np.float64(0.6463), np.float64(0.2233)]
+  5B: Lineup→XGB, Market→Cat, ElasticNet             → MAE: 8.8314  w=[np.float64(0.1318), np.float64(0.6365), np.float64(0.2286)]
+  6A: Production 146, ElasticNet                     → MAE: 8.8299  w=[np.float64(0.1971), np.float64(0.5419), np.float64(0.2491)]
+  6B: Production 146, LightGBM meta                  → MAE: 8.8994  w=[0, 0, 0]
+  6C: Production 146, Average                        → MAE: 8.8351  w=[0.333, 0.333, 0.333]
+  6D: Production 146, OptWeights                     → MAE: 8.8320  w=[np.float64(0.2), np.float64(0.5), np.float64(0.3)]
+
+──────────────────────────────────────────────────────────────────────
+  RESIDUAL STACKING (two-stage)
+──────────────────────────────────────────────────────────────────────
+  Stage 1 (production Ridge): MAE 8.8300
+  Stage 2 features: ['lineup_changes_diff', 'lineup_stability_diff', 'starter_experience_diff', 'mkt_spread']
+  Training residual corrector (CatBoost d=3)... MAE: 8.8181 (α=0.35)
+  7B ElasticNet base + residual: MAE 8.8180 (α=0.35)
+
+======================================================================
+  RESULTS SUMMARY
+======================================================================
+
+  Config                                                       MAE Δ vs 8.807
+  ─────────────────────────────────────────────────────── ──────── ──────────
+  2B: All 149 to all, ElasticNet                            8.8065    -0.0005 ★ ✅
+  2A: All 149 to all, Ridge                                 8.8065    -0.0005 ✅
+  2E: All 149 to all, OptWeights                            8.8082    +0.0012
+  2D: All 149 to all, Average                               8.8116    +0.0046
+  3B: Lineup→Cat only, ElasticNet                           8.8139    +0.0069
+  3A: Lineup→Cat only, Ridge                                8.8140    +0.0070
+  7B: Residual stacking (ElasticNet base + corrector)       8.8180    +0.0110
+  7A: Residual stacking (Stage1+CatBoost corrector)         8.8181    +0.0111
+  4B: Specialist split, ElasticNet                          8.8276    +0.0206
+  4A: Specialist split, Ridge                               8.8278    +0.0208
+  6A: Production 146, ElasticNet                            8.8299    +0.0229
+  1A: Production baseline (146 feat, Ridge)                 8.8300    +0.0230
+  5B: Lineup→XGB, Market→Cat, ElasticNet                    8.8314    +0.0244
+  5A: Lineup→XGB, Market→Cat, Ridge                         8.8315    +0.0245
+  6D: Production 146, OptWeights                            8.8320    +0.0250
+  6C: Production 146, Average                               8.8351    +0.0281
+  2C: All 149 to all, LightGBM meta                         8.8741    +0.0671
+  3C: Lineup→Cat only, LightGBM meta                        8.8824    +0.0754
+  4C: Specialist split, LightGBM meta                       8.8936    +0.0866
+  6B: Production 146, LightGBM meta                         8.8994    +0.0924
+
+  Production (146 feat, d=4, Ridge):  8.807
+  Best found:                         8.8065
+  Config:                             2B: All 149 to all, ElasticNet
+  Meta:                               ElasticNet(l1=0.10,α=0.0010)
+
+  ✅ NEW BEST! Improvement: 0.0005
+     Deploy this config as production.
+
+  ───────────────────────────────────────────────────────
+  KEY INSIGHTS:
+    Section 1A: 8.8300 — 1A: Production baseline (146 feat, Ridge)
+    Section 2A: 8.8065 — 2A: All 149 to all, Ridge
+    Section 2B: 8.8065 — 2B: All 149 to all, ElasticNet
+    Section 2C: 8.8741 — 2C: All 149 to all, LightGBM meta
+    Section 2D: 8.8116 — 2D: All 149 to all, Average
+    Section 2E: 8.8082 — 2E: All 149 to all, OptWeights
+    Section 3A: 8.8140 — 3A: Lineup→Cat only, Ridge
+    Section 3B: 8.8139 — 3B: Lineup→Cat only, ElasticNet
+    Section 3C: 8.8824 — 3C: Lineup→Cat only, LightGBM meta
+    Section 4A: 8.8278 — 4A: Specialist split, Ridge
+    Section 4B: 8.8276 — 4B: Specialist split, ElasticNet
+    Section 4C: 8.8936 — 4C: Specialist split, LightGBM meta
+    Section 5A: 8.8315 — 5A: Lineup→XGB, Market→Cat, Ridge
+    Section 5B: 8.8314 — 5B: Lineup→XGB, Market→Cat, ElasticNet
+    Section 6A: 8.8299 — 6A: Production 146, ElasticNet
+    Section 6B: 8.8994 — 6B: Production 146, LightGBM meta
+    Section 6C: 8.8351 — 6C: Production 146, Average
+    Section 6D: 8.8320 — 6D: Production 146, OptWeights
+    Section 7A: 8.8181 — 7A: Residual stacking (Stage1+CatBoost corrector)
+    Section 7B: 8.8180 — 7B: Residual stacking (ElasticNet base + corrector)
+
+  Meta-learner comparison (all 149 features to all learners):
+    ElasticNet(l1=0.10,α=0.0010)   MAE: 8.8065
+    Ridge                          MAE: 8.8065
+    OptWeights([np.float64(0.2), np.float64(0.5), np.float64(0.3)]) MAE: 8.8082
+    Average                        MAE: 8.8116
+    LightGBM(d=2)                  MAE: 8.8741
+
+  Meta-learner comparison (production 146 features):
+    ElasticNet(l1=0.30,α=0.1000)   MAE: 8.8299
+    Ridge                          MAE: 8.8300
+    OptWeights([np.float64(0.2), np.float64(0.5), np.float64(0.3)]) MAE: 8.8320
+    Average                        MAE: 8.8351
+    LightGBM(d=2)                  MAE: 8.8994
+
+  Feature subspacing comparison (best meta per config):
+    1A: Production baseline (146 feat, Ridge)          MAE: 8.8300
+    3B: Lineup→Cat only, ElasticNet                    MAE: 8.8139
+    4B: Specialist split, ElasticNet                   MAE: 8.8276
+    5B: Lineup→XGB, Market→Cat, ElasticNet             MAE: 8.8314
+
+  Done.

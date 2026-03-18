@@ -1,0 +1,78 @@
+{
+  "total_games": 60596,
+  "accuracy_no_market": 0.7398,
+  "brier_before_recal": 0.1791,
+  "brier_after_recal": 0.1726,
+  "market_features_zeroed": [
+    "mkt_spread",
+    "mkt_total",
+    "mkt_spread_vs_model",
+    "has_mkt",
+    "spread_movement",
+    "total_movement",
+    "spread_regime",
+    "luck_x_spread",
+    "consistency_x_spread",
+    "roll_ats_diff_gated",
+    "roll_ats_margin_gated",
+    "has_ats_data"
+  ],
+  "calibration_data": [
+    {
+      "lo": 0.5,
+      "hi": 0.55,
+      "n": 18361,
+      "pred": 0.5827786656164659,
+      "actual": 0.6233865257883557,
+      "gap": 0.04060786017188989
+    },
+    {
+      "lo": 0.55,
+      "hi": 0.6,
+      "n": 7028,
+      "pred": 0.5685033585168826,
+      "actual": 0.585088218554354,
+      "gap": 0.016584860037471394
+    },
+    {
+      "lo": 0.6,
+      "hi": 0.65,
+      "n": 10990,
+      "pred": 0.6190290440476621,
+      "actual": 0.6632393084622384,
+      "gap": 0.04421026441457632
+    },
+    {
+      "lo": 0.65,
+      "hi": 0.7,
+      "n": 7793,
+      "pred": 0.6826689134429659,
+      "actual": 0.7389965353522392,
+      "gap": 0.05632762190927332
+    },
+    {
+      "lo": 0.7,
+      "hi": 0.75,
+      "n": 8426,
+      "pred": 0.7204617922571631,
+      "actual": 0.7910040351293615,
+      "gap": 0.07054224287219835
+    },
+    {
+      "lo": 0.75,
+      "hi": 0.8,
+      "n": 10719,
+      "pred": 0.762088131395681,
+      "actual": 0.8607146189010169,
+      "gap": 0.09862648750533587
+    },
+    {
+      "lo": 0.8,
+      "hi": 0.9,
+      "n": 8244,
+      "pred": 0.8195969282942002,
+      "actual": 0.9571809801067444,
+      "gap": 0.13758405181254418
+    }
+  ]
+}
