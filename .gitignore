@@ -63,3 +63,27 @@ backfill_log.json
 walk_forward_*.json
 true_walkforward_*.json
 no_market_*.json
+
+# ── Data files (too large for git, not needed on Railway) ──
+*.parquet
+*.pkl
+*_raw.json
+nba_elo_ratings.json
+nba_scrape_checkpoint.json
+conf_tourney_cache.json
+
+# ── Local dev/analysis scripts (not needed on Railway) ──
+FIX_*.py
+check_*.py
+build_player_ratings.py
+dump_nba_training_data.py
+enrich_nba*.py
+explore_*.py
+ingest_mgm_odds.py
+nba_build_features_v2*.py
+nba_feature_parity_map.py
+retrain_nba.py
+scrape_nba_summaries.py
+nba_elo.py
+compute_advanced_features.py
+fix_conf_tourney_and_pyth.py
