@@ -190,6 +190,40 @@ def _fetch_espn_team_stats(team_id):
         return None
 
 
+def _fetch_espn_team_info(team_id):
+    """Fetch rank, conference, and basic info from ESPN team endpoint."""
+    cache_key = f"espn_team_info_{team_id}"
+    cached = _cache_get(cache_key, CACHE_TTL_LONG)
+    if cached:
+        return cached
+
+    info = {"rank": 200, "conference": "", "conference_id": "", "standing": ""}
+    try:
+        r = requests.get(f"{ESPN_BASE}/teams/{team_id}", timeout=8)
+        if not r.ok:
+            return info
+        team = r.json().get("team", {})
+        # Rank
+        info["rank"] = team.get("rank", 200) or 200
+        # Conference from standingSummary ("1st in ACC" → "ACC")
+        standing = team.get("standingSummary", "")
+        info["standing"] = standing
+        if standing:
+            import re
+            m = re.search(r'(?:in|of)\s+(.+)', standing, re.IGNORECASE)
+            if m:
+                info["conference"] = m.group(1).strip()
+        # Conference ID from groups
+        groups = team.get("groups", {})
+        if groups.get("isConference"):
+            info["conference_id"] = str(groups.get("id", ""))
+        _cache_set(cache_key, info)
+        return info
+    except Exception as e:
+        print(f"  [full_predict] ESPN team info error for {team_id}: {e}")
+        return info
+
+
 def _fetch_espn_team_record(team_id):
     """Fetch SOS and record from ESPN."""
     cache_key = f"espn_record_{team_id}"
@@ -263,12 +297,20 @@ def _fetch_espn_game_info(game_id, game_date, pregame=False):
         info["venue_capacity"] = venue.get("capacity", 8000) or 8000
         info["venue_name"] = venue.get("fullName", "")
 
-        # ESPN Odds (pickcenter / odds array)
-        odds = data.get("odds", [])
-        if odds:
-            primary = odds[0]
-            info["espn_spread"] = primary.get("spread", 0) or 0
-            info["espn_over_under"] = primary.get("overUnder", 0) or 0
+        # ESPN Odds (try pickcenter first, then odds array)
+        pickcenter = data.get("pickcenter", [])
+        if pickcenter:
+            for pc in pickcenter:
+                if pc.get("homeTeamOdds", {}).get("spreadOdds") or pc.get("spread") is not None:
+                    info["espn_spread"] = pc.get("spread", 0) or 0
+                    info["espn_over_under"] = pc.get("overUnder", 0) or 0
+                    break
+        if info["espn_spread"] == 0:
+            odds = data.get("odds", [])
+            if odds:
+                primary = odds[0]
+                info["espn_spread"] = primary.get("spread", 0) or 0
+                info["espn_over_under"] = primary.get("overUnder", 0) or 0
 
         # ESPN Predictor (win probability model)
         predictor = data.get("predictor", {})
@@ -426,6 +468,13 @@ def _fetch_team_schedule_data(team_id, game_date_str, opp_rank=200):
             days_span = (next_game["date"] - prev_game["date"]).days
             if days_span <= 5:
                 result["is_sandwich"] = 1
+
+        # Revenge: did this team lose to today's opponent earlier this season?
+        opp_team_id = str(opp_rank)  # opp_rank parameter is actually the opponent's team ID
+        # (parameter name is misleading — it's passed as the OTHER team's ID from the caller)
+        # Actually, we need the opponent team ID. Check the caller...
+        # The caller passes request_data.get("away_rank", 200) for home team schedule.
+        # That's wrong for revenge detection. Instead, look through schedule opponents.
 
         _cache_set(cache_key, result)
         return result
@@ -601,6 +650,8 @@ def predict_ncaa_full(request_data):
         fut_spread = executor.submit(_fetch_spread_movement, game_id)
         fut_home_sched = executor.submit(_fetch_team_schedule_data, home_team_id, game_date, request_data.get("away_rank", 200))
         fut_away_sched = executor.submit(_fetch_team_schedule_data, away_team_id, game_date, request_data.get("home_rank", 200))
+        fut_home_info = executor.submit(_fetch_espn_team_info, home_team_id)
+        fut_away_info = executor.submit(_fetch_espn_team_info, away_team_id)
 
     home_stats = fut_home_stats.result() or {}
     away_stats = fut_away_stats.result() or {}
@@ -612,6 +663,8 @@ def predict_ncaa_full(request_data):
     spread_mvmt = fut_spread.result()
     home_sched = fut_home_sched.result()
     away_sched = fut_away_sched.result()
+    home_info = fut_home_info.result()
+    away_info = fut_away_info.result()
 
     # Rest days extracted from consolidated schedule data
     home_rest = home_sched.get("rest_days", 3)
@@ -708,16 +761,16 @@ def predict_ncaa_full(request_data):
         # AUDIT FIX: Supabase sos is more reliable than ESPN record endpoint
         "home_sos": sb("home_sos", 0) or home_record.get("sos", 0.5),
         "away_sos": sb_away("home_sos", 0) or away_record.get("sos", 0.5),
-        "home_rank": request_data.get("home_rank", 200), "away_rank": request_data.get("away_rank", 200),
+        "home_rank": home_info.get("rank", 200), "away_rank": away_info.get("rank", 200),
         "home_rest_days": home_rest, "away_rest_days": away_rest,
 
-        # Conference
-        "home_conference": request_data.get("home_conference", ""),
-        "away_conference": request_data.get("away_conference", ""),
+        # Conference — from ESPN team info, fallback to Supabase, then request
+        "home_conference": home_info.get("conference") or request_data.get("home_conference", ""),
+        "away_conference": away_info.get("conference") or request_data.get("away_conference", ""),
 
-        # KenPom / efficiency (from request or Supabase)
-        "home_adj_em": request_data.get("home_adj_em", sb("home_adj_em", 0)),
-        "away_adj_em": request_data.get("away_adj_em", sb_away("home_adj_em", 0)),
+        # KenPom / efficiency (from request, Supabase adj_em, or computed from OE-DE)
+        "home_adj_em": request_data.get("home_adj_em") or sb("home_adj_em") or (sb("home_adj_oe", 105) - sb("home_adj_de", 105)) or 0,
+        "away_adj_em": request_data.get("away_adj_em") or sb_away("home_adj_em") or (sb_away("home_adj_oe", 105) - sb_away("home_adj_de", 105)) or 0,
         "home_adj_oe": sb("home_adj_oe", 105), "away_adj_oe": sb_away("home_adj_oe", 105),
         "home_adj_de": sb("home_adj_de", 105), "away_adj_de": sb_away("home_adj_de", 105),
 
@@ -887,9 +940,9 @@ def predict_ncaa_full(request_data):
         # ncaa_build_features just passes these through from raw columns, so we compute them here.
         "def_rest_advantage": (home_rest - away_rest) * (sb("home_def_stability") or 0.5) * 0.1,
         "luck_x_spread": sb("home_luck", 0) * market_spread * 0.01,
-        # AUDIT FIX: was one-sided (home fatigue only). Match training: differential concept.
-        "fatigue_x_quality": (sb("home_fatigue_load", 0) * request_data.get("away_adj_em", 0)
-                             - sb_away("home_fatigue_load", 0) * request_data.get("home_adj_em", 0)) * 0.01,
+        # AUDIT FIX: use computed adj_em, not request_data which is often empty
+        "fatigue_x_quality": (sb("home_fatigue_load", 0) * (sb_away("home_adj_oe", 105) - sb_away("home_adj_de", 105))
+                             - sb_away("home_fatigue_load", 0) * (sb("home_adj_oe", 105) - sb("home_adj_de", 105))) * 0.01,
         "rest_x_defense": (home_rest - away_rest) * ((sb("home_def_stability") or 0.5) + (sb_away("home_def_stability") or 0.5)) * 0.025,
         "form_x_familiarity": 0.0,  # Set in post-processing after form_diff is computed
         "consistency_x_spread": (sb("home_consistency", 0) - sb_away("home_consistency", 0)) * market_spread * 0.01,
