@@ -693,14 +693,7 @@ def route_ncaa_daily():
                                     espn_ou = pc.get("overUnder")
                                     break
 
-                        # v27 fix: use classifier probability → implied spread
-                        # Regressor only has 117/159 features, collapses to ~0
-                        # Classifier is calibrated and reliable (64.5% → 3.5 pts)
-                        import math as _math
-                        _sigma = 13.5  # NCAA average sigma
-                        _wp = pred["ml_win_prob_home"]
-                        _wp_clamped = max(0.05, min(0.95, _wp))
-                        margin = -_sigma * _math.log10((1 / _wp_clamped) - 1)
+                        margin = pred["ml_margin"]
                         win_prob = pred["ml_win_prob_home"]
 
                         row = {
