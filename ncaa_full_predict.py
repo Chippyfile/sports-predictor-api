@@ -526,7 +526,9 @@ def _fetch_supabase_team_data(team_id, team_name):
         "roll_lead_changes,roll_time_with_lead_pct,"
         "roll_players_used,roll_hhi,roll_minutes_hhi,"
         "roll_clutch_ft_pct,roll_garbage_pct,"
-        "roll_ats_pct,roll_ats_n,roll_ats_margin"
+        "roll_ats_pct,roll_ats_n,roll_ats_margin,"
+        "lineup_changes,lineup_stability_5g,starter_games_together,"
+        "player_rating_sum,weakest_starter,starter_variance"
     )
 
     try:
@@ -888,6 +890,14 @@ def predict_ncaa_full(request_data):
         "home_roll_ats_pct": sb("home_roll_ats_pct", 0.50), "away_roll_ats_pct": sb_away("home_roll_ats_pct", 0.50),
         "home_roll_ats_n": sb("home_roll_ats_n", 0), "away_roll_ats_n": sb_away("home_roll_ats_n", 0),
         "home_roll_ats_margin": sb("home_roll_ats_margin"), "away_roll_ats_margin": sb_away("home_roll_ats_margin"),
+
+        # Lineup stability + player ratings (from ncaa_historical via Supabase)
+        "home_lineup_changes": sb("home_lineup_changes", 0), "away_lineup_changes": sb_away("home_lineup_changes", 0),
+        "home_lineup_stability_5g": sb("home_lineup_stability_5g", 1.0), "away_lineup_stability_5g": sb_away("home_lineup_stability_5g", 1.0),
+        "home_starter_games_together": sb("home_starter_games_together", 0), "away_starter_games_together": sb_away("home_starter_games_together", 0),
+        "home_player_rating_sum": sb("home_player_rating_sum", 0), "away_player_rating_sum": sb_away("home_player_rating_sum", 0),
+        "home_weakest_starter": sb("home_weakest_starter", 0), "away_weakest_starter": sb_away("home_weakest_starter", 0),
+        "home_starter_variance": sb("home_starter_variance", 0), "away_starter_variance": sb_away("home_starter_variance", 0),
 
         # Referee
         "referee_1": game_info.get("referee_1", ""),
