@@ -383,6 +383,7 @@ def _fetch_team_schedule_data(team_id, game_date_str, opp_rank=200):
 
         # ── Parse all events ──
         dated_events = []
+        _parse_errors = 0
         for ev in events:
             try:
                 ev_date = datetime.fromisoformat(ev["date"][:19].replace("Z", "")).replace(tzinfo=None)
@@ -394,20 +395,39 @@ def _fetch_team_schedule_data(team_id, game_date_str, opp_rank=200):
                 is_home = False
                 for team in comp.get("competitors", []):
                     tid = str(team.get("id", ""))
+                    # ESPN score can be: {"value": 75}, "75", 75, or {"displayValue": "75"}
+                    raw_score = team.get("score")
+                    if isinstance(raw_score, dict):
+                        _sv = raw_score.get("value") or raw_score.get("displayValue", 0)
+                    else:
+                        _sv = raw_score or 0
+                    try:
+                        _score = int(float(str(_sv)))
+                    except (ValueError, TypeError):
+                        _score = 0
+
                     if tid != str(team_id):
                         opp_r = team.get("curatedRank", {}).get("current", 200) or 200
                         opp_id = tid
-                        score_opp = int(team.get("score", {}).get("value", 0) or 0)
+                        score_opp = _score
                     else:
                         is_home = team.get("homeAway") == "home"
-                        score_team = int(team.get("score", {}).get("value", 0) or 0)
+                        score_team = _score
                 dated_events.append({
                     "date": ev_date, "completed": completed, "opp_rank": opp_r,
                     "opp_id": opp_id, "score_team": score_team, "score_opp": score_opp,
                     "is_home": is_home,
                 })
-            except Exception:
+            except Exception as e:
+                _parse_errors += 1
+                if _parse_errors <= 3:
+                    print(f"  [full_predict] Schedule parse error for event: {e}")
                 continue
+
+        # Diagnostic: schedule parsing summary
+        n_completed = sum(1 for e in dated_events if e["completed"])
+        n_before = sum(1 for e in dated_events if e["completed"] and e["date"] < game_date)
+        print(f"  [full_predict] Schedule {team_id}: {len(events)} events → {len(dated_events)} parsed, {n_completed} completed, {n_before} before game_date, {_parse_errors} errors")
 
         dated_events.sort(key=lambda x: x["date"])
 
@@ -787,10 +807,11 @@ def predict_ncaa_full(request_data):
         # Record — ALWAYS prefer schedule data (ESPN record endpoint returns
         # tournament-only records in March, e.g. Howard showing 1-0).
         # Schedule-derived wins/losses are computed from actual completed games.
-        "home_wins": home_sched.get("wins") or home_record["wins"],
-        "away_wins": away_sched.get("wins") or away_record["wins"],
-        "home_losses": home_sched.get("losses") or home_record["losses"],
-        "away_losses": away_sched.get("losses") or away_record["losses"],
+        # FIX: Use explicit None check — 0 wins is valid (e.g. 0-5 start), not "no data"
+        "home_wins": home_sched["wins"] if home_sched.get("wins") is not None and (home_sched["wins"] + home_sched["losses"]) > 0 else home_record["wins"],
+        "away_wins": away_sched["wins"] if away_sched.get("wins") is not None and (away_sched["wins"] + away_sched["losses"]) > 0 else away_record["wins"],
+        "home_losses": home_sched["losses"] if home_sched.get("losses") is not None and (home_sched["wins"] + home_sched["losses"]) > 0 else home_record["losses"],
+        "away_losses": away_sched["losses"] if away_sched.get("losses") is not None and (away_sched["wins"] + away_sched["losses"]) > 0 else away_record["losses"],
         # AUDIT FIX: Supabase sos is more reliable than ESPN record endpoint
         "home_sos": sb("home_sos", 0) or home_record.get("sos", 0.5),
         "away_sos": sb_away("home_sos", 0) or away_record.get("sos", 0.5),
