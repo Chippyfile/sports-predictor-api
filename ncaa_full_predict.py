@@ -528,7 +528,8 @@ def _fetch_supabase_team_data(team_id, team_name):
         "roll_clutch_ft_pct,roll_garbage_pct,"
         "roll_ats_pct,roll_ats_n,roll_ats_margin,"
         "player_rating_sum,weakest_starter,starter_variance,"
-        "lineup_changes,lineup_stability_5g,starter_games_together"
+        "lineup_changes,lineup_stability_5g,starter_games_together,"
+        "starter_ids"
     )
 
     try:
@@ -1152,6 +1153,93 @@ def predict_ncaa_full(request_data):
 
     # 8. Recompute luck_x_spread now that luck has a real value
     game["luck_x_spread"] = game.get("home_luck", 0) * market_spread * 0.01
+
+    # 9. Compute player ratings from starter_ids when Supabase values are 0
+    # Same logic as training: starter_ids + player_ratings.json → sum, weakest, variance
+    _player_ratings = getattr(predict_ncaa_full, "_player_ratings", None)
+    if _player_ratings is None:
+        try:
+            import json as _jr
+            with open("player_ratings.json") as _pf:
+                predict_ncaa_full._player_ratings = _jr.load(_pf)
+            _player_ratings = predict_ncaa_full._player_ratings
+            print(f"  [full_predict] Loaded {len(_player_ratings)} player ratings")
+        except FileNotFoundError:
+            predict_ncaa_full._player_ratings = {}
+            _player_ratings = {}
+            print(f"  [full_predict] WARNING: player_ratings.json not found")
+
+    for side, sb_fn, raw_sb in [("home", sb, home_sb), ("away", sb_away, away_sb)]:
+        if game.get(f"{side}_player_rating_sum", 0) == 0:
+            # Read starter_ids directly from raw dict — sb() would try float() and fail
+            ids_str = raw_sb.get("home_starter_ids", "") or ""
+            if isinstance(ids_str, str) and ids_str.strip():
+                pids = ids_str.strip().split(",")
+                ratings = [_player_ratings.get(pid.strip(), 0.0) for pid in pids]
+                game[f"{side}_player_rating_sum"] = sum(ratings)
+                game[f"{side}_weakest_starter"] = min(ratings) if ratings else 0.0
+                game[f"{side}_starter_variance"] = float(np.std(ratings)) if len(ratings) > 1 else 0.0
+                print(f"  [full_predict] {side} player ratings computed from starter_ids: sum={sum(ratings):.3f}, weakest={min(ratings):.3f}")
+            else:
+                print(f"  [full_predict] {side} no starter_ids available for player ratings")
+
+    # 10. Compute lineup stability from schedule history (ncaa_historical)
+    # Compare most recent starter_ids with prior games to get changes/stability
+    for side, tid, sched in [("home", home_team_id, home_sched), ("away", away_team_id, away_sched)]:
+        if game.get(f"{side}_lineup_stability_5g", 1.0) == 1.0 and game.get(f"{side}_player_rating_sum", 0) != 0:
+            try:
+                # Get last 6 games' starter_ids (need current + 5 prior to compute changes)
+                _sel = "game_date,home_team_id,home_starter_ids,away_starter_ids"
+                _gd = datetime.fromisoformat(f"{game_date}T00:00:00")
+                _season_year = _gd.year if _gd.month < 8 else _gd.year + 1
+                h_rows = sb_get("ncaa_historical",
+                    f"home_team_id=eq.{tid}&season=eq.{_season_year}&game_date=lt.{game_date}"
+                    f"&home_starter_ids=neq.&select={_sel}&order=game_date.desc&limit=6") or []
+                a_rows = sb_get("ncaa_historical",
+                    f"away_team_id=eq.{tid}&season=eq.{_season_year}&game_date=lt.{game_date}"
+                    f"&away_starter_ids=neq.&select={_sel}&order=game_date.desc&limit=6") or []
+
+                # Merge and sort
+                all_ids = []
+                for r in h_rows:
+                    ids = r.get("home_starter_ids", "")
+                    if ids: all_ids.append({"date": r["game_date"], "ids": set(ids.split(","))})
+                for r in a_rows:
+                    ids = r.get("away_starter_ids", "")
+                    if ids: all_ids.append({"date": r["game_date"], "ids": set(ids.split(","))})
+                all_ids.sort(key=lambda x: x["date"], reverse=True)
+
+                if len(all_ids) >= 2:
+                    # lineup_changes = starters different from last game
+                    current = all_ids[0]["ids"]
+                    prev = all_ids[1]["ids"]
+                    game[f"{side}_lineup_changes"] = len(current - prev)
+
+                    # lineup_stability_5g = avg overlap across last 5 transitions
+                    overlaps = []
+                    for j in range(min(5, len(all_ids) - 1)):
+                        a_set = all_ids[j]["ids"]
+                        b_set = all_ids[j + 1]["ids"]
+                        if a_set and b_set:
+                            overlaps.append(len(a_set & b_set) / max(len(a_set), 1))
+                    if overlaps:
+                        game[f"{side}_lineup_stability_5g"] = round(np.mean(overlaps), 4)
+
+                    # starter_games_together = consecutive games with same 5
+                    streak = 0
+                    ref = all_ids[0]["ids"]
+                    for entry in all_ids[1:]:
+                        if entry["ids"] == ref:
+                            streak += 1
+                        else:
+                            break
+                    game[f"{side}_starter_games_together"] = streak
+
+                    print(f"  [full_predict] {side} lineup: changes={game[f'{side}_lineup_changes']}, "
+                          f"stability={game[f'{side}_lineup_stability_5g']:.3f}, "
+                          f"together={game[f'{side}_starter_games_together']}")
+            except Exception as e:
+                print(f"  [full_predict] {side} lineup computation error: {e}")
 
     # ── Build features and predict ──
     import json as _json
