@@ -1,0 +1,86 @@
+======================================================================
+  ESPN NBA Summary Scraper v3 — COMPLETE EXTRACTION
+======================================================================
+  Checkpoint: 5 done
+  IDs from predictions: 1077
+  Scanning 1048 dates...
+    50/1048 dates, 347 IDs
+    100/1048 dates, 726 IDs
+    150/1048 dates, 1130 IDs
+    200/1048 dates, 1262 IDs
+    250/1048 dates, 1639 IDs
+    300/1048 dates, 2002 IDs
+    350/1048 dates, 2364 IDs
+    400/1048 dates, 2530 IDs
+    450/1048 dates, 2862 IDs
+    500/1048 dates, 3235 IDs
+    550/1048 dates, 3592 IDs
+    600/1048 dates, 3835 IDs
+    650/1048 dates, 4077 IDs
+    700/1048 dates, 4456 IDs
+    750/1048 dates, 4823 IDs
+    800/1048 dates, 5152 IDs
+    850/1048 dates, 5339 IDs
+    900/1048 dates, 5688 IDs
+    950/1048 dates, 6055 IDs
+    1000/1048 dates, 6441 IDs
+  Total: 7604 game IDs
+
+  Scraping 7599 games (~44 min)...
+  [200/7599] 200 games, 5878 players, 600 refs, 0 err | 64/min ~115m left
+  [400/7599] 200 games, 5291 players, 600 refs, 0 err | 67/min ~108m left
+  [600/7599] 200 games, 5194 players, 600 refs, 0 err | 68/min ~103m left
+  [800/7599] 200 games, 5423 players, 577 refs, 0 err | 68/min ~100m left
+  [1000/7599] 200 games, 5415 players, 533 refs, 0 err | 67/min ~99m left
+  [1200/7599] 200 games, 5546 players, 576 refs, 0 err | 66/min ~97m left
+  [1400/7599] 200 games, 5385 players, 600 refs, 0 err | 66/min ~93m left
+  [1600/7599] 200 games, 5155 players, 600 refs, 0 err | 67/min ~90m left
+  [1800/7599] 200 games, 5054 players, 579 refs, 0 err | 66/min ~87m left
+  [2000/7599] 200 games, 5075 players, 585 refs, 0 err | 66/min ~85m left
+  [2200/7599] 200 games, 4969 players, 597 refs, 0 err | 67/min ~81m left
+  [2400/7599] 200 games, 4986 players, 597 refs, 0 err | 67/min ~78m left
+  [2600/7599] 200 games, 5364 players, 600 refs, 0 err | 66/min ~75m left
+  [2800/7599] 200 games, 5094 players, 600 refs, 0 err | 67/min ~72m left
+  [3000/7599] 200 games, 5005 players, 600 refs, 0 err | 67/min ~69m left
+  [3200/7599] 200 games, 5129 players, 573 refs, 0 err | 67/min ~65m left
+  [3400/7599] 200 games, 5126 players, 597 refs, 0 err | 68/min ~62m left
+  [3600/7599] 200 games, 5132 players, 600 refs, 0 err | 68/min ~59m left
+  [3800/7599] 200 games, 5238 players, 585 refs, 0 err | 68/min ~56m left
+  [4000/7599] 200 games, 5463 players, 588 refs, 0 err | 68/min ~53m left
+  [4200/7599] 200 games, 5257 players, 594 refs, 0 err | 68/min ~50m left
+  [4400/7599] 200 games, 5298 players, 588 refs, 0 err | 69/min ~47m left
+  [4600/7599] 200 games, 5284 players, 597 refs, 0 err | 69/min ~44m left
+  [4800/7599] 200 games, 5210 players, 585 refs, 0 err | 69/min ~41m left
+  [5000/7599] 200 games, 5225 players, 600 refs, 0 err | 69/min ~38m left
+  [5200/7599] 200 games, 5660 players, 588 refs, 0 err | 69/min ~35m left
+  [5400/7599] 200 games, 5370 players, 600 refs, 0 err | 69/min ~32m left
+  [5600/7599] 200 games, 5271 players, 600 refs, 0 err | 69/min ~29m left
+  [5800/7599] 200 games, 5259 players, 600 refs, 0 err | 69/min ~26m left
+  [6000/7599] 200 games, 5265 players, 600 refs, 0 err | 70/min ~23m left
+  [6200/7599] 200 games, 5298 players, 600 refs, 0 err | 70/min ~20m left
+  [6400/7599] 200 games, 5399 players, 600 refs, 0 err | 70/min ~17m left
+  [6600/7599] 200 games, 5438 players, 600 refs, 0 err | 70/min ~14m left
+  [6800/7599] 200 games, 5284 players, 600 refs, 0 err | 70/min ~11m left
+  [7000/7599] 200 games, 5166 players, 600 refs, 0 err | 70/min ~9m left
+  [7200/7599] 200 games, 5210 players, 585 refs, 0 err | 70/min ~6m left
+  [7400/7599] 200 games, 5201 players, 594 refs, 0 err | 70/min ~3m left
+  [7599/7599] 199 games, 5905 players, 597 refs, 0 err | 70/min ~0m left
+
+======================================================================
+  DONE in 108.5 min, 0 errors
+  nba_summary_data.parquet: 7604 rows, 128 cols, 921 KB
+  nba_player_boxscores.parquet: 201107 rows, 24 cols, 2662 KB
+  nba_referee_log.parquet: 22530 rows, 9 cols, 172 KB
+  nba_pbp_features.parquet: 7604 rows, 13 cols, 124 KB
+
+  Coverage (7604 games):
+    ✅ Officials         7511/7604 (99%)
+    ✅ DK odds           4617/7604 (61%)
+    ❌ Open/close         760/7604 (10%)
+    ✅ ESPN BPI          7594/7604 (100%)
+    ✅ Lineups           7604/7604 (100%)
+    ❌ Standings            0/7604 (0%)
+    ✅ Team box          7598/7604 (100%)
+    ✅ Attendance        7604/7604 (100%)
+    ✅ Quarters          7601/7604 (100%)
+    ✅ H2H               7602/7604 (100%)
