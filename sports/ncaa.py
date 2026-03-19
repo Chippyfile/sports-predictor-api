@@ -399,6 +399,21 @@ def ncaa_build_features(df):
     df["mkt_spread_vs_model"] = (_ncaa_pred_spread + df["mkt_spread"]) * df["has_mkt"]
     # tourney_x_em, early_x_form REMOVED (AUDIT P4) — correlated with components
 
+    # ── v25 AUDIT: Compute interaction features inline (were pre-computed, broken) ──
+    _abs_spread = df["mkt_spread"].abs()
+    _h_consistency = pd.to_numeric(df.get("home_consistency", 15.0), errors="coerce").fillna(15.0).clip(lower=0.1)
+    _h_luck = pd.to_numeric(df.get("home_luck", 0), errors="coerce").fillna(0)
+    # consistency_x_spread: was only using market_spread_home (12%), now uses unified mkt_spread
+    df["consistency_x_spread"] = _abs_spread / _h_consistency
+    # luck_x_spread: same fix — home_luck * abs(unified mkt_spread)
+    df["luck_x_spread"] = _h_luck * _abs_spread
+    # spread_regime: buckets abs(spread) at 3.5/7.5/12.5/18.5
+    # 0=no spread or <3.5, 1=3.5-7, 2=7.5-12, 3=12.5-18, 4=18.5+
+    df["spread_regime"] = np.where(_abs_spread < 3.5, 0,
+                          np.where(_abs_spread < 7.5, 1,
+                          np.where(_abs_spread < 12.5, 2,
+                          np.where(_abs_spread < 18.5, 3, 4)))).astype(int)
+
     # ══════════════════════════════════════════════════════════════
     # v3 FEATURE COMPUTATIONS — new differentials from PIT backfill
     # ══════════════════════════════════════════════════════════════
@@ -489,16 +504,31 @@ def ncaa_build_features(df):
     # v19: ESPN COMPREHENSIVE EXTRACTION FEATURES
     # ═══════════════════════════════════════════════════════════════
 
-    # ── ESPN Odds — UNIFIED into mkt_spread/mkt_total above ──
-    # ESPN win probability edge is a unique signal (not just spread)
-    # AUDIT FIX: Removed has_mkt gating — ESPN predictor is independent of spread data.
-    # Prefer predictor (BPI, available pre-game) over win_pct (in-game/post-game only).
-    _espn_wp = pd.to_numeric(df["espn_home_win_pct"], errors="coerce").fillna(0.5)
-    _espn_pred = pd.to_numeric(df["espn_predictor_home_pct"], errors="coerce").fillna(0.5)
-    # Use predictor when it has real data (!=0.5), else fall back to win_pct
-    _best_wp = np.where(_espn_pred != 0.5, _espn_pred, _espn_wp)
-    df["espn_wp_edge"] = _best_wp - 0.5
-    df["espn_predictor_edge"] = _espn_pred - 0.5
+    # ── Market Win Probability Edge (v25 audit fix) ──
+    # REPLACED espn_wp_edge: ESPN data was bad (in-game snapshots, not pre-game).
+    # Cascade: DK moneyline → OA moneyline → spread-derived probability
+    # ML conversion: fav(-): -ML/(-ML+100), dog(+): 100/(ML+100), then remove vig
+    # Spread conversion: 1 / (1 + 10^(spread/16))
+    _dk_ml_h = pd.to_numeric(df.get("dk_ml_home_close", 0), errors="coerce").fillna(0)
+    _dk_ml_a = pd.to_numeric(df.get("dk_ml_away_close", 0), errors="coerce").fillna(0)
+    _oa_ml_h = pd.to_numeric(df.get("odds_api_ml_home_close", 0), errors="coerce").fillna(0)
+    _oa_ml_a = pd.to_numeric(df.get("odds_api_ml_away_close", 0), errors="coerce").fillna(0)
+    # Pick best ML source: DK > OA
+    _ml_h = np.where(_dk_ml_h != 0, _dk_ml_h, _oa_ml_h)
+    _ml_a = np.where(_dk_ml_a != 0, _dk_ml_a, _oa_ml_a)
+    _has_ml = (_ml_h != 0) & (_ml_a != 0)
+    # Convert to implied probabilities
+    _imp_h = np.where(_ml_h > 0, 100.0 / (_ml_h + 100), np.where(_ml_h < 0, -_ml_h / (-_ml_h + 100), 0.5))
+    _imp_a = np.where(_ml_a > 0, 100.0 / (_ml_a + 100), np.where(_ml_a < 0, -_ml_a / (-_ml_a + 100), 0.5))
+    _vig = np.clip(_imp_h + _imp_a, 0.01, 3.0)
+    _ml_wp = _imp_h / _vig  # vig-removed true probability
+    # Spread-derived probability as fallback (SIGMA=16 for college basketball)
+    _mkt_sp = df["mkt_spread"].values.astype(float)
+    _spread_wp = 1.0 / (1.0 + np.power(10.0, _mkt_sp / 16.0))
+    _has_spread = _mkt_sp != 0
+    # Cascade: moneyline (best) → spread-derived (fallback)
+    _best_wp = np.where(_has_ml, _ml_wp, np.where(_has_spread, _spread_wp, 0.5))
+    df["market_wp_edge"] = _best_wp - 0.5
 
     # ── PBP Half Split Features ──
     df["half_margin_swing"] = df["home_2h_margin"] - df["home_1h_margin"]
@@ -650,14 +680,33 @@ def ncaa_build_features(df):
 
     # ── Spread movement (sharp money signal) ──
     # Merge Odds API (2024-2025) and DraftKings/ESPN pickcenter (2026) sources
+    # v25 AUDIT: Also derive from close-open when pre-computed movement unavailable
     _oa_mvmt = pd.to_numeric(df["odds_api_spread_movement"], errors="coerce").fillna(0)
     _dk_mvmt = pd.to_numeric(df["dk_spread_movement"], errors="coerce").fillna(0)
-    df["spread_movement"] = np.where(_oa_mvmt != 0, _oa_mvmt, _dk_mvmt)
+    # Derive from open/close when movement column is missing
+    _dk_sp_open = pd.to_numeric(df.get("dk_spread_open", 0), errors="coerce").fillna(0)
+    _dk_sp_close = pd.to_numeric(df.get("dk_spread_close", 0), errors="coerce").fillna(0)
+    _oa_sp_open = pd.to_numeric(df.get("odds_api_spread_open", 0), errors="coerce").fillna(0)
+    _oa_sp_close = pd.to_numeric(df.get("odds_api_spread_close", 0), errors="coerce").fillna(0)
+    _dk_derived = np.where((_dk_sp_open != 0) & (_dk_sp_close != 0), _dk_sp_close - _dk_sp_open, 0)
+    _oa_derived = np.where((_oa_sp_open != 0) & (_oa_sp_close != 0), _oa_sp_close - _oa_sp_open, 0)
+    # Cascade: pre-computed OA > pre-computed DK > derived OA > derived DK
+    df["spread_movement"] = np.where(_oa_mvmt != 0, _oa_mvmt,
+                            np.where(_dk_mvmt != 0, _dk_mvmt,
+                            np.where(_oa_derived != 0, _oa_derived, _dk_derived)))
     df["has_spread_movement"] = (df["spread_movement"] != 0).astype(int)
     # Total line movement
     _oa_total_mvmt = pd.to_numeric(df["odds_api_total_movement"], errors="coerce").fillna(0)
     _dk_total_mvmt = pd.to_numeric(df["dk_total_movement"], errors="coerce").fillna(0)
-    df["total_movement"] = np.where(_oa_total_mvmt != 0, _oa_total_mvmt, _dk_total_mvmt)
+    _dk_ou_open = pd.to_numeric(df.get("dk_total_open", 0), errors="coerce").fillna(0)
+    _dk_ou_close = pd.to_numeric(df.get("dk_total_close", 0), errors="coerce").fillna(0)
+    _oa_ou_open = pd.to_numeric(df.get("odds_api_total_open", 0), errors="coerce").fillna(0)
+    _oa_ou_close = pd.to_numeric(df.get("odds_api_total_close", 0), errors="coerce").fillna(0)
+    _dk_ou_derived = np.where((_dk_ou_open != 0) & (_dk_ou_close != 0), _dk_ou_close - _dk_ou_open, 0)
+    _oa_ou_derived = np.where((_oa_ou_open != 0) & (_oa_ou_close != 0), _oa_ou_close - _oa_ou_open, 0)
+    df["total_movement"] = np.where(_oa_total_mvmt != 0, _oa_total_mvmt,
+                           np.where(_dk_total_mvmt != 0, _dk_total_mvmt,
+                           np.where(_oa_ou_derived != 0, _oa_ou_derived, _dk_ou_derived)))
 
     # ── Lineup stability features (from pre-computed starter_ids analysis) ──
     # Computed by compute_lineup_features.py, stored in Supabase/parquet.
@@ -722,7 +771,7 @@ def ncaa_build_features(df):
         "ppg_diff", "opp_ppg_diff", "fgpct_diff", "threepct_diff",
         "orb_pct_diff", "fta_rate_diff", "ato_diff",
         "def_fgpct_diff", "steals_diff", "blocks_diff",
-        "sos_diff", "form_diff", "rank_diff", "win_pct_diff",
+        "sos_diff", "form_diff", "win_pct_diff",  # rank_diff REMOVED (v25 audit: 11%, redundant with elo/em)
         "to_margin_diff",         "tempo_avg",         "season_phase",
                 # Unified market signal (ESPN preferred → Odds API fallback)
         "mkt_spread", "mkt_total", "mkt_spread_vs_model", "has_mkt",
@@ -775,10 +824,15 @@ def ncaa_build_features(df):
         "days_since_loss_diff", "games_since_blowout_diff",
         "games_last_14_diff", "rest_effect_diff",
         "momentum_halflife_diff", "win_aging_diff",
-        "centrality_diff",         "n_common_opps",         "is_lookahead",                 "fatigue_x_quality",         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
+        "centrality_diff",         "n_common_opps",         "fatigue_x_quality",         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
+        # is_lookahead REMOVED (v25 audit: 5%, too sparse to learn from)
+        # v25 AUDIT: Added situational context features
+        "is_early",                  # early season flag (35%, stable, real signal)
+        "is_ncaa_tourney",           # NCAA tournament flag (2%, meaningful single-elimination context)
         # ═══ v19→v20: ESPN Win Prob edges (unique signal beyond spread) ═══
-        "espn_wp_edge",         # ═══ v21: Venue features (pre-game, no leakage) ═══
-        "crowd_pct",         # ═══ v21: Rolling team tendency features (prior games, no leakage) ═══
+        "market_wp_edge",           # v25: replaces espn_wp_edge (was bad data)
+        # crowd_pct REMOVED (v25 audit: 0% attendance data, restore after backfill)
+        # ═══ v21: Rolling team tendency features (prior games, no leakage) ═══
         # PBP tendencies
         "roll_run_diff", "roll_drought_diff",
         "roll_lead_change_avg", "roll_dominance_diff",
@@ -814,9 +868,9 @@ def ncaa_build_features(df):
         # ═══ v22: Orphaned features — Category 3 (situational flags, 6 features) ═══
         "is_revenge_game",           # rematch flag (17,514 games)
         "revenge_margin",            # prior loss margin in rematch
-        "is_sandwich",               # sandwich scheduling spot (682)
-        "def_rest_advantage",        # defensive rest edge (19,402)
-        "luck_x_spread",             # luck × spread interaction (35,880)
+        # is_sandwich REMOVED (v25 audit: 1%, too rare to learn from)
+        # def_rest_advantage REMOVED (v25 audit: degrading 38%→19%, redundant with rest_diff r=0.79)
+        "luck_x_spread",             # luck × spread interaction (v25: now computed inline)
         # ═══ v23: Lineup stability features (3 features) ═══
         "lineup_changes_diff",       # starters changed from last game (home-away)
         "lineup_stability_diff",     # rolling 5-game lineup consistency diff

@@ -141,6 +141,10 @@ df["season_weight"] = df["season"].apply(
 print("  Heuristic backfill...")
 df = _ncaa_backfill_heuristic(df)
 
+# ── v25: Apply training data fixes (pyth_residual, spread unification, etc.) ──
+from training_data_fixes import apply_training_fixes
+df = apply_training_fixes(df)
+
 try:
     import json as _json
     with open("referee_profiles.json") as _rf:
@@ -168,7 +172,7 @@ scaler = StandardScaler()
 X_s = scaler.fit_transform(X)
 
 print("\n  CatBoost solo (validated: beats 3-model stack on 2026 holdout)...", end=" ", flush=True)
-cat = CatBoostRegressor(n_estimators=125, depth=4, learning_rate=0.10, random_seed=42, verbose=0)
+cat = CatBoostRegressor(n_estimators=650, depth=4, learning_rate=0.10, random_seed=42, verbose=0)
 oof_cat = time_series_oof(cat, X_s, y_margin, n_splits=50)
 cat.fit(X_s, y_margin, sample_weight=weights)
 mae = mean_absolute_error(y_margin, oof_cat)
@@ -189,7 +193,7 @@ reg = StackedRegressor([cat], _passthrough_meta)
 from catboost import CatBoostClassifier
 print("  Training classifier (CatBoost solo, OOF)...")
 
-cat_c = CatBoostClassifier(n_estimators=125, depth=4, learning_rate=0.10, random_seed=42, verbose=0)
+cat_c = CatBoostClassifier(n_estimators=650, depth=4, learning_rate=0.10, random_seed=42, verbose=0)
 
 # OOF probabilities
 oof_probs_cat = np.zeros(n)

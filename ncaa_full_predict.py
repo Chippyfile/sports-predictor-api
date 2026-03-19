@@ -919,6 +919,21 @@ def predict_ncaa_full(request_data):
         "espn_ml_home": request_data.get("espn_ml_home", 0),
         "espn_ml_away": request_data.get("espn_ml_away", 0),
 
+        # v25: DK/OA moneylines for market_wp_edge computation in ncaa_build_features
+        "dk_ml_home_close": request_data.get("dk_ml_home_close", 0),
+        "dk_ml_away_close": request_data.get("dk_ml_away_close", 0),
+        "odds_api_ml_home_close": request_data.get("odds_api_ml_home_close", 0),
+        "odds_api_ml_away_close": request_data.get("odds_api_ml_away_close", 0),
+        # v25: DK/OA open/close for spread_movement derivation
+        "dk_spread_open": request_data.get("dk_spread_open", 0),
+        "dk_spread_close": request_data.get("dk_spread_close", 0),
+        "odds_api_spread_open": request_data.get("odds_api_spread_open", 0),
+        "odds_api_spread_close": request_data.get("odds_api_spread_close", 0),
+        "dk_total_open": request_data.get("dk_total_open", 0),
+        "dk_total_close": request_data.get("dk_total_close", 0),
+        "odds_api_total_open": request_data.get("odds_api_total_open", 0),
+        "odds_api_total_close": request_data.get("odds_api_total_close", 0),
+
         # Spread movement
         "odds_api_spread_movement": spread_mvmt.get("odds_api_spread_movement", 0),
         "dk_spread_movement": spread_mvmt.get("dk_spread_movement", 0),
@@ -943,12 +958,12 @@ def predict_ncaa_full(request_data):
         "n_common_opps": n_common_opps,
         "common_opp_diff": common_opp_diff,
         # Schedule situations (from ESPN schedule analysis)
-        "is_lookahead": home_sched.get("is_lookahead", 0) or away_sched.get("is_lookahead", 0),
+        # is_lookahead REMOVED (v25: too sparse 5%)
         "is_revenge_game": home_sched.get("is_revenge_game", 0),
         "revenge_margin": home_sched.get("revenge_margin", 0.0),
-        "is_sandwich": home_sched.get("is_sandwich", 0) or away_sched.get("is_sandwich", 0),
-        # Spread regime: close game (1), medium (2), blowout (3)
-        "spread_regime": 1 if abs(market_spread) < 5 else (2 if abs(market_spread) < 12 else 3),
+        # is_sandwich REMOVED (v25: too sparse 1%)
+        # spread_regime: v25 — now computed inline by ncaa_build_features from mkt_spread
+        "spread_regime": 0,  # placeholder, overridden by ncaa_build_features
         # Midweek: Mon-Thu = 1
         "is_midweek": 1 if datetime.fromisoformat(f"{game_date}T00:00:00").weekday() < 4 else 0,
         # Style familiarity: approximate from tempo similarity
@@ -962,17 +977,16 @@ def predict_ncaa_full(request_data):
         "matchup_to": (away_stats.get("turnovers", 12) - home_stats.get("turnovers", 12)) / 20.0,
         "matchup_orb": (home_stats.get("orb_pct", 0.28) - away_stats.get("orb_pct", 0.28)),
         "matchup_ft": (home_stats.get("fta_rate", 0.34) - away_stats.get("fta_rate", 0.34)),
-        # Interaction features
-        # AUDIT FIX: These must match how ncaa_build_features sees them during training.
-        # ncaa_build_features just passes these through from raw columns, so we compute them here.
-        "def_rest_advantage": (home_rest - away_rest) * (sb("home_def_stability") or 0.5) * 0.1,
-        "luck_x_spread": sb("home_luck", 0) * market_spread * 0.01,
+        # Interaction features — v25: consistency_x_spread and luck_x_spread
+        # are now computed inline by ncaa_build_features from mkt_spread.
+        # def_rest_advantage REMOVED (v25: degrading, redundant with rest_diff)
+        "luck_x_spread": 0.0,  # placeholder, overridden by ncaa_build_features
         # AUDIT FIX: use computed adj_em, not request_data which is often empty
         "fatigue_x_quality": (sb("home_fatigue_load", 0) * (sb_away("home_adj_oe", 105) - sb_away("home_adj_de", 105))
                              - sb_away("home_fatigue_load", 0) * (sb("home_adj_oe", 105) - sb("home_adj_de", 105))) * 0.01,
         "rest_x_defense": (home_rest - away_rest) * ((sb("home_def_stability") or 0.5) + (sb_away("home_def_stability") or 0.5)) * 0.025,
         "form_x_familiarity": 0.0,  # Set in post-processing after form_diff is computed
-        "consistency_x_spread": (sb("home_consistency", 0) - sb_away("home_consistency", 0)) * market_spread * 0.01,
+        "consistency_x_spread": 0.0,  # placeholder, overridden by ncaa_build_features
 
         # ESPN opponent FG% (for def_fgpct_diff)
         # AUDIT FIX: was using opp_efg_pct (eFG%) instead of actual opp_fgpct (FG%)
@@ -1151,8 +1165,8 @@ def predict_ncaa_full(request_data):
     print(f"  [full_predict] pyth_residual: home={game['home_pyth_residual']:.4f}, away={game['away_pyth_residual']:.4f}")
     print(f"  [full_predict] luck: home={game['home_luck']:.4f}, away={game['away_luck']:.4f}")
 
-    # 8. Recompute luck_x_spread now that luck has a real value
-    game["luck_x_spread"] = game.get("home_luck", 0) * market_spread * 0.01
+    # 8. luck_x_spread and consistency_x_spread: now computed inline by ncaa_build_features
+    # No manual recompute needed here
 
     # 9. Compute player ratings from starter_ids when Supabase values are 0
     # Same logic as training: starter_ids + player_ratings.json → sum, weakest, variance
@@ -1373,12 +1387,8 @@ def predict_ncaa_full(request_data):
         a_sos = away_record.get("sos", 0.5)
         X.loc[:, "sos_diff"] = h_sos - a_sos
 
-    # espn_wp_edge: from ESPN predictor (BPI preferred, available pre-game)
-    # AUDIT FIX: prefer espn_pred over espn_wp, matching ncaa.py fix
-    if "espn_wp_edge" in X.columns and r["espn_wp_edge"] == 0:
-        best_wp = espn_pred if espn_pred != 0.5 else espn_wp
-        if best_wp != 0.5:
-            X.loc[:, "espn_wp_edge"] = best_wp - 0.5
+    # market_wp_edge: computed by ncaa_build_features from moneyline/spread cascade
+    # No fallback needed here — ncaa_build_features handles the full cascade
 
     # games_last_14_diff: Supabase first, then schedule fallback
     if "games_last_14_diff" in X.columns and r["games_last_14_diff"] == 0:
