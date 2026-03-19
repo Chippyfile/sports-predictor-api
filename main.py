@@ -549,10 +549,10 @@ def debug_train_mlb():
 # ═══════════════════════════════════════════════════════════════
 # ROUTES — NCAA Daily Cron (fully automated predictions + grading)
 # Schedule in Railway:
-#   8:00 AM PST  (16:00 UTC) → /cron/ncaa-daily?mode=predict  (morning predictions)
-#   12:00 PM PST (20:00 UTC) → /cron/ncaa-daily?mode=refresh  (re-check spreads/starters)
-#   2:00 PM PST  (22:00 UTC) → /cron/ncaa-daily?mode=refresh  (final pre-game update)
+#   8:00 AM EST  (13:00 UTC) → /cron/ncaa-daily?mode=predict  (predict today + tomorrow)
 #   11:30 PM EST (04:30 UTC) → /cron/ncaa-daily?mode=grade    (grade results)
+# No midday refresh needed — 8AM predict pulls today + tomorrow's games.
+# For pre-tip updates (spread movement, officials), use frontend refresh button.
 # ═══════════════════════════════════════════════════════════════
 
 _ncaa_cron_lock = False
@@ -580,42 +580,57 @@ def route_ncaa_daily():
     try:
         mode = request.args.get("mode", "auto")
         now_utc = datetime.now(timezone.utc)
-        now_pst = now_utc - timedelta(hours=8)
-        today_pst = now_pst.strftime("%Y-%m-%d")
-        hour_pst = now_pst.hour
+        now_est = now_utc - timedelta(hours=5)
+        today_pst = now_est.strftime("%Y-%m-%d")  # variable name kept for compatibility
+        hour_est = now_est.hour
 
-        # Auto mode: predict in morning, refresh midday, grade at night
+        # Auto mode: predict in morning, grade at night
         if mode == "auto":
-            if hour_pst < 11:
+            if hour_est < 14:
                 mode = "predict"
-            elif hour_pst < 17:
-                mode = "refresh"
             else:
                 mode = "grade"
 
         import requests as _req
         headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
 
-        results = {"mode": mode, "date": today_pst, "hour_pst": hour_pst}
+        results = {"mode": mode, "date": today_pst, "hour_est": hour_est}
 
         if mode in ("predict", "refresh"):
-            # Fetch today's games from ESPN
-            compact = today_pst.replace("-", "")
-            espn_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={compact}&groups=50&limit=500"
-            espn_resp = _req.get(espn_url, timeout=30)
-            events = espn_resp.json().get("events", []) if espn_resp.ok else []
+            # Fetch today's AND tomorrow's games from ESPN
+            # This way the 8AM EST cron covers all games without needing midday refreshes
+            tomorrow_pst = (now_est + timedelta(days=1)).strftime("%Y-%m-%d")
+            dates_to_pull = [today_pst, tomorrow_pst]
+
+            all_events = []
+            for pull_date in dates_to_pull:
+                compact = pull_date.replace("-", "")
+                espn_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={compact}&groups=50&limit=500"
+                espn_resp = _req.get(espn_url, timeout=30)
+                day_events = espn_resp.json().get("events", []) if espn_resp.ok else []
+                # Tag each event with its game date
+                for ev in day_events:
+                    ev["_pull_date"] = pull_date
+                all_events.extend(day_events)
+                print(f"  [cron/ncaa] {pull_date}: {len(day_events)} games from ESPN")
+
+            events = all_events
             results["espn_games"] = len(events)
+            results["dates_pulled"] = dates_to_pull
 
             if not events:
                 results["status"] = "no_games_today"
                 return jsonify(results)
 
-            # Check which games already have predictions
-            existing = _req.get(
-                f"{SUPABASE_URL}/rest/v1/ncaa_predictions?game_date=eq.{today_pst}&select=game_id,result_entered,spread_home,market_spread_home",
-                headers=headers, timeout=30
-            )
-            existing_ids = {r["game_id"]: r for r in (existing.json() if existing.ok else [])}
+            # Check which games already have predictions (both dates)
+            existing_ids = {}
+            for pull_date in dates_to_pull:
+                existing = _req.get(
+                    f"{SUPABASE_URL}/rest/v1/ncaa_predictions?game_date=eq.{pull_date}&select=game_id,result_entered,spread_home,market_spread_home",
+                    headers=headers, timeout=30
+                )
+                for r in (existing.json() if existing.ok else []):
+                    existing_ids[r["game_id"]] = r
             results["existing_predictions"] = len(existing_ids)
 
             # Run predictions for games without them (predict mode)
@@ -631,6 +646,8 @@ def route_ncaa_daily():
                     continue  # skip finished games
 
                 game_id = event.get("id")
+                # Use actual game date from event (handles tomorrow's games)
+                event_date_str = event.get("_pull_date", today_pst)
                 home = next((c for c in comp.get("competitors", []) if c.get("homeAway") == "home"), None)
                 away = next((c for c in comp.get("competitors", []) if c.get("homeAway") == "away"), None)
                 if not home or not away:
@@ -653,7 +670,7 @@ def route_ncaa_daily():
                         "home_team_id": str(home_id),
                         "away_team_id": str(away_id),
                         "neutral_site": neutral,
-                        "game_date": today_pst,
+                        "game_date": event_date_str,
                         "game_id": str(game_id),
                     })
 
@@ -697,7 +714,7 @@ def route_ncaa_daily():
                         win_prob = pred["ml_win_prob_home"]
 
                         row = {
-                            "game_date": today_pst,
+                            "game_date": event_date_str,
                             "game_id": str(game_id),
                             "home_team_id": str(home_id),
                             "away_team_id": str(away_id),
@@ -765,7 +782,7 @@ def route_ncaa_daily():
             # Grade all ungraded games (today and recent days)
             graded = 0
             for days_ago in range(0, 3):  # check today + last 2 days
-                check_date = (now_pst - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                check_date = (now_est - timedelta(days=days_ago)).strftime("%Y-%m-%d")
                 pending = _req.get(
                     f"{SUPABASE_URL}/rest/v1/ncaa_predictions?game_date=eq.{check_date}&result_entered=eq.false"
                     f"&select=id,game_id,home_team_id,away_team_id,win_pct_home,spread_home,market_spread_home,market_ou_total,ou_total,pred_home_score,pred_away_score,ats_units,ats_side",
@@ -859,6 +876,84 @@ def route_ncaa_daily():
                     graded += 1
 
             results["graded"] = graded
+
+            # ── Capture pickcenter data (spread movement) for graded games ──
+            # ESPN pickcenter has open/close lines after games finish.
+            # This feeds the spread_movement training feature.
+            pc_captured = 0
+            for days_ago in range(0, 3):
+                check_date = (now_est - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                compact_date = check_date.replace("-", "")
+                try:
+                    espn_resp = _req.get(
+                        f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates={compact_date}&groups=50&limit=500",
+                        timeout=30
+                    )
+                    day_events = espn_resp.json().get("events", []) if espn_resp.ok else []
+                except:
+                    day_events = []
+
+                for event in day_events:
+                    comp = event.get("competitions", [{}])[0]
+                    if not comp.get("status", {}).get("type", {}).get("completed"):
+                        continue
+                    game_id = event.get("id")
+                    try:
+                        summary = _req.get(
+                            f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event={game_id}",
+                            timeout=10
+                        )
+                        if not summary.ok:
+                            continue
+                        pc = summary.json().get("pickcenter", [])
+                        if not pc:
+                            continue
+
+                        pc_patch = {}
+                        for entry in pc:
+                            ps = entry.get("pointSpread", {})
+                            if ps:
+                                home = ps.get("home", {})
+                                h_open = home.get("open", {}).get("line")
+                                h_close = home.get("close", {}).get("line")
+                                if h_open is not None and h_close is not None:
+                                    try:
+                                        pc_patch["dk_spread_open"] = float(h_open)
+                                        pc_patch["dk_spread_close"] = float(h_close)
+                                        pc_patch["dk_spread_movement"] = round(float(h_close) - float(h_open), 1)
+                                    except:
+                                        pass
+                            total = entry.get("total", {})
+                            if total:
+                                over = total.get("over", {})
+                                o_open = over.get("open", {}).get("line", "")
+                                o_close = over.get("close", {}).get("line", "")
+                                try:
+                                    o_open_val = float(str(o_open).replace("o", "").replace("u", ""))
+                                    o_close_val = float(str(o_close).replace("o", "").replace("u", ""))
+                                    pc_patch["dk_total_open"] = o_open_val
+                                    pc_patch["dk_total_close"] = o_close_val
+                                    pc_patch["dk_total_movement"] = round(o_close_val - o_open_val, 1)
+                                except:
+                                    pass
+                            if pc_patch:
+                                break
+
+                        if pc_patch:
+                            _req.patch(
+                                f"{SUPABASE_URL}/rest/v1/ncaa_historical?game_id=eq.{game_id}",
+                                headers={**headers, "Content-Type": "application/json"},
+                                json=pc_patch,
+                                timeout=15
+                            )
+                            pc_captured += 1
+                            _time.sleep(0.1)  # rate limit ESPN
+
+                    except Exception as e:
+                        pass  # non-critical, skip silently
+
+            results["pickcenter_captured"] = pc_captured
+            print(f"  [cron/ncaa] Pickcenter captured: {pc_captured} games")
 
         duration = _time.time() - start
         results["duration_sec"] = round(duration, 1)
