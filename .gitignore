@@ -88,3 +88,40 @@ nba_elo.py
 compute_advanced_features.py
 fix_conf_tourney_and_pyth.py
 walk_forward_no_market_results.csv
+
+# ── Data & results (never deploy) ──
+*.csv
+*.parquet
+*.pkl
+*.joblib
+*.log
+__pycache__/
+
+# ── Sweep/backtest results ──
+*_results.txt
+*_summary.json
+*_checkpoint*.json
+calibration_curve.json
+no_market_*.json
+shap_results*.json
+shap_top20.json
+backfill_log.json
+bracket_results*.json
+ncaa_expand_progress.json
+
+# ── Dev/analysis scripts (keep local, not on Railway) ──
+*_sweep*.py
+*_backfill*.py
+*_backtest*.py
+backtests.py
+recalibrate.py
+slim_main.py
+validate_*.py
+march_madness_sim.py
+ncaa_ratings.py
+ncaa_rolling_tendencies.py
+ncaa_train_local.py
+ncaa_espn_extract_all.py
+compute_lineup_features.py
+compute_player_impact.py
+advanced_features_snippet.py
