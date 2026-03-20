@@ -844,12 +844,25 @@ def route_ncaa_daily():
                     # O/U
                     total = home_score + away_score
                     ou_line = matched.get("market_ou_total") or matched.get("ou_total")
-                    pred_total = (matched.get("pred_home_score") or 0) + (matched.get("pred_away_score") or 0)
+                    ou_model = matched.get("ou_total")  # model's predicted total
                     ou_correct = None
                     if ou_line and total != ou_line:
-                        ou_correct = "OVER" if (total > ou_line) == (pred_total > ou_line) else "UNDER"
+                        actual_over = total > ou_line
+                        ou_correct = "OVER" if actual_over else "UNDER"
                     elif ou_line and total == ou_line:
                         ou_correct = "PUSH"
+
+                    # O/U model correctness (did model's edge agree with outcome?)
+                    ou_model_correct = None
+                    if ou_model and ou_line and ou_correct and ou_correct != "PUSH":
+                        try:
+                            model_edge = float(ou_model) - float(ou_line)
+                            if abs(model_edge) >= 5:  # only grade 5+ edge
+                                model_says_over = model_edge > 0
+                                actual_over = ou_correct == "OVER"
+                                ou_model_correct = model_says_over == actual_over
+                        except:
+                            pass
 
                     # ATS pick grading (v27)
                     ats_correct = None
@@ -880,6 +893,62 @@ def route_ncaa_daily():
                     graded += 1
 
             results["graded"] = graded
+
+            # ── Daily grading summary ──
+            daily_summary = {}
+            for days_ago in range(0, 3):
+                check_date = (now_est - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                day_rows = _req.get(
+                    f"{SUPABASE_URL}/rest/v1/ncaa_predictions?game_date=eq.{check_date}&result_entered=eq.true"
+                    f"&select=ml_correct,ats_correct,ats_units,ou_correct,ou_total,market_ou_total,spread_home,market_spread_home",
+                    headers=headers, timeout=30
+                )
+                rows = day_rows.json() if day_rows.ok else []
+                if not rows:
+                    continue
+
+                ml_w = sum(1 for r in rows if r.get("ml_correct") is True)
+                ml_l = sum(1 for r in rows if r.get("ml_correct") is False)
+                ml_total = ml_w + ml_l
+
+                # ATS: only games with ats_units > 0 (4+ edge bets)
+                ats_rows = [r for r in rows if r.get("ats_units") and r["ats_units"] > 0]
+                ats_w = sum(1 for r in ats_rows if r.get("ats_correct") is True)
+                ats_l = sum(1 for r in ats_rows if r.get("ats_correct") is False)
+                ats_total = ats_w + ats_l
+
+                # O/U: games where model had 5+ edge vs market
+                ou_w, ou_l = 0, 0
+                for r in rows:
+                    ou_model = r.get("ou_total")
+                    ou_mkt = r.get("market_ou_total")
+                    if ou_model and ou_mkt:
+                        try:
+                            ou_edge = float(ou_model) - float(ou_mkt)
+                        except:
+                            continue
+                        if abs(ou_edge) >= 5:
+                            oc = r.get("ou_correct")
+                            if ou_edge > 0 and oc == "OVER":
+                                ou_w += 1
+                            elif ou_edge < 0 and oc == "UNDER":
+                                ou_w += 1
+                            elif oc and oc != "PUSH":
+                                ou_l += 1
+                ou_total = ou_w + ou_l
+
+                day_summary = {
+                    "ml": f"{ml_w}/{ml_total} ({ml_w/ml_total*100:.1f}%)" if ml_total else "0/0",
+                    "ats_4plus": f"{ats_w}/{ats_total} ({ats_w/ats_total*100:.1f}%)" if ats_total else "0/0",
+                    "ats_bets": ats_total,
+                    "ou_5plus": f"{ou_w}/{ou_total} ({ou_w/ou_total*100:.1f}%)" if ou_total else "0/0",
+                    "ou_bets": ou_total,
+                    "total_games": len(rows),
+                }
+                daily_summary[check_date] = day_summary
+                print(f"  [cron/ncaa] {check_date}: ML {day_summary['ml']} | ATS(4+) {day_summary['ats_4plus']} ({ats_total} bets) | O/U(5+) {day_summary['ou_5plus']} ({ou_total} bets)")
+
+            results["daily_summary"] = daily_summary
 
             # ── Capture pickcenter data (spread movement) for graded games ──
             # ESPN pickcenter has open/close lines after games finish.
