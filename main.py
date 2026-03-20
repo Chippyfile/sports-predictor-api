@@ -29,7 +29,7 @@ from sports.ncaa import train_ncaa, predict_ncaa, ncaa_build_features
 from ncaa_full_predict import predict_ncaa_full
 from sports.nfl import train_nfl, predict_nfl, nfl_build_features
 from sports.ncaaf import train_ncaaf, predict_ncaaf, ncaaf_build_features
-from nba_backfill import backfill_nba_historical
+# REMOVED: nba_backfill cleaned from repo
 from quick_backtest import quick_backtest_nba, quick_backtest_ncaa, quick_backtest_mlb
 from season_holdout_backtest import season_holdout_nba, season_holdout_ncaa, season_holdout_mlb, season_holdout_all
 from monte_carlo import monte_carlo
@@ -1100,7 +1100,7 @@ if __name__ == "__main__":
 @app.route("/backfill/nba-historical", methods=["POST"])
 def route_backfill_nba():
     seasons = (request.get_json(force=True, silent=True) or {}).get("seasons", [2022, 2023, 2024, 2025])
-    return jsonify(backfill_nba_historical(seasons=seasons))
+    return jsonify({"error": "nba_backfill not available"})
 
 @app.route("/backtest/quick/nba")
 def route_quick_nba(): return jsonify(quick_backtest_nba())
