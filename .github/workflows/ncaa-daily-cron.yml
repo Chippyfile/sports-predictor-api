@@ -1,0 +1,47 @@
+name: NCAA Daily Cron
+
+on:
+  schedule:
+    # 8:00 AM EST (13:00 UTC) — predict today + tomorrow, grade yesterday
+    - cron: '0 13 * * *'
+    # 11:30 PM EST (04:30 UTC) — grade today's completed games
+    - cron: '30 4 * * *'
+  workflow_dispatch:  # manual trigger from GitHub UI
+
+jobs:
+  ncaa-cron:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Determine mode
+        id: mode
+        run: |
+          HOUR=$(date -u +%H)
+          if [ "$HOUR" -ge 10 ] && [ "$HOUR" -le 16 ]; then
+            echo "mode=predict" >> $GITHUB_OUTPUT
+          else
+            echo "mode=grade" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run predictions (morning)
+        if: steps.mode.outputs.mode == 'predict'
+        run: |
+          # First grade any ungraded games from yesterday
+          echo "Grading previous days..."
+          GRADE=$(curl -sf --max-time 120 \
+            "https://sports-predictor-api-production.up.railway.app/cron/ncaa-daily?mode=grade")
+          echo "$GRADE" | python3 -m json.tool 2>/dev/null || echo "$GRADE"
+          
+          echo ""
+          echo "Predicting today + tomorrow..."
+          PREDICT=$(curl -sf --max-time 120 \
+            "https://sports-predictor-api-production.up.railway.app/cron/ncaa-daily?mode=predict")
+          echo "$PREDICT" | python3 -m json.tool 2>/dev/null || echo "$PREDICT"
+
+      - name: Grade results (night)
+        if: steps.mode.outputs.mode == 'grade'
+        run: |
+          echo "Grading completed games..."
+          RESULT=$(curl -sf --max-time 120 \
+            "https://sports-predictor-api-production.up.railway.app/cron/ncaa-daily?mode=grade")
+          echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
