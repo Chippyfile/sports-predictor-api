@@ -453,14 +453,21 @@ def route_train_all_logged():
 # The backtest module has handler functions; we register routes here.
 # ═══════════════════════════════════════════════════════════════
 
-from backtests import (
-    route_backtest_mlb, route_backtest_nba, route_backtest_ncaa,
-    route_model_info as _backtest_model_info,
-    nba_confidence_calibration, ncaa_confidence_calibration, mlb_confidence_calibration,
-    route_backtest_current_model,
-    historical_ats_ncaa, historical_ats_nba, historical_ats_mlb, historical_ats_all,
-    spread_edge_ncaa, spread_edge_nba, spread_edge_mlb,
-)
+try:
+    from backtests import (
+        route_backtest_mlb, route_backtest_nba, route_backtest_ncaa,
+        route_model_info as _backtest_model_info,
+        nba_confidence_calibration, ncaa_confidence_calibration, mlb_confidence_calibration,
+        route_backtest_current_model,
+        historical_ats_ncaa, historical_ats_nba, historical_ats_mlb, historical_ats_all,
+        spread_edge_ncaa, spread_edge_nba, spread_edge_mlb,
+    )
+except ImportError:
+    route_backtest_mlb = route_backtest_nba = route_backtest_ncaa = None
+    _backtest_model_info = nba_confidence_calibration = ncaa_confidence_calibration = mlb_confidence_calibration = None
+    route_backtest_current_model = None
+    historical_ats_ncaa = historical_ats_nba = historical_ats_mlb = historical_ats_all = None
+    spread_edge_ncaa = spread_edge_nba = spread_edge_mlb = None
 
 # Only register if they exist (graceful degradation)
 import inspect
@@ -491,7 +498,10 @@ for path, (methods, name, fn) in _backtest_routes.items():
 # ROUTES — NCAA Ratings
 # ═══════════════════════════════════════════════════════════════
 
-from ncaa_ratings import run_ncaa_efficiency_computation
+try:
+    from ncaa_ratings import run_ncaa_efficiency_computation
+except ImportError:
+    run_ncaa_efficiency_computation = None
 
 @app.route("/compute/ncaa-efficiency", methods=["POST"])
 def route_ncaa_efficiency():
