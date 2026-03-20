@@ -1504,6 +1504,7 @@ def predict_ncaa_full(request_data):
                     if abs(ou_edge) >= 5:
                         ou_pick = "OVER" if ou_edge > 0 else "UNDER"
     except Exception as e:
+        ou_pick = f"ERROR: {e}"
         print(f"  [full_predict] O/U model error: {e}")
 
     # SHAP
