@@ -77,6 +77,15 @@ def sb_get(table, params=""):
 #   );
 _models = {}
 
+def _mt19937_ctor_patch(orig_ctor):
+    """Module-level wrapper so pickle can resolve the patched constructor."""
+    def _ctor(bit_generator_name):
+        if 'MT19937' in str(bit_generator_name):
+            from numpy.random import MT19937
+            return MT19937()
+        return orig_ctor(bit_generator_name)
+    return _ctor
+
 def save_model(name, obj):
     """Save model to local disk + in-memory cache + Supabase for persistence."""
     import base64, io
@@ -145,16 +154,17 @@ def load_model(name):
             rows = resp.json()
             if rows and rows[0].get("data"):
                 raw = base64.b64decode(rows[0]["data"])
- # Fix numpy version mismatch for MT19937 BitGenerator
+                # Fix numpy version mismatch for MT19937 BitGenerator
+                # Patch must be module-level so pickle can resolve it,
+                # and we restore the original after loading to avoid
+                # polluting save_model's pickle namespace.
                 import numpy.random._pickle as _nrp
                 _orig_ctor = _nrp.__bit_generator_ctor
-                def _patched_ctor(bit_generator_name):
-                    if 'MT19937' in str(bit_generator_name):
-                        from numpy.random import MT19937
-                        return MT19937()
-                    return _orig_ctor(bit_generator_name)
-                _nrp.__bit_generator_ctor = _patched_ctor    
-                obj = joblib.load(io.BytesIO(raw))
+                _nrp.__bit_generator_ctor = _mt19937_ctor_patch(_orig_ctor)
+                try:
+                    obj = joblib.load(io.BytesIO(raw))
+                finally:
+                    _nrp.__bit_generator_ctor = _orig_ctor
                 # Cache locally for fast subsequent access
                 _models[name] = obj
                 joblib.dump(obj, path)
