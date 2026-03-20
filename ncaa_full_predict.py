@@ -1479,8 +1479,11 @@ def predict_ncaa_full(request_data):
     ou_predicted_total = None
     ou_edge = None
     ou_pick = None
+    ou_debug = "start"
     try:
         ou_bundle = load_model("ncaa_ou")
+        ou_debug = f"loaded:{ou_bundle is not None},reg:{bool(ou_bundle.get('reg') if ou_bundle else None)},scaler:{bool(ou_bundle.get('scaler') if ou_bundle else None)}"
+        print(f"  [O/U debug] {ou_debug}")
         if ou_bundle and ou_bundle.get("reg") and ou_bundle.get("scaler"):
             ou_feature_cols = ou_bundle.get("ou_feature_cols") or ou_bundle.get("feature_cols", [])
             # Filter to O/U features that exist in the full feature set
