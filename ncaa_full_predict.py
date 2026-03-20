@@ -1475,6 +1475,37 @@ def predict_ncaa_full(request_data):
     win_prob = margin_weight * margin_prob + (1 - margin_weight) * win_prob
     win_prob = max(0.05, min(0.95, win_prob))
 
+    # ═══ O/U MODEL (separate model, 20 features) ═══
+    ou_predicted_total = None
+    ou_edge = None
+    ou_pick = None
+    try:
+        ou_bundle = load_model("ncaa_ou")
+        if ou_bundle and ou_bundle.get("reg") and ou_bundle.get("scaler"):
+            ou_feature_cols = ou_bundle.get("ou_feature_cols") or ou_bundle.get("feature_cols", [])
+            # Filter to O/U features that exist in the full feature set
+            available_ou = [f for f in ou_feature_cols if f in feature_cols]
+            if len(available_ou) >= 15:  # need at least 75% of O/U features
+                ou_idx = [feature_cols.index(f) for f in available_ou]
+                X_ou = X.iloc[:, ou_idx]
+                # Pad missing O/U features with 0
+                for f in ou_feature_cols:
+                    if f not in X_ou.columns:
+                        X_ou[f] = 0.0
+                X_ou = X_ou[ou_feature_cols]  # reorder to match training
+                X_ou_s = ou_bundle["scaler"].transform(X_ou)
+                ou_predicted_total = float(ou_bundle["reg"].predict(X_ou_s)[0])
+                ou_bias = ou_bundle.get("bias_correction", 0)
+                ou_predicted_total += ou_bias
+                # Compute edge vs market O/U
+                mkt_ou = float(game.get("espn_over_under", 0) or game.get("market_ou_total", 0) or 0)
+                if mkt_ou > 0:
+                    ou_edge = round(ou_predicted_total - mkt_ou, 1)
+                    if abs(ou_edge) >= 5:
+                        ou_pick = "OVER" if ou_edge > 0 else "UNDER"
+    except Exception as e:
+        print(f"  [full_predict] O/U model error: {e}")
+
     # SHAP
     shap_out = []
     try:
@@ -1503,6 +1534,9 @@ def predict_ncaa_full(request_data):
         "classifier_overridden": classifier_disagrees,
         "margin_weight": round(margin_weight, 3),
         "bias_correction_applied": round(bias, 3),
+        "ou_predicted_total": round(ou_predicted_total, 1) if ou_predicted_total else None,
+        "ou_edge": ou_edge,
+        "ou_pick": ou_pick,
         "shap": shap_out,
         "feature_coverage": f"{non_zero}/{total}",
         "data_sources": {

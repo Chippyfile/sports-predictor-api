@@ -744,6 +744,10 @@ def route_ncaa_daily():
                         if espn_ou is not None:
                             row["market_ou_total"] = espn_ou
 
+                        # O/U prediction (v26)
+                        if pred.get("ou_predicted_total") is not None:
+                            row["ou_total"] = pred["ou_predicted_total"]
+
                         # ATS pick (v27)
                         if row.get("spread_home") is not None and row.get("market_spread_home") is not None:
                             model_margin = row["spread_home"]
