@@ -754,9 +754,9 @@ def route_ncaa_daily():
                             mkt_implied = -row["market_spread_home"]
                             disagree = abs(model_margin - mkt_implied)
                             row["ats_disagree"] = round(disagree, 2)
-                            if disagree >= 2:
+                            if disagree >= 4:
                                 row["ats_side"] = "HOME" if model_margin > mkt_implied else "AWAY"
-                                row["ats_units"] = 3 if disagree >= 4 else 2 if disagree >= 3 else 1
+                                row["ats_units"] = 3 if disagree >= 10 else 2 if disagree >= 7 else 1
                                 row["ats_pick_spread"] = row["market_spread_home"]
                             else:
                                 row["ats_units"] = 0
