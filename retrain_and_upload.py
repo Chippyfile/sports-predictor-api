@@ -141,6 +141,16 @@ df["season_weight"] = df["season"].apply(
 print("  Heuristic backfill...")
 df = _ncaa_backfill_heuristic(df)
 
+# ── v26: Compute crowd_shock_diff from attendance data ──
+from build_crowd_shock import compute_crowd_shock
+print("  Computing crowd_shock_diff...")
+df = compute_crowd_shock(df, n_games=5)
+
+# ── v27: Compute h2h, conf_strength, recent_form (were 100% zero before) ──
+from compute_h2h_conf_form import compute_missing_features
+print("  Computing h2h, conf_strength, recent_form...")
+df = compute_missing_features(df)
+
 # ── v25: Apply training data fixes (pyth_residual, spread unification, etc.) ──
 from training_data_fixes import apply_training_fixes
 df = apply_training_fixes(df)

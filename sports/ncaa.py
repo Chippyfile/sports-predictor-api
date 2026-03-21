@@ -809,7 +809,7 @@ def ncaa_build_features(df):
         "regression_diff", "info_gain_diff", "overreaction_diff",
         # ── v3: Scoring source ──
         "scoring_source_entropy_diff", "ft_dependency_diff",
-        "three_value_diff", "concentration_diff", "to_conversion_diff",
+        "concentration_diff", "to_conversion_diff",
         # ── v3: Hot/cold divergence ──
         "three_divergence_diff", "ppp_divergence_diff",
         # ── v3: Pace-adjusted / SOS / Venue ──
@@ -829,7 +829,7 @@ def ncaa_build_features(df):
         "days_since_loss_diff", "games_since_blowout_diff",
         "games_last_14_diff", "rest_effect_diff",
         "momentum_halflife_diff", "win_aging_diff",
-        "centrality_diff",         "n_common_opps",         "fatigue_x_quality",         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
+        "n_common_opps",         "fatigue_x_quality",         "rest_x_defense", "form_x_familiarity", "consistency_x_spread",
         # is_lookahead REMOVED (v25 audit: 5%, too sparse to learn from)
         # v25 AUDIT: Added situational context features
         "is_early",                  # early season flag (35%, stable, real signal)
