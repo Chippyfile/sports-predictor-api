@@ -591,7 +591,7 @@ def route_ncaa_daily():
         mode = request.args.get("mode", "auto")
         now_utc = datetime.now(timezone.utc)
         now_est = now_utc - timedelta(hours=5)
-        today_pst = now_est.strftime("%Y-%m-%d")  # variable name kept for compatibility
+        today_pst = request.args.get("date") or now_est.strftime("%Y-%m-%d")
         hour_est = now_est.hour
 
         # Auto mode: predict in morning, grade at night
