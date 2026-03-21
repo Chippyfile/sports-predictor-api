@@ -402,7 +402,7 @@ def ncaa_build_features(df):
     # ── v25 AUDIT: Compute interaction features inline (were pre-computed, broken) ──
     _abs_spread = df["mkt_spread"].abs()
     _h_consistency = pd.to_numeric(df.get("home_consistency", 15.0), errors="coerce").fillna(15.0).clip(lower=0.1)
-    _h_luck = pd.to_numeric(df.get("home_luck", 0), errors="coerce").fillna(0)
+    _h_luck = pd.to_numeric(df["home_luck"], errors="coerce").fillna(0) if "home_luck" in df.columns else pd.Series(0, index=df.index)
     # consistency_x_spread: was only using market_spread_home (12%), now uses unified mkt_spread
     df["consistency_x_spread"] = _abs_spread / _h_consistency
     # luck_x_spread: same fix — home_luck * abs(unified mkt_spread)
@@ -509,10 +509,10 @@ def ncaa_build_features(df):
     # Cascade: DK moneyline → OA moneyline → spread-derived probability
     # ML conversion: fav(-): -ML/(-ML+100), dog(+): 100/(ML+100), then remove vig
     # Spread conversion: 1 / (1 + 10^(spread/16))
-    _dk_ml_h = pd.to_numeric(df.get("dk_ml_home_close", 0), errors="coerce").fillna(0)
-    _dk_ml_a = pd.to_numeric(df.get("dk_ml_away_close", 0), errors="coerce").fillna(0)
-    _oa_ml_h = pd.to_numeric(df.get("odds_api_ml_home_close", 0), errors="coerce").fillna(0)
-    _oa_ml_a = pd.to_numeric(df.get("odds_api_ml_away_close", 0), errors="coerce").fillna(0)
+    _dk_ml_h = pd.to_numeric(df["dk_ml_home_close"], errors="coerce").fillna(0) if "dk_ml_home_close" in df.columns else pd.Series(0, index=df.index)
+    _dk_ml_a = pd.to_numeric(df["dk_ml_away_close"], errors="coerce").fillna(0) if "dk_ml_away_close" in df.columns else pd.Series(0, index=df.index)
+    _oa_ml_h = pd.to_numeric(df["odds_api_ml_home_close"], errors="coerce").fillna(0) if "odds_api_ml_home_close" in df.columns else pd.Series(0, index=df.index)
+    _oa_ml_a = pd.to_numeric(df["odds_api_ml_away_close"], errors="coerce").fillna(0) if "odds_api_ml_away_close" in df.columns else pd.Series(0, index=df.index)
     # Pick best ML source: DK > OA
     _ml_h = np.where(_dk_ml_h != 0, _dk_ml_h, _oa_ml_h)
     _ml_a = np.where(_dk_ml_a != 0, _dk_ml_a, _oa_ml_a)
@@ -566,6 +566,11 @@ def ncaa_build_features(df):
     # Result: 0.5 = small crowd, 1.0 = typical, 2.0+ = packed major arena
     df["crowd_pct"] = (_att / 2400).clip(0, 5.0) * _has_att
     df["has_crowd_data"] = _has_att
+
+    # crowd_shock_diff: precomputed by compute_crowd_shock() from rolling attendance
+    # If not precomputed (e.g., single-game prediction), default to 0
+    if "crowd_shock_diff" not in df.columns:
+        df["crowd_shock_diff"] = 0.0
 
     # Venue capacity tier: small gym (<5K) vs mid (5-10K) vs large (>10K)
     # Normalized so model can learn venue size effect on HCA
@@ -684,10 +689,10 @@ def ncaa_build_features(df):
     _oa_mvmt = pd.to_numeric(df["odds_api_spread_movement"], errors="coerce").fillna(0)
     _dk_mvmt = pd.to_numeric(df["dk_spread_movement"], errors="coerce").fillna(0)
     # Derive from open/close when movement column is missing
-    _dk_sp_open = pd.to_numeric(df.get("dk_spread_open", 0), errors="coerce").fillna(0)
-    _dk_sp_close = pd.to_numeric(df.get("dk_spread_close", 0), errors="coerce").fillna(0)
-    _oa_sp_open = pd.to_numeric(df.get("odds_api_spread_open", 0), errors="coerce").fillna(0)
-    _oa_sp_close = pd.to_numeric(df.get("odds_api_spread_close", 0), errors="coerce").fillna(0)
+    _dk_sp_open = pd.to_numeric(df["dk_spread_open"], errors="coerce").fillna(0) if "dk_spread_open" in df.columns else pd.Series(0, index=df.index)
+    _dk_sp_close = pd.to_numeric(df["dk_spread_close"], errors="coerce").fillna(0) if "dk_spread_close" in df.columns else pd.Series(0, index=df.index)
+    _oa_sp_open = pd.to_numeric(df["odds_api_spread_open"], errors="coerce").fillna(0) if "odds_api_spread_open" in df.columns else pd.Series(0, index=df.index)
+    _oa_sp_close = pd.to_numeric(df["odds_api_spread_close"], errors="coerce").fillna(0) if "odds_api_spread_close" in df.columns else pd.Series(0, index=df.index)
     _dk_derived = np.where((_dk_sp_open != 0) & (_dk_sp_close != 0), _dk_sp_close - _dk_sp_open, 0)
     _oa_derived = np.where((_oa_sp_open != 0) & (_oa_sp_close != 0), _oa_sp_close - _oa_sp_open, 0)
     # Cascade: pre-computed OA > pre-computed DK > derived OA > derived DK
@@ -698,10 +703,10 @@ def ncaa_build_features(df):
     # Total line movement
     _oa_total_mvmt = pd.to_numeric(df["odds_api_total_movement"], errors="coerce").fillna(0)
     _dk_total_mvmt = pd.to_numeric(df["dk_total_movement"], errors="coerce").fillna(0)
-    _dk_ou_open = pd.to_numeric(df.get("dk_total_open", 0), errors="coerce").fillna(0)
-    _dk_ou_close = pd.to_numeric(df.get("dk_total_close", 0), errors="coerce").fillna(0)
-    _oa_ou_open = pd.to_numeric(df.get("odds_api_total_open", 0), errors="coerce").fillna(0)
-    _oa_ou_close = pd.to_numeric(df.get("odds_api_total_close", 0), errors="coerce").fillna(0)
+    _dk_ou_open = pd.to_numeric(df["dk_total_open"], errors="coerce").fillna(0) if "dk_total_open" in df.columns else pd.Series(0, index=df.index)
+    _dk_ou_close = pd.to_numeric(df["dk_total_close"], errors="coerce").fillna(0) if "dk_total_close" in df.columns else pd.Series(0, index=df.index)
+    _oa_ou_open = pd.to_numeric(df["odds_api_total_open"], errors="coerce").fillna(0) if "odds_api_total_open" in df.columns else pd.Series(0, index=df.index)
+    _oa_ou_close = pd.to_numeric(df["odds_api_total_close"], errors="coerce").fillna(0) if "odds_api_total_close" in df.columns else pd.Series(0, index=df.index)
     _dk_ou_derived = np.where((_dk_ou_open != 0) & (_dk_ou_close != 0), _dk_ou_close - _dk_ou_open, 0)
     _oa_ou_derived = np.where((_oa_ou_open != 0) & (_oa_ou_close != 0), _oa_ou_close - _oa_ou_open, 0)
     df["total_movement"] = np.where(_oa_total_mvmt != 0, _oa_total_mvmt,
@@ -711,51 +716,51 @@ def ncaa_build_features(df):
     # ── Lineup stability features (from pre-computed starter_ids analysis) ──
     # Computed by compute_lineup_features.py, stored in Supabase/parquet.
     # 4 features capturing roster continuity — 99.9% coverage from starter_ids.
-    _h_lc = pd.to_numeric(df.get("home_lineup_changes", 0), errors="coerce").fillna(0)
-    _a_lc = pd.to_numeric(df.get("away_lineup_changes", 0), errors="coerce").fillna(0)
+    _h_lc = pd.to_numeric(df["home_lineup_changes"], errors="coerce").fillna(0) if "home_lineup_changes" in df.columns else pd.Series(0, index=df.index)
+    _a_lc = pd.to_numeric(df["away_lineup_changes"], errors="coerce").fillna(0) if "away_lineup_changes" in df.columns else pd.Series(0, index=df.index)
     df["lineup_changes_diff"] = _h_lc - _a_lc
 
     _h_ls = pd.to_numeric(df.get("home_lineup_stability_5g", 1.0), errors="coerce").fillna(1.0)
     _a_ls = pd.to_numeric(df.get("away_lineup_stability_5g", 1.0), errors="coerce").fillna(1.0)
     df["lineup_stability_diff"] = _h_ls - _a_ls
 
-    _h_gt = pd.to_numeric(df.get("home_starter_games_together", 0), errors="coerce").fillna(0)
-    _a_gt = pd.to_numeric(df.get("away_starter_games_together", 0), errors="coerce").fillna(0)
+    _h_gt = pd.to_numeric(df["home_starter_games_together"], errors="coerce").fillna(0) if "home_starter_games_together" in df.columns else pd.Series(0, index=df.index)
+    _a_gt = pd.to_numeric(df["away_starter_games_together"], errors="coerce").fillna(0) if "away_starter_games_together" in df.columns else pd.Series(0, index=df.index)
     df["starter_experience_diff"] = _h_gt - _a_gt
 
     # ── Player impact ratings (walk-forward RAPM from compute_player_impact.py) ──
     # r=0.379 with margin (3rd strongest feature, no leakage)
-    _h_pr = pd.to_numeric(df.get("home_player_rating_sum", 0), errors="coerce").fillna(0)
-    _a_pr = pd.to_numeric(df.get("away_player_rating_sum", 0), errors="coerce").fillna(0)
+    _h_pr = pd.to_numeric(df["home_player_rating_sum"], errors="coerce").fillna(0) if "home_player_rating_sum" in df.columns else pd.Series(0, index=df.index)
+    _a_pr = pd.to_numeric(df["away_player_rating_sum"], errors="coerce").fillna(0) if "away_player_rating_sum" in df.columns else pd.Series(0, index=df.index)
     df["player_rating_diff"] = _h_pr - _a_pr
 
-    _h_ws = pd.to_numeric(df.get("home_weakest_starter", 0), errors="coerce").fillna(0)
-    _a_ws = pd.to_numeric(df.get("away_weakest_starter", 0), errors="coerce").fillna(0)
+    _h_ws = pd.to_numeric(df["home_weakest_starter"], errors="coerce").fillna(0) if "home_weakest_starter" in df.columns else pd.Series(0, index=df.index)
+    _a_ws = pd.to_numeric(df["away_weakest_starter"], errors="coerce").fillna(0) if "away_weakest_starter" in df.columns else pd.Series(0, index=df.index)
     df["weakest_starter_diff"] = _h_ws - _a_ws
 
-    _h_sv = pd.to_numeric(df.get("home_starter_variance", 0), errors="coerce").fillna(0)
-    _a_sv = pd.to_numeric(df.get("away_starter_variance", 0), errors="coerce").fillna(0)
+    _h_sv = pd.to_numeric(df["home_starter_variance"], errors="coerce").fillna(0) if "home_starter_variance" in df.columns else pd.Series(0, index=df.index)
+    _a_sv = pd.to_numeric(df["away_starter_variance"], errors="coerce").fillna(0) if "away_starter_variance" in df.columns else pd.Series(0, index=df.index)
     df["starter_balance_diff"] = _h_sv - _a_sv
 
     # ── Head-to-head matchup history (from compute_advanced_features.py) ──
     # r=0.474 with margin, 66.7% coverage, low redundancy with existing
-    df["h2h_margin_avg"] = pd.to_numeric(df.get("h2h_margin_avg", 0), errors="coerce").fillna(0)
-    df["h2h_home_win_rate"] = pd.to_numeric(df.get("h2h_home_win_rate", 0), errors="coerce").fillna(0)
+    df["h2h_margin_avg"] = pd.to_numeric(df["h2h_margin_avg"], errors="coerce").fillna(0) if "h2h_margin_avg" in df.columns else pd.Series(0, index=df.index)
+    df["h2h_home_win_rate"] = pd.to_numeric(df["h2h_home_win_rate"], errors="coerce").fillna(0) if "h2h_home_win_rate" in df.columns else pd.Series(0, index=df.index)
 
     # ── Conference strength (backfilled to 95%+ coverage) ──
     # r=0.656 with margin on cross-conference games (45.5% nonzero, rest are same-conf = 0)
-    df["conf_strength_diff"] = pd.to_numeric(df.get("conf_strength_diff", 0), errors="coerce").fillna(0)
-    df["cross_conf_flag"] = pd.to_numeric(df.get("cross_conf_flag", 0), errors="coerce").fillna(0)
+    df["conf_strength_diff"] = pd.to_numeric(df["conf_strength_diff"], errors="coerce").fillna(0) if "conf_strength_diff" in df.columns else pd.Series(0, index=df.index)
+    df["cross_conf_flag"] = pd.to_numeric(df["cross_conf_flag"], errors="coerce").fillna(0) if "cross_conf_flag" in df.columns else pd.Series(0, index=df.index)
 
     # ── Pace-adjusted stats (computed inline from existing data) ──
     # r=0.476 — beats raw ppg_diff (0.371) by normalizing to 70 possessions
     _STD_PACE = 70.0
     _h_tempo_r = pd.to_numeric(df.get("home_tempo", 70), errors="coerce").fillna(70)
     _a_tempo_r = pd.to_numeric(df.get("away_tempo", 70), errors="coerce").fillna(70)
-    _h_ppg_r = pd.to_numeric(df.get("home_ppg", 0), errors="coerce").fillna(0)
-    _a_ppg_r = pd.to_numeric(df.get("away_ppg", 0), errors="coerce").fillna(0)
-    _h_opp_r = pd.to_numeric(df.get("home_opp_ppg", 0), errors="coerce").fillna(0)
-    _a_opp_r = pd.to_numeric(df.get("away_opp_ppg", 0), errors="coerce").fillna(0)
+    _h_ppg_r = pd.to_numeric(df["home_ppg"], errors="coerce").fillna(0) if "home_ppg" in df.columns else pd.Series(0, index=df.index)
+    _a_ppg_r = pd.to_numeric(df["away_ppg"], errors="coerce").fillna(0) if "away_ppg" in df.columns else pd.Series(0, index=df.index)
+    _h_opp_r = pd.to_numeric(df["home_opp_ppg"], errors="coerce").fillna(0) if "home_opp_ppg" in df.columns else pd.Series(0, index=df.index)
+    _a_opp_r = pd.to_numeric(df["away_opp_ppg"], errors="coerce").fillna(0) if "away_opp_ppg" in df.columns else pd.Series(0, index=df.index)
     df["pace_adj_ppg_diff"] = np.where(_h_tempo_r > 0, _h_ppg_r * _STD_PACE / _h_tempo_r, _h_ppg_r) - \
                                np.where(_a_tempo_r > 0, _a_ppg_r * _STD_PACE / _a_tempo_r, _a_ppg_r)
     df["pace_adj_opp_ppg_diff"] = np.where(_h_tempo_r > 0, _h_opp_r * _STD_PACE / _h_tempo_r, _h_opp_r) - \
@@ -763,7 +768,7 @@ def ncaa_build_features(df):
 
     # ── Recent form (from compute_advanced_features.py) ──
     # r=0.418, 84% coverage — more responsive than season-long form_diff
-    df["recent_form_diff"] = pd.to_numeric(df.get("recent_form_diff", 0), errors="coerce").fillna(0)
+    df["recent_form_diff"] = pd.to_numeric(df["recent_form_diff"], errors="coerce").fillna(0) if "recent_form_diff" in df.columns else pd.Series(0, index=df.index)
 
     feature_cols = [
         # ── EXISTING 38 (unchanged) ──
@@ -831,7 +836,8 @@ def ncaa_build_features(df):
         "is_ncaa_tourney",           # NCAA tournament flag (2%, meaningful single-elimination context)
         # ═══ v19→v20: ESPN Win Prob edges (unique signal beyond spread) ═══
         "market_wp_edge",           # v25: replaces espn_wp_edge (was bad data)
-        # crowd_pct REMOVED (v25 audit: 0% attendance data, restore after backfill)
+        # ═══ v26: crowd_shock_diff (replaces crowd_pct — rolling attendance ratio, no leakage) ═══
+        "crowd_shock_diff",
         # ═══ v21: Rolling team tendency features (prior games, no leakage) ═══
         # PBP tendencies
         "roll_run_diff", "roll_drought_diff",

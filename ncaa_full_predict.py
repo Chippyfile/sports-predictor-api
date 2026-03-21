@@ -575,6 +575,39 @@ def _fetch_supabase_team_data(team_id, team_name):
         return {}
 
 
+def _fetch_crowd_shock(home_team_id, away_team_id):
+    """Compute crowd_shock_diff from recent home attendance in ncaa_historical."""
+    cache_key = f"crowd_shock_{home_team_id}_{away_team_id}"
+    cached = _cache_get(cache_key, CACHE_TTL_LONG)
+    if cached is not None:
+        return cached
+
+    import numpy as np
+    try:
+        # Fetch last 5 home games with attendance for each team
+        h_rows = sb_get("ncaa_historical",
+            f"home_team_id=eq.{home_team_id}&attendance=gt.0&select=attendance&order=game_date.desc&limit=5")
+        a_rows = sb_get("ncaa_historical",
+            f"home_team_id=eq.{away_team_id}&attendance=gt.0&select=attendance&order=game_date.desc&limit=5")
+
+        h_atts = [r["attendance"] for r in (h_rows or []) if r.get("attendance", 0) > 0]
+        a_atts = [r["attendance"] for r in (a_rows or []) if r.get("attendance", 0) > 0]
+
+        h_avg = np.mean(h_atts) if h_atts else 0
+        a_avg = np.mean(a_atts) if a_atts else 0
+
+        if h_avg > 0 and a_avg > 0:
+            val = float(np.log(h_avg / a_avg))
+        else:
+            val = 0.0
+
+        _cache_set(cache_key, val)
+        return val
+    except Exception as e:
+        print(f"  [full_predict] crowd_shock error: {e}")
+        return 0.0
+
+
 def _fetch_spread_movement(game_id):
     """Fetch spread movement data from ncaa_historical."""
     cache_key = f"spread_mvmt_{game_id}"
@@ -908,6 +941,7 @@ def predict_ncaa_full(request_data):
         # Venue
         "attendance": game_info.get("attendance", 0),
         "venue_capacity": game_info.get("venue_capacity", 8000),
+        "crowd_shock_diff": _fetch_crowd_shock(home_team_id, away_team_id),
 
         # Market
         "market_spread_home": market_spread,
@@ -1549,6 +1583,7 @@ def predict_ncaa_full(request_data):
             "injuries": bool(home_inj["injury_penalty"] > 0 or away_inj["injury_penalty"] > 0),
             "spread_movement": bool(spread_mvmt),
             "attendance": bool(game_info.get("attendance", 0) > 0),
+            "crowd_shock": bool(game.get("crowd_shock_diff", 0) != 0),
         },
         "model_meta": {
             "n_train": bundle["n_train"],
