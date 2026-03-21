@@ -564,7 +564,11 @@ def train_nba():
             reg_cv_mae = float(np.mean(np.abs(oof_meta - y_margin.values)))
             print(f"  NBA stacked OOF MAE: {reg_cv_mae:.3f}")
 
-            explainer = shap.TreeExplainer(xgb_reg if HAS_XGB else rf_reg)
+            try:
+                explainer = shap.TreeExplainer(xgb_reg if HAS_XGB else rf_reg)
+            except Exception as _shap_err:
+                print(f'  SHAP explainer failed: {_shap_err}')
+                explainer = None
             model_type = "StackedEnsemble_v4_TSCV"
             meta_weights = meta_reg.coef_.round(4).tolist()
             print(f"  NBA meta weights: {meta_weights}")
@@ -617,7 +621,11 @@ def train_nba():
                 LogisticRegression(max_iter=1000), cv=min(5, n)
             )
             clf.fit(X_scaled, y_win)
-            explainer = shap.TreeExplainer(reg)
+            try:
+                explainer = shap.TreeExplainer(reg)
+            except Exception as _shap_err:
+                print(f'  SHAP explainer failed: {_shap_err}')
+                explainer = None
             model_type = "GBM"
             bias_correction = 0.0
             isotonic = None
