@@ -652,7 +652,7 @@ def route_ncaa_daily():
             for event in events:
                 comp = event.get("competitions", [{}])[0]
                 status = comp.get("status", {}).get("type", {})
-                if status.get("completed"):
+                if status.get("completed") and not request.args.get("force"):
                     continue  # skip finished games
 
                 game_id = event.get("id")
