@@ -260,10 +260,9 @@ def flag_dead_features(df):
     ]
     
     # Features that broke in specific seasons
-    broken_2026 = [
-        "consistency_x_spread",  # 11% → 0% in 2026
-        "luck_x_spread",  # 10% → 0% in 2026
-    ]
+    # NOTE: consistency_x_spread and luck_x_spread were fixed in ncaa.py v25 audit
+    # (now use unified mkt_spread with closing_spread fallback). No longer broken.
+    broken_2026 = []
     
     print("  Fix 3 (dead features flagged):")
     print("    Always zero (%d): %s" % (len(always_zero), ", ".join(always_zero[:5]) + "..."))

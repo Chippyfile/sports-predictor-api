@@ -105,7 +105,10 @@ def nba_build_features(df):
     df["steals_to_diff"] = df["steals_to_h"] - df["steals_to_a"]
 
     # ── Market line features (strongest public predictor) ──
-    df["market_spread"] = pd.to_numeric(df["market_spread_home"] if "market_spread_home" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
+    # market_spread: prefer market_spread_home, fall back to dk_spread (from summary parquet)
+    _ms_home = pd.to_numeric(df["market_spread_home"] if "market_spread_home" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
+    _ms_dk   = pd.to_numeric(df["dk_spread"] if "dk_spread" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
+    df["market_spread"] = np.where(_ms_home != 0, _ms_home, _ms_dk)
 
     # ═══ v20 CRIT-1b FIX: market_total = 0 when no real market data ═══
     # Before: fell back to model's own ou_total, creating circular dependency

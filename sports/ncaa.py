@@ -383,10 +383,15 @@ def ncaa_build_features(df):
     )
     _has_espn = _espn_sp.notna() & (_espn_sp != 0)
     _has_odds = _odds_sp.notna() & (_odds_sp != 0)
+    # closing_spread is unified by training_data_fixes Fix 2 (ESPN > DK close > OA close).
+    # Use as tertiary fallback so mkt_spread (and consistency_x_spread) stay non-zero for 2026.
+    _closing_sp = pd.to_numeric(df["closing_spread"] if "closing_spread" in df.columns else pd.Series(dtype=float), errors="coerce").fillna(0)
+    _has_closing = _closing_sp != 0
 
-    # Prefer ESPN, fall back to Odds API, else 0
+    # Prefer ESPN, fall back to Odds API, then closing_spread, else 0
     df["mkt_spread"] = np.where(_has_espn, _espn_sp,
-                       np.where(_has_odds, _odds_sp, 0)).astype(float)
+                       np.where(_has_odds, _odds_sp,
+                       np.where(_has_closing, _closing_sp, 0))).astype(float)
     df["mkt_total"]  = np.where(_espn_ou.notna() & (_espn_ou != 0), _espn_ou,
                        np.where(_odds_ou.notna() & (_odds_ou != 0), _odds_ou, 0)).astype(float)
     df["has_mkt"]    = (_has_espn | _has_odds).astype(int)
