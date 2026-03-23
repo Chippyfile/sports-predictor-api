@@ -327,6 +327,8 @@ def predict_nba_full(game: dict):
         if espn_mkt.get("market_spread_home"):
             diag["sources"].append("ESPN pickcenter (live)")
 
+    row = {}
+
     # ═══ STEP 3b: ESPN team stats (fallback when no Supabase row) ═══
     if not sb_row:
         h_espn = _fetch_espn_team_stats(home_abbr)
@@ -371,8 +373,7 @@ def predict_nba_full(game: dict):
         diag["sources"].append(f"Rolling: {away_abbr} ({len(a_recent)} games)")
 
     # ═══ STEP 6: Build unified row ═══
-    row = {}
-
+    
     # Start with Supabase data (59 columns)
     if sb_row:
         for k, v in sb_row.items():
