@@ -269,7 +269,7 @@ def main():
         learner.fit(X, y)
         print(f"  {name} fitted ✓")
 
-    # Package model
+    from datetime import datetime
     model_pkg = {
         "type": "stacked_ats_v4",
         "version": "v4",
@@ -278,6 +278,9 @@ def main():
         "base_learners": final_learners,
         "meta_learner": meta,
         "n_train": len(X),
+        "mae_cv": 8.6536,
+        "model_type": "StackedATS_v4_elasticnet_mlp_rf",
+        "trained_at": datetime.utcnow().isoformat(),
         "notes": "elasticnet+mlp_large+random_forest, MAE=8.6536, ats4=71.2%, ats7=86.4%, ats10=98.6%",
     }
 
@@ -285,7 +288,16 @@ def main():
     with open(out_path, "wb") as f:
         pickle.dump(model_pkg, f)
     print(f"\n  Saved: {out_path}")
-    print("  Next: upload to Railway /models/ and update ncaa_full_predict.py to load it")
+
+    # Upload to Supabase model_store (same mechanism as all other models)
+    print("  Uploading to Supabase model_store...")
+    try:
+        from db import save_model
+        save_model("ncaa_ats_v4", model_pkg)
+        print("  ✅ Upload successful")
+    except Exception as e:
+        print(f"  ⚠️  Upload failed: {e}")
+        print("  Manual fallback: copy ncaa_ats_v4.pkl to Railway /models/ directory")
 
 
 if __name__ == "__main__":
