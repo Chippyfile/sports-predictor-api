@@ -245,6 +245,30 @@ def predict_nba_full(game: dict):
     else:
         diag["warnings"].append("Game not found in Supabase — using ESPN + defaults")
 
+    # If we have game_id but no teams, look them up from ESPN scoreboard
+    if (not home_abbr or not away_abbr) and game_id:
+        url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={game_id}"
+        try:
+            r = requests.get(url, timeout=10)
+            if r.ok:
+                hdr = r.json().get("header", {})
+                comps = hdr.get("competitions", [{}])
+                competitors = comps[0].get("competitors", []) if comps else []
+                for c in competitors:
+                    abbr = _map(c.get("team", {}).get("abbreviation", ""))
+                    if c.get("homeAway") == "home": home_abbr = abbr
+                    elif c.get("homeAway") == "away": away_abbr = abbr
+                if home_abbr and away_abbr:
+                    diag["sources"].append(f"Teams from ESPN summary: {away_abbr}@{home_abbr}")
+                    # Also grab game_date from header
+                    try:
+                        dt_str = comps[0].get("date", "")
+                        if dt_str:
+                            game_date = dt_str[:10]
+                    except: pass
+        except Exception:
+            pass
+
     if not home_abbr or not away_abbr:
         return {"error": "home_team and away_team required (or game_id)"}
 
