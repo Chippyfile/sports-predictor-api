@@ -653,8 +653,26 @@ def train_nba():
         return {"error": str(e), "type": type(e).__name__,
                 "traceback": _tb.format_exc()}
 
+def _load_nba_v26():
+    """Load Lasso v26 model from local pkl file (git-deployed)."""
+    import pickle, os
+    for path in ["nba_model_local.pkl", "models/nba_model_local.pkl"]:
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                bundle = pickle.load(f)
+            if bundle.get("architecture", "").startswith("Lasso"):
+                return bundle
+    return None
+
+
 def predict_nba(game: dict):
-    bundle = load_model("nba")
+    # Try v26 Lasso first, fall back to Supabase stacked ensemble
+    bundle = _load_nba_v26()
+    is_v26 = bundle is not None
+
+    if not is_v26:
+        bundle = load_model("nba")
+
     if not bundle:
         return {"error": "NBA model not trained — call /train/nba first"}
 
@@ -668,16 +686,16 @@ def predict_nba(game: dict):
         "home_ppg": 110, "away_ppg": 110,
         "home_opp_ppg": 110, "away_opp_ppg": 110,
         "home_fgpct": 0.46, "away_fgpct": 0.46,
-        "home_threepct": 0.365, "away_threepct": 0.365,   # v20 MED-2: was 0.36
+        "home_threepct": 0.365, "away_threepct": 0.365,
         "home_ftpct": 0.77, "away_ftpct": 0.77,
         "home_assists": 25, "away_assists": 25,
         "home_turnovers": 14, "away_turnovers": 14,
         "home_tempo": 100, "away_tempo": 100,
         "home_orb_pct": 0.25, "away_orb_pct": 0.25,
         "home_fta_rate": 0.28, "away_fta_rate": 0.28,
-        "home_ato_ratio": 1.8, "away_ato_ratio": 1.8,     # v20 MED-1: was 1.7
+        "home_ato_ratio": 1.8, "away_ato_ratio": 1.8,
         "home_opp_fgpct": 0.46, "away_opp_fgpct": 0.46,
-        "home_opp_threepct": 0.365, "away_opp_threepct": 0.365, # v20 MED-2: was 0.35
+        "home_opp_threepct": 0.365, "away_opp_threepct": 0.365,
         "home_steals": 7.5, "away_steals": 7.5,
         "home_blocks": 5.0, "away_blocks": 5.0,
         "home_wins": 20, "away_wins": 20,
@@ -690,10 +708,66 @@ def predict_nba(game: dict):
     merged = {**_RAW_DEFAULTS, **game}
     row = pd.DataFrame([merged])
 
+    # ── v26 Lasso prediction path ──
+    if is_v26:
+        try:
+            from nba_build_features_v25 import nba_build_features as build_v25
+            X = build_v25(row)
+        except ImportError:
+            X = nba_build_features(row)
+
+        feature_list = bundle["feature_list"]
+        # Ensure all features exist (fill missing with 0)
+        for f in feature_list:
+            if f not in X.columns:
+                X[f] = 0.0
+        X_slim = X[feature_list]
+
+        X_s = bundle["scaler"].transform(X_slim)
+        margin = float(bundle["model"].predict(X_s)[0])
+
+        # Win probability: sigmoid → isotonic calibration
+        raw_prob = 1.0 / (1.0 + np.exp(-margin / 8.0))
+        calibrator = bundle.get("calibrator")
+        if calibrator is not None:
+            try:
+                win_prob = float(calibrator.predict([raw_prob])[0])
+            except Exception:
+                win_prob = raw_prob
+        else:
+            win_prob = raw_prob
+
+        # Feature explanation via Lasso coefficients (replaces SHAP)
+        coefs = bundle["model"].coef_
+        scaled_vals = X_s[0]
+        contributions = coefs * scaled_vals
+        shap_out = [
+            {"feature": f, "shap": round(float(c), 4), "value": round(float(X_slim[f].iloc[0]), 3)}
+            for f, c in zip(feature_list, contributions)
+        ]
+        shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+
+        return {
+            "sport": "NBA",
+            "ml_margin": round(margin, 2),
+            "ml_win_prob_home": round(win_prob, 4),
+            "ml_win_prob_away": round(1 - win_prob, 4),
+            "shap": shap_out,
+            "model_meta": {
+                "n_train": bundle.get("n_games"),
+                "mae_cv": bundle.get("cv_mae"),
+                "trained_at": bundle.get("trained_at"),
+                "model_type": bundle.get("architecture", "Lasso_v26"),
+                "n_features": bundle.get("n_features_selected"),
+                "has_isotonic": calibrator is not None,
+            },
+        }
+
+    # ── Legacy stacked ensemble prediction path ──
     X = nba_build_features(row)
     X_s = bundle["scaler"].transform(X[bundle["feature_cols"]])
 
-    margin   = float(bundle["reg"].predict(X_s)[0])
+    margin = float(bundle["reg"].predict(X_s)[0])
 
     # Apply bias correction if available
     bias = bundle.get("bias_correction", 0.0)
@@ -710,16 +784,20 @@ def predict_nba(game: dict):
         except Exception:
             pass
 
-    shap_vals = bundle["explainer"].shap_values(X_s)
-    if isinstance(shap_vals, list):
-        shap_vals = shap_vals[0]
-    # Handle both 1D (single sample) and 2D arrays
-    sv = shap_vals[0] if len(shap_vals.shape) > 1 else shap_vals
-    shap_out = [
-        {"feature": f, "shap": round(float(v), 4), "value": round(float(X[f].iloc[0]), 3)}
-        for f, v in zip(bundle["feature_cols"], sv)
-    ]
-    shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+    shap_out = []
+    if bundle.get("explainer") is not None:
+        try:
+            shap_vals = bundle["explainer"].shap_values(X_s)
+            if isinstance(shap_vals, list):
+                shap_vals = shap_vals[0]
+            sv = shap_vals[0] if len(shap_vals.shape) > 1 else shap_vals
+            shap_out = [
+                {"feature": f, "shap": round(float(v), 4), "value": round(float(X[f].iloc[0]), 3)}
+                for f, v in zip(bundle["feature_cols"], sv)
+            ]
+            shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+        except Exception:
+            pass
 
     return {
         "sport": "NBA",
