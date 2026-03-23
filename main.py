@@ -27,6 +27,7 @@ from sports.mlb import train_mlb, predict_mlb, calibrate_mlb_dispersion
 from sports.nba import train_nba, predict_nba, nba_build_features
 from sports.ncaa import train_ncaa, predict_ncaa, ncaa_build_features
 from ncaa_full_predict import predict_ncaa_full
+from nba_full_predict import predict_nba_full
 from sports.nfl import train_nfl, predict_nfl, nfl_build_features
 from sports.ncaaf import train_ncaaf, predict_ncaaf, ncaaf_build_features
 # REMOVED: nba_backfill cleaned from repo
@@ -265,6 +266,18 @@ def route_predict_ncaa_full():
         import traceback
         tb = traceback.format_exc()
         print(f"[predict/ncaa/full] ERROR: {tb}")
+        return jsonify({"error": str(e), "traceback": tb}), 500
+
+@app.route("/predict/nba/full", methods=["POST"])
+def route_predict_nba_full():
+    """Full NBA prediction with server-side enrichment — v26 Lasso."""
+    game = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify(predict_nba_full(game))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[predict/nba/full] ERROR: {tb}")
         return jsonify({"error": str(e), "traceback": tb}), 500
 
 @app.route("/monte-carlo", methods=["POST"])
