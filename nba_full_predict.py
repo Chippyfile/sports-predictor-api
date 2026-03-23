@@ -167,6 +167,47 @@ def _load_model():
 
 
 # ═════════════════════════════════════════════════════════════
+# ESPN TEAM STATS FALLBACK
+# ═════════════════════════════════════════════════════════════
+
+def _fetch_espn_team_stats(abbr):
+    """Fetch current season stats from ESPN when Supabase row is missing."""
+    espn_id = NBA_ESPN_IDS.get(abbr)
+    if not espn_id:
+        return {}
+    url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{espn_id}/statistics?season=2026"
+    try:
+        r = requests.get(url, timeout=10)
+        if not r.ok:
+            return {}
+        cats = r.json().get("results", {}).get("stats", {}).get("categories", [])
+    except Exception:
+        return {}
+    def get(name):
+        for cat in cats:
+            for s in cat.get("stats", []):
+                if s.get("name") == name:
+                    try: return float(s["value"])
+                    except: pass
+        return None
+    def npct(v, fb):
+        p = v if v is not None else fb
+        return p / 100 if p and p > 1 else (p or fb)
+    return {
+        "ppg": get("avgPoints") or 112, "opp_ppg": get("avgPointsAllowed") or 112,
+        "fgpct": npct(get("fieldGoalPct"), 0.471),
+        "threepct": npct(get("threePointFieldGoalPct"), 0.365),
+        "ftpct": npct(get("freeThrowPct"), 0.780),
+        "assists": get("avgAssists") or 25, "turnovers": get("avgTurnovers") or 14,
+        "steals": get("avgSteals") or 7.5, "blocks": get("avgBlocks") or 5.0,
+        "tempo": get("paceFactor") or 100,
+        "off_reb": get("avgOffensiveRebounds") or 10, "total_reb": get("avgRebounds") or 44,
+        "opp_fgpct": npct(get("opponentFieldGoalPct"), 0.471),
+        "opp_threepct": npct(get("opponentThreePointFieldGoalPct"), 0.365),
+    }
+
+
+# ═════════════════════════════════════════════════════════════
 # ROLLING STATS FROM SUPABASE HISTORY
 # ═════════════════════════════════════════════════════════════
 
@@ -286,6 +327,32 @@ def predict_nba_full(game: dict):
         if espn_mkt.get("market_spread_home"):
             diag["sources"].append("ESPN pickcenter (live)")
 
+    # ═══ STEP 3b: ESPN team stats (fallback when no Supabase row) ═══
+    if not sb_row:
+        h_espn = _fetch_espn_team_stats(home_abbr)
+        a_espn = _fetch_espn_team_stats(away_abbr)
+        if h_espn:
+            diag["sources"].append(f"ESPN team stats: {home_abbr}")
+            for k, v in h_espn.items():
+                row[f"home_{k}"] = v
+            row["home_orb_pct"] = round(h_espn.get("off_reb", 10) / max(h_espn.get("total_reb", 44), 1), 3)
+            row["home_ato_ratio"] = round(h_espn.get("assists", 25) / max(h_espn.get("turnovers", 14), 1), 2)
+            h_off = h_espn.get("ppg", 112) / max(h_espn.get("tempo", 100), 80) * 100
+            h_def = h_espn.get("opp_ppg", 112) / max(h_espn.get("tempo", 100), 80) * 100
+            row["home_net_rtg"] = round(h_off - h_def, 1)
+        if a_espn:
+            diag["sources"].append(f"ESPN team stats: {away_abbr}")
+            for k, v in a_espn.items():
+                row[f"away_{k}"] = v
+            row["away_orb_pct"] = round(a_espn.get("off_reb", 10) / max(a_espn.get("total_reb", 44), 1), 3)
+            row["away_ato_ratio"] = round(a_espn.get("assists", 25) / max(a_espn.get("turnovers", 14), 1), 2)
+            a_off = a_espn.get("ppg", 112) / max(a_espn.get("tempo", 100), 80) * 100
+            a_def = a_espn.get("opp_ppg", 112) / max(a_espn.get("tempo", 100), 80) * 100
+            row["away_net_rtg"] = round(a_off - a_def, 1)
+        if h_espn and a_espn:
+            row["pred_home_score"] = round(h_espn["ppg"] + 1.5, 1)
+            row["pred_away_score"] = round(a_espn["ppg"], 1)
+
     # ═══ STEP 4: Elo ratings ═══
     elo = _load_elo()
     h_elo = elo.get(home_abbr, 1500)
@@ -387,6 +454,10 @@ def predict_nba_full(game: dict):
     except Exception as e:
         diag["warnings"].append(f"backfill: {e}")
 
+    # Enrich needs actual scores for historical games; for predictions, set dummies
+    if "actual_home_score" not in df.columns:
+        df["actual_home_score"] = df.get("pred_home_score", 112)
+        df["actual_away_score"] = df.get("pred_away_score", 112)
     try:
         from enrich_nba_v2 import enrich as enrich_v2
         df = enrich_v2(df)
