@@ -1543,6 +1543,52 @@ def predict_ncaa_full(request_data):
         ou_pick = f"ERROR: {e}"
         print(f"  [full_predict] O/U model error: {e}")
 
+    # ═══ ATS v4 MODEL (elasticnet+mlp_large+random_forest stack, 10 features) ═══
+    ats_predicted_margin = None
+    ats_cover_prob = None
+    ats_pick = None
+    ats_edge = None
+    try:
+        ats_bundle = load_model("ncaa_ats_v4")
+        if ats_bundle and ats_bundle.get("base_learners") and ats_bundle.get("meta_learner"):
+            ats_features = ats_bundle.get("features", [])
+            # Build ATS feature vector — use available features, fill missing with 0
+            ats_row = {}
+            for f in ats_features:
+                if f in feature_cols:
+                    ats_row[f] = float(X[f].iloc[0])
+                else:
+                    ats_row[f] = 0.0
+                    print(f"  [full_predict] ATS feature missing: {f} (using 0)")
+            X_ats = np.array([[ats_row[f] for f in ats_features]])
+
+            # Run through base learners
+            base_preds = []
+            for name in sorted(ats_bundle["base_learners"].keys()):
+                learner = ats_bundle["base_learners"][name]
+                pred = float(learner.predict(X_ats)[0])
+                base_preds.append(pred)
+
+            # Meta-learner stacks base predictions
+            X_meta = np.array([base_preds])
+            ats_predicted_margin = float(ats_bundle["meta_learner"].predict(X_meta)[0])
+
+            # Compute cover probability via sigmoid of predicted margin advantage
+            # Positive = model thinks home covers, negative = away covers
+            mkt_spread = float(game.get("espn_spread", 0) or game.get("mkt_spread", 0) or 0)
+            if mkt_spread != 0:
+                # margin_vs_spread: how much model thinks home beats the spread
+                margin_vs_spread = ats_predicted_margin - (-mkt_spread)  # espn_spread is negative when home favored
+                SIGMA_ATS = 10.0
+                ats_cover_prob = round(1.0 / (1.0 + 10.0 ** (-margin_vs_spread / SIGMA_ATS)), 4)
+                ats_cover_prob = max(0.05, min(0.95, ats_cover_prob))
+                ats_edge = round(margin_vs_spread, 1)
+                if abs(ats_edge) >= 4:
+                    ats_pick = "HOME_COVER" if ats_edge > 0 else "AWAY_COVER"
+            print(f"  [full_predict] ATS v4: margin={ats_predicted_margin:.2f}, edge={ats_edge}, pick={ats_pick}")
+    except Exception as e:
+        print(f"  [full_predict] ATS v4 model error: {e}")
+
     # SHAP
     shap_out = []
     try:
@@ -1574,6 +1620,10 @@ def predict_ncaa_full(request_data):
         "ou_predicted_total": round(ou_predicted_total, 1) if ou_predicted_total else None,
         "ou_edge": ou_edge,
         "ou_pick": ou_pick,
+        "ats_predicted_margin": round(ats_predicted_margin, 2) if ats_predicted_margin is not None else None,
+        "ats_cover_prob": ats_cover_prob,
+        "ats_edge": ats_edge,
+        "ats_pick": ats_pick,
         "shap": shap_out,
         "feature_coverage": f"{non_zero}/{total}",
         "data_sources": {
