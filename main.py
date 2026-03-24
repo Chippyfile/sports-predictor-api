@@ -287,8 +287,9 @@ def route_nba_backfill_stats():
     """Backfill nba_game_stats + nba_team_rolling from recent completed games."""
     data = request.get_json(force=True, silent=True) or {}
     days = data.get("days_back", 30)
+    force = data.get("force", False)
     try:
-        n = backfill_game_stats(days_back=days)
+        n = backfill_game_stats(days_back=days, force=force)
         return jsonify({"processed": n})
     except Exception as e:
         import traceback

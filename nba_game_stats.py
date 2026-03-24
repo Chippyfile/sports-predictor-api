@@ -54,17 +54,19 @@ def _sb():
 # ═══════════════════════════════════════════════════════════
 
 def _fetch_boxscore_stats(game_id):
-    """Fetch completed game boxscore from ESPN web summary API.
-    Uses site.web.api.espn.com which returns player-level data (starter/bench).
+    """Fetch completed game boxscore from ESPN web API.
+    Uses site.web.api.espn.com which has player-level data for bench_pts.
     Returns dict keyed by team_abbr with stats per team."""
     url = (f"https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
            f"?region=us&lang=en&contentorigin=espn&event={game_id}")
     try:
         r = requests.get(url, timeout=15)
         if not r.ok:
+            print(f"  [nba_game_stats] web API returned {r.status_code} for {game_id}")
             return None
         data = r.json()
-    except Exception:
+    except Exception as e:
+        print(f"  [nba_game_stats] web API fetch error for {game_id}: {e}")
         return None
 
     # Verify game is completed
@@ -142,7 +144,7 @@ def _fetch_boxscore_stats(game_id):
 
         result[abbr] = team_stats
 
-    # ── Bench points from player-level boxscores ──
+    # ── Bench points from player-level boxscores (same web API response) ──
     for pb in boxscore.get("players", []):
         team_obj = pb.get("team", {})
         if not isinstance(team_obj, dict):
@@ -274,7 +276,9 @@ def _save_game_stats(game_id, game_date, team_abbr, stats, actual_margin, market
     try:
         resp = requests.post(
             f"{url}/rest/v1/nba_game_stats",
-            json=row, headers=headers, timeout=10
+            json=row,
+            headers={**headers, "Prefer": "resolution=merge-duplicates,return=minimal"},
+            timeout=10
         )
         return resp.ok
     except Exception as e:
@@ -402,12 +406,13 @@ def process_completed_games(games):
     return processed
 
 
-def backfill_game_stats(days_back=30):
-    """Backfill game stats from nba_predictions for recent completed games."""
+def backfill_game_stats(days_back=30, force=False):
+    """Backfill game stats from nba_predictions for recent completed games.
+    If force=True, reprocess even if game_stats already exist (for data fixes)."""
     url, headers = _sb()
     cutoff = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
     
-    # Get completed games that don't have game_stats yet
+    # Get completed games
     q = (f"{url}/rest/v1/nba_predictions"
          f"?result_entered=eq.true&game_date=gte.{cutoff}"
          f"&order=game_date.asc"
@@ -419,17 +424,20 @@ def backfill_game_stats(days_back=30):
         print("  [backfill] Failed to fetch completed games")
         return 0
 
-    # Check which game_ids already have stats
-    existing = set()
-    try:
-        eq = f"{url}/rest/v1/nba_game_stats?game_date=gte.{cutoff}&select=game_id"
-        existing_rows = requests.get(eq, headers=headers, timeout=10).json() or []
-        existing = {r["game_id"] for r in existing_rows}
-    except Exception:
-        pass
-
-    missing = [g for g in games if g.get("game_id") and g["game_id"] not in existing]
-    print(f"  [backfill] {len(games)} completed games, {len(existing)} already have stats, {len(missing)} to process")
+    if force:
+        missing = [g for g in games if g.get("game_id")]
+        print(f"  [backfill] FORCE mode: reprocessing all {len(missing)} completed games")
+    else:
+        # Check which game_ids already have stats
+        existing = set()
+        try:
+            eq = f"{url}/rest/v1/nba_game_stats?game_date=gte.{cutoff}&select=game_id"
+            existing_rows = requests.get(eq, headers=headers, timeout=10).json() or []
+            existing = {r["game_id"] for r in existing_rows}
+        except Exception:
+            pass
+        missing = [g for g in games if g.get("game_id") and g["game_id"] not in existing]
+        print(f"  [backfill] {len(games)} completed games, {len(existing)} already have stats, {len(missing)} to process")
 
     if not missing:
         return 0
