@@ -319,6 +319,26 @@ def route_nba_debug_rolling():
         headers=headers, timeout=10).json()
     return jsonify({"team": team, "rolling": rolling, "last_3_games": raw_games})
 
+@app.route("/nba/debug-espn-boxscore", methods=["GET"])
+def route_nba_debug_boxscore():
+    """Debug: dump all stat names from ESPN boxscore for a completed game."""
+    import requests as _req
+    game_id = request.args.get("game_id", "401810878")
+    r = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={game_id}", timeout=15)
+    if not r.ok:
+        return jsonify({"error": f"ESPN returned {r.status_code}"}), 500
+    data = r.json()
+    result = {}
+    for tb in data.get("boxscore", {}).get("teams", []):
+        team = tb.get("team", {})
+        abbr = team.get("abbreviation", "?")
+        stats = {}
+        for s in tb.get("statistics", []):
+            if isinstance(s, dict):
+                stats[s.get("name", "?")] = s.get("displayValue", "")
+        result[abbr] = {"stat_names": sorted(stats.keys()), "all_stats": stats}
+    return jsonify({"game_id": game_id, "teams": result})
+
 @app.route("/monte-carlo", methods=["POST"])
 def route_monte_carlo():
     body = request.get_json(force=True, silent=True) or {}
