@@ -327,10 +327,16 @@ def _parse_espn_summary(data, home_abbr, away_abbr, game_date_str=""):
     except Exception as _e:
         diag.append(f"Section 8 (injuries): {_e}")
 
-    # ── 9. Venue + Header ──
+    # ── 9. Venue + Header + Officials ──
     try:
         cap = _safe_get(data, "gameInfo", "venue", "capacity") or VENUE_CAPACITY.get(home_abbr, 19000)
         row["_venue_cap"] = cap
+
+        # Officials (for ref_home_whistle)
+        officials = data.get("gameInfo", {}).get("officials", [])
+        ref_names = [o.get("displayName", "") for o in officials if o.get("displayName")]
+        for i, name in enumerate(ref_names[:3]):
+            row[f"_ref_{i+1}"] = name
 
         header = data.get("header", {})
         for comp in header.get("competitions", [{}]):
@@ -554,6 +560,14 @@ def predict_nba_full(game: dict):
     ov["ml_spread_dislocation"] = round(impl_h - (1/(1+10**(spread/8)) if spread else 0.5), 4) if home_ml else 0
     ov["home_fav"] = 1 if spread < 0 else 0
 
+    # public_home_spread_pct: proxy for public money direction
+    # DK ML implied prob is influenced by public money; ESPN predictor is model-based
+    # Positive = public favoring home more than model suggests
+    espn_wp = espn.get("espn_pregame_wp", 0)
+    if home_ml and espn_wp and espn_wp > 0:
+        dk_implied = impl_h / max(impl_h + impl_a, 0.01)  # vig-removed DK prob
+        ov["public_home_spread_pct"] = round(dk_implied - espn_wp, 4)
+
     # Line movement (from opening vs closing)
     # Sign conventions: spread more negative = home favored, ML prob higher = home favored
     # So concordant movement gives sm<0 & mm>0 (or sm>0 & mm<0) → sm*mm < 0
@@ -614,10 +628,6 @@ def predict_nba_full(game: dict):
     ov["games_diff"] = int(hw + hl) - int(aw + al)
 
     # ── Additional stat overrides ──
-    # drb_pct_diff: DRB% ≈ 1 - opponent ORB%
-    h_orb = float(row.get("home_orb_pct", 0.25)); a_orb = float(row.get("away_orb_pct", 0.25))
-    ov["drb_pct_diff"] = round((1 - a_orb) - (1 - h_orb), 4)
-
     # scoring_var_diff: ESPN parser computes {side}_scoring_var from last5 margins
     h_sv = float(row.get("home_scoring_var", 0) or 0)
     a_sv = float(row.get("away_scoring_var", 0) or 0)
@@ -669,6 +679,25 @@ def predict_nba_full(game: dict):
             diag["sources"].append(f"Enrichment ({len(enrich_diffs)} features)")
     except Exception as e:
         diag["warnings"].append(f"enrichment: {e}")
+
+    # ── Interaction features ──
+    # clutch_x_tight_spread: Q4 scoring diff (clutch proxy) × tight spread indicator
+    q4_diff = ov.get("roll_q4_diff", 0)
+    if q4_diff and spread:
+        tight = 1.0 if abs(spread) <= 5 else 0.5 if abs(spread) <= 8 else 0.0
+        ov["clutch_x_tight_spread"] = round(q4_diff * tight, 3)
+
+    # ── Referee home whistle ──
+    ref_names = [espn.get(f"_ref_{i}", "") for i in range(1, 4)]
+    if any(ref_names):
+        try:
+            from nba_enrichment import get_ref_home_whistle
+            hw = get_ref_home_whistle(ref_names)
+            if hw != 0:
+                ov["ref_home_whistle"] = hw
+                diag["sources"].append(f"Refs: {', '.join(n for n in ref_names if n)}")
+        except Exception as e:
+            diag["warnings"].append(f"ref_whistle: {e}")
 
     # Apply
     for feat, val in ov.items():

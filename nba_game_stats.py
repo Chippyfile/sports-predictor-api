@@ -249,6 +249,13 @@ def _fetch_boxscore_stats(game_id):
         for abbr in result:
             result[abbr].setdefault("max_run", 0)
 
+    # ── Officials ──
+    officials = data.get("gameInfo", {}).get("officials", [])
+    ref_names = [o.get("displayName", "") for o in officials if o.get("displayName")]
+    for abbr in result:
+        for i, name in enumerate(ref_names[:3]):
+            result[abbr][f"ref_{i+1}"] = name
+
     return result
 
 
@@ -256,7 +263,7 @@ def _fetch_boxscore_stats(game_id):
 # SAVE TO SUPABASE
 # ═══════════════════════════════════════════════════════════
 
-def _save_game_stats(game_id, game_date, team_abbr, stats, actual_margin, market_spread=0):
+def _save_game_stats(game_id, game_date, team_abbr, stats, actual_margin, market_spread=0, is_home=True):
     """Save raw game stats to nba_game_stats table."""
     url, headers = _sb()
     row = {
@@ -274,6 +281,10 @@ def _save_game_stats(game_id, game_date, team_abbr, stats, actual_margin, market
         "ft_trip_rate": stats.get("ft_trip_rate", 0),
         "actual_margin": actual_margin,
         "oreb": stats.get("oreb", 0),
+        "ref_1": stats.get("ref_1", ""),
+        "ref_2": stats.get("ref_2", ""),
+        "ref_3": stats.get("ref_3", ""),
+        "is_home": is_home,
     }
     try:
         resp = requests.post(
@@ -365,11 +376,11 @@ def process_completed_game(game_id, game_date, home_abbr, away_abbr,
     away_margin = away_score - home_score
 
     saved = 0
-    for abbr, margin in [(home_abbr, home_margin), (away_abbr, away_margin)]:
+    for abbr, margin, is_home in [(home_abbr, home_margin, True), (away_abbr, away_margin, False)]:
         stats = box.get(abbr, {})
         if not stats:
             continue
-        if _save_game_stats(game_id, game_date, abbr, stats, margin, market_spread):
+        if _save_game_stats(game_id, game_date, abbr, stats, margin, market_spread, is_home):
             saved += 1
         if _recompute_rolling(abbr, as_of_date=game_date):
             pass

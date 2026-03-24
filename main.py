@@ -306,6 +306,17 @@ def route_nba_backfill_enrichment():
         import traceback
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
+@app.route("/nba/backfill-refs", methods=["POST"])
+def route_nba_backfill_refs():
+    """Build NBA referee profiles from nba_game_stats history."""
+    try:
+        from nba_enrichment import build_ref_profiles
+        profiles = build_ref_profiles(min_games=10)
+        return jsonify({"profiles": len(profiles)})
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
 @app.route("/nba/debug-rolling", methods=["GET"])
 def route_nba_debug_rolling():
     """Debug: show raw rolling table + last 3 game_stats rows for a team."""
@@ -322,15 +333,27 @@ def route_nba_debug_rolling():
 
 @app.route("/nba/test-extract", methods=["GET"])
 def route_nba_test_extract():
-    """Debug: run full extraction on one game, return result or error."""
+    """Debug: run full extraction on one game, or show enrichment data."""
     import traceback
-    game_id = request.args.get("game_id", "401810878")
+    game_id = request.args.get("game_id", "")
+    team = request.args.get("team", "")
+
+    if team:
+        # Show enrichment data for a team
+        try:
+            from nba_enrichment import get_team_enrichment
+            data = get_team_enrichment(team)
+            return jsonify({"team": team, "enrichment": data})
+        except Exception as e:
+            return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+
+    if not game_id:
+        game_id = "401810878"
     try:
         from nba_game_stats import _fetch_boxscore_stats
         result = _fetch_boxscore_stats(game_id)
         if result is None:
             return jsonify({"error": "fetch returned None", "game_id": game_id})
-        # Summarize per team
         summary = {}
         for abbr, stats in result.items():
             summary[abbr] = {
@@ -359,6 +382,12 @@ def route_nba_debug_boxscore():
         result["public_api"] = {"status": r1.status_code, "has_players": "players" in r1.json().get("boxscore", {})} if r1.ok else {"status": r1.status_code}
         if r1.ok:
             data = r1.json()
+            # Check officials
+            officials = data.get("gameInfo", {}).get("officials", [])
+            result["officials"] = [
+                {"name": o.get("displayName", ""), "position": o.get("position", {}).get("displayName", "")}
+                for o in officials
+            ]
             for pb in data.get("boxscore", {}).get("players", []):
                 abbr = pb.get("team", {}).get("abbreviation", "?")
                 sg = pb.get("statistics", [{}])[0] if pb.get("statistics") else {}
@@ -379,6 +408,10 @@ def route_nba_debug_boxscore():
         result["web_api"] = {"status": r2.status_code}
         if r2.ok:
             data2 = r2.json()
+            result["web_api"]["has_players"] = "players" in data2.get("boxscore", {})
+            # Check officials on web API too
+            web_officials = data2.get("gameInfo", {}).get("officials", [])
+            result["web_api"]["officials"] = [o.get("displayName", "") for o in web_officials]
             result["web_api"]["has_players"] = "players" in data2.get("boxscore", {})
             for pb in data2.get("boxscore", {}).get("players", []):
                 abbr = pb.get("team", {}).get("abbreviation", "?")
@@ -1311,6 +1344,12 @@ def route_nba_daily():
                 except Exception as ee:
                     print(f"  [cron/nba] enrichment error: {ee}")
                     results["enrichment_error"] = str(ee)
+                try:
+                    from nba_enrichment import build_ref_profiles
+                    ref_profiles = build_ref_profiles(min_games=10)
+                    results["ref_profiles_updated"] = len(ref_profiles)
+                except Exception as re:
+                    print(f"  [cron/nba] ref profiles error: {re}")
 
         duration = _time.time() - start
         results["duration_sec"] = round(duration, 1)

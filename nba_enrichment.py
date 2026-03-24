@@ -249,10 +249,24 @@ def get_enrichment_diffs(home_abbr, away_abbr):
     for feat in ["scoring_var", "consistency", "ceiling", "bimodal",
                  "scoring_entropy", "def_stability", "opp_suppression",
                  "three_value", "ts_regression", "three_pt_regression",
-                 "pace_leverage", "pace_control"]:
+                 "pace_control"]:
         h_val = float(h.get(feat, 0) or 0)
         a_val = float(a.get(feat, 0) or 0)
         diffs[f"{feat}_diff"] = round(h_val - a_val, 4)
+    
+    # pace_leverage: combined (average of both teams), NOT a diff
+    h_pl = float(h.get("pace_leverage", 0) or 0)
+    a_pl = float(a.get("pace_leverage", 0) or 0)
+    diffs["pace_leverage"] = round((h_pl + a_pl) / 2, 4)
+
+    # drb_pct_diff: approximate from avg_oreb (higher oreb = lower opponent DRB%)
+    # DRB% ≈ 1 - (opp_oreb / (opp_oreb + team_dreb)), approximate with avg_oreb / 13.0
+    h_oreb = float(h.get("avg_oreb", 5) or 5)
+    a_oreb = float(a.get("avg_oreb", 5) or 5)
+    h_orb_pct = h_oreb / 13.0  # ~13 available offensive boards per game
+    a_orb_pct = a_oreb / 13.0
+    # Home DRB% = 1 - away ORB%, Away DRB% = 1 - home ORB%
+    diffs["drb_pct_diff"] = round((1 - a_orb_pct) - (1 - h_orb_pct), 4)
     
     # ── Matchup features (cross-team interactions) ──
     # matchup_efg: home team's shooting advantage vs away team's defense
@@ -278,3 +292,113 @@ def get_enrichment_diffs(home_abbr, away_abbr):
     diffs["matchup_ft"] = round(h_ft - a_ft, 4)
     
     return diffs
+
+
+# ═══════════════════════════════════════════════════════════
+# NBA REFEREE PROFILES
+# ═══════════════════════════════════════════════════════════
+
+def build_ref_profiles(min_games=10):
+    """Build referee profiles from nba_game_stats (home rows only).
+    
+    For each ref: compute home_win_rate across games they officiated.
+    home_whistle = home_win_rate - 0.5 (positive = favors home team).
+    
+    Returns dict of {ref_name: {games, home_whistle, avg_margin}}.
+    Also saves to nba_ref_profiles Supabase table.
+    """
+    url, headers = _sb()
+    
+    # Fetch all home-team rows with ref data
+    q = (f"{url}/rest/v1/nba_game_stats"
+         f"?is_home=eq.true&ref_1=neq."
+         f"&select=ref_1,ref_2,ref_3,actual_margin"
+         f"&limit=5000")
+    try:
+        rows = requests.get(q, headers={**headers, "Prefer": ""}, timeout=15).json() or []
+    except Exception as e:
+        print(f"  [ref_profiles] fetch error: {e}")
+        return {}
+    
+    if not rows:
+        print("  [ref_profiles] no games with ref data")
+        return {}
+    
+    # Accumulate per-ref stats
+    ref_stats = {}
+    for row in rows:
+        margin = float(row.get("actual_margin", 0) or 0)
+        home_won = 1 if margin > 0 else 0
+        
+        for ref_col in ["ref_1", "ref_2", "ref_3"]:
+            name = row.get(ref_col, "")
+            if not name:
+                continue
+            if name not in ref_stats:
+                ref_stats[name] = {"games": 0, "home_wins": 0, "total_margin": 0}
+            ref_stats[name]["games"] += 1
+            ref_stats[name]["home_wins"] += home_won
+            ref_stats[name]["total_margin"] += margin
+    
+    # Build profiles (min_games filter)
+    profiles = {}
+    for name, stats in ref_stats.items():
+        n = stats["games"]
+        if n < min_games:
+            continue
+        home_win_rate = stats["home_wins"] / n
+        profiles[name] = {
+            "ref_name": name,
+            "games": n,
+            "home_whistle": round(home_win_rate - 0.5, 4),
+            "avg_home_margin": round(stats["total_margin"] / n, 2),
+        }
+    
+    print(f"  [ref_profiles] Built {len(profiles)} profiles from {len(rows)} games "
+          f"(min {min_games} games per ref)")
+    
+    # Save to Supabase
+    saved = 0
+    for name, profile in profiles.items():
+        try:
+            resp = requests.post(
+                f"{url}/rest/v1/nba_ref_profiles?on_conflict=ref_name",
+                json=profile,
+                headers={**headers, "Prefer": "resolution=merge-duplicates,return=minimal"},
+                timeout=10
+            )
+            if resp.ok:
+                saved += 1
+        except:
+            pass
+    
+    print(f"  [ref_profiles] Saved {saved}/{len(profiles)} profiles")
+    return profiles
+
+
+def get_ref_home_whistle(ref_names):
+    """Look up ref_home_whistle for a list of referee names.
+    
+    Returns average home_whistle across the crew, or 0 if no data.
+    """
+    if not ref_names or not any(ref_names):
+        return 0.0
+    
+    url, headers = _sb()
+    whistles = []
+    
+    for name in ref_names:
+        if not name:
+            continue
+        try:
+            q = f"{url}/rest/v1/nba_ref_profiles?ref_name=eq.{name}&select=home_whistle&limit=1"
+            rows = requests.get(q, headers={**headers, "Prefer": ""}, timeout=5).json() or []
+            if rows:
+                whistles.append(float(rows[0].get("home_whistle", 0) or 0))
+        except:
+            pass
+    
+    if not whistles:
+        return 0.0
+    
+    return round(sum(whistles) / len(whistles), 4)
