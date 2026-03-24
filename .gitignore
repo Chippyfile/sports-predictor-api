@@ -125,3 +125,23 @@ ncaa_espn_extract_all.py
 compute_lineup_features.py
 compute_player_impact.py
 advanced_features_snippet.py
+
+# Data files (keep local, not in git)
+*.parquet
+*.pkl
+*_cache.json
+nba_referee_profiles.json
+nba_elo_ratings.json
+
+# Results files (regenerated)
+*_results.json
+*_ranking.csv
+nba_v27_features.parquet
+
+# Log files
+*.log
+*_log.txt
+
+# OS files
+*.textClipping
+.DS_Store

@@ -66,18 +66,25 @@ def build_features(df):
     
     # Overround from ML odds
     def _ml_to_prob(ml):
-        ml = pd.to_numeric(ml, errors="coerce").fillna(0)
+        if isinstance(ml, np.ndarray):
+            ml = np.where(np.isnan(ml), 0, ml)
+        else:
+            ml = pd.to_numeric(ml, errors="coerce").fillna(0).values
         prob = np.where(ml < 0, -ml / (-ml + 100), 100 / (ml + 100))
         return np.where(ml == 0, 0.5, prob)
     
-    h_ml = _safe_col(df, "home_ml_close", 0)
-    a_ml = _safe_col(df, "away_ml_close", 0)
+    h_ml = _safe_col(df, "home_ml_close", 0).values
+    a_ml = _safe_col(df, "away_ml_close", 0).values
     # Fallback to open if close not available
-    h_ml = np.where(h_ml == 0, _safe_col(df, "home_ml_open", 0), h_ml)
-    a_ml = np.where(a_ml == 0, _safe_col(df, "away_ml_open", 0), a_ml)
+    h_ml_open = _safe_col(df, "home_ml_open", 0).values
+    a_ml_open = _safe_col(df, "away_ml_open", 0).values
+    h_ml = np.where(h_ml == 0, h_ml_open, h_ml)
+    a_ml = np.where(a_ml == 0, a_ml_open, a_ml)
     # Fallback to dk
-    h_ml = np.where(h_ml == 0, _safe_col(df, "dk_home_ml", 0), h_ml)
-    a_ml = np.where(a_ml == 0, _safe_col(df, "dk_away_ml", 0), a_ml)
+    h_ml_dk = _safe_col(df, "dk_home_ml", 0).values
+    a_ml_dk = _safe_col(df, "dk_away_ml", 0).values
+    h_ml = np.where(h_ml == 0, h_ml_dk, h_ml)
+    a_ml = np.where(a_ml == 0, a_ml_dk, a_ml)
     
     impl_h = _ml_to_prob(h_ml)
     impl_a = _ml_to_prob(a_ml)
@@ -92,19 +99,21 @@ def build_features(df):
     feats["home_fav"] = (feats["market_spread"] < 0).astype(int)
     
     # Market total
-    mkt_total = _safe_col(df, "market_ou_total", 0)
-    mkt_total = np.where(mkt_total == 0, _safe_col(df, "ou_total", 0), mkt_total)
-    mkt_total = np.where(mkt_total == 0, _safe_col(df, "dk_ou", 0), mkt_total)
+    mkt_total = _safe_col(df, "market_ou_total", 0).values
+    mkt_total_ou = _safe_col(df, "ou_total", 0).values
+    mkt_total_dk = _safe_col(df, "dk_ou", 0).values
+    mkt_total = np.where(mkt_total == 0, mkt_total_ou, mkt_total)
+    mkt_total = np.where(mkt_total == 0, mkt_total_dk, mkt_total)
     feats["market_total"] = mkt_total
     feats["ou_gap"] = _safe_col(df, "home_ppg") + _safe_col(df, "away_ppg") - mkt_total
     
     # Line movement
-    spread_open = _safe_col(df, "spread_open", 0)
-    spread_close = _safe_col(df, "spread_close", feats["market_spread"])
-    spread_close = np.where(spread_close == 0, feats["market_spread"], spread_close)
+    spread_open = _safe_col(df, "spread_open", 0).values
+    spread_close = _safe_col(df, "spread_close", 0).values
+    spread_close = np.where(spread_close == 0, feats["market_spread"].values, spread_close)
     feats["sharp_spread_signal"] = np.round(spread_close - spread_open, 2)
     
-    ml_open_h = _ml_to_prob(_safe_col(df, "opening_home_ml", 0))
+    ml_open_h = _ml_to_prob(_safe_col(df, "opening_home_ml", 0).values)
     ml_close_h = _ml_to_prob(h_ml)
     feats["sharp_ml_signal"] = np.round(ml_close_h - ml_open_h, 4)
     
@@ -119,8 +128,8 @@ def build_features(df):
     feats["public_home_spread_pct"] = np.where(espn_wp > 0, feats["public_home_spread_pct"], 0)
     
     # NEW: spread juice imbalance
-    dk_h_odds = _safe_col(df, "dk_home_spread_odds", -110)
-    dk_a_odds = _safe_col(df, "dk_away_spread_odds", -110)
+    dk_h_odds = _safe_col(df, "dk_home_spread_odds", -110).values
+    dk_a_odds = _safe_col(df, "dk_away_spread_odds", -110).values
     h_juice = np.where(dk_h_odds < 0, -dk_h_odds / (-dk_h_odds + 100), 100 / (dk_h_odds + 100))
     a_juice = np.where(dk_a_odds < 0, -dk_a_odds / (-dk_a_odds + 100), 100 / (dk_a_odds + 100))
     feats["spread_juice_imbalance"] = np.round(h_juice - a_juice, 4)
@@ -292,11 +301,11 @@ def build_features(df):
     feats["matchup_efg"] = _safe_diff(df, "home_three_fg_rate", "away_three_fg_rate")
     feats["matchup_to"] = (_safe_col(df, "home_net_rtg") - _safe_col(df, "away_net_rtg")) * 0.02
     
-    h_oreb = _safe_col(df, "home_oreb", 5)
-    a_oreb = _safe_col(df, "away_oreb", 5)
+    h_oreb = _safe_col(df, "home_oreb", 5).values
+    a_oreb = _safe_col(df, "away_oreb", 5).values
     # Use rolling if available
-    h_oreb_r = _safe_col(df, "home_roll_oreb", 0)
-    a_oreb_r = _safe_col(df, "away_roll_oreb", 0)
+    h_oreb_r = _safe_col(df, "home_roll_oreb", 0).values
+    a_oreb_r = _safe_col(df, "away_roll_oreb", 0).values
     h_oreb = np.where(h_oreb_r > 0, h_oreb_r, h_oreb)
     a_oreb = np.where(a_oreb_r > 0, a_oreb_r, a_oreb)
     feats["matchup_orb"] = np.round(h_oreb - a_oreb, 2)
