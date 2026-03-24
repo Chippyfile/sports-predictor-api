@@ -277,11 +277,13 @@ def _save_game_stats(game_id, game_date, team_abbr, stats, actual_margin, market
     }
     try:
         resp = requests.post(
-            f"{url}/rest/v1/nba_game_stats",
+            f"{url}/rest/v1/nba_game_stats?on_conflict=game_id,team_abbr",
             json=row,
             headers={**headers, "Prefer": "resolution=merge-duplicates,return=minimal"},
             timeout=10
         )
+        if not resp.ok:
+            print(f"  [nba_game_stats] save failed {resp.status_code} for {team_abbr} game {game_id}: {resp.text[:200]}")
         return resp.ok
     except Exception as e:
         print(f"  [nba_game_stats] save error for {team_abbr} game {game_id}: {e}")
