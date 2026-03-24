@@ -320,6 +320,32 @@ def route_nba_debug_rolling():
         headers=headers, timeout=10).json()
     return jsonify({"team": team, "rolling": rolling, "last_3_games": raw_games})
 
+@app.route("/nba/test-extract", methods=["GET"])
+def route_nba_test_extract():
+    """Debug: run full extraction on one game, return result or error."""
+    import traceback
+    game_id = request.args.get("game_id", "401810878")
+    try:
+        from nba_game_stats import _fetch_boxscore_stats
+        result = _fetch_boxscore_stats(game_id)
+        if result is None:
+            return jsonify({"error": "fetch returned None", "game_id": game_id})
+        # Summarize per team
+        summary = {}
+        for abbr, stats in result.items():
+            summary[abbr] = {
+                "bench_pts": stats.get("bench_pts"),
+                "three_fg_rate": stats.get("three_fg_rate"),
+                "ft_trip_rate": stats.get("ft_trip_rate"),
+                "paint_pts": stats.get("paint_pts"),
+                "oreb": stats.get("oreb"),
+                "q4_scoring": stats.get("q4_scoring"),
+                "max_run": stats.get("max_run"),
+            }
+        return jsonify({"game_id": game_id, "teams": summary})
+    except Exception as e:
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+
 @app.route("/nba/debug-espn-boxscore", methods=["GET"])
 def route_nba_debug_boxscore():
     """Debug: test both public and web ESPN APIs."""
