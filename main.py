@@ -28,6 +28,7 @@ from sports.nba import train_nba, predict_nba, nba_build_features
 from sports.ncaa import train_ncaa, predict_ncaa, ncaa_build_features
 from ncaa_full_predict import predict_ncaa_full
 from nba_full_predict import predict_nba_full
+from nba_game_stats import process_completed_games, backfill_game_stats
 from sports.nfl import train_nfl, predict_nfl, nfl_build_features
 from sports.ncaaf import train_ncaaf, predict_ncaaf, ncaaf_build_features
 # REMOVED: nba_backfill cleaned from repo
@@ -279,6 +280,18 @@ def route_predict_nba_full():
         tb = traceback.format_exc()
         print(f"[predict/nba/full] ERROR: {tb}")
         return jsonify({"error": str(e), "traceback": tb}), 500
+
+@app.route("/nba/backfill-stats", methods=["POST"])
+def route_nba_backfill_stats():
+    """Backfill nba_game_stats + nba_team_rolling from recent completed games."""
+    data = request.get_json(force=True, silent=True) or {}
+    days = data.get("days_back", 30)
+    try:
+        n = backfill_game_stats(days_back=days)
+        return jsonify({"processed": n})
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 @app.route("/monte-carlo", methods=["POST"])
 def route_monte_carlo():
