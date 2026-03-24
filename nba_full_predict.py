@@ -74,7 +74,7 @@ def _parse_odds(s):
 # ESPN SUMMARY PARSER
 # ═══════════════════════════════════════════════════════════
 
-def _parse_espn_summary(data, home_abbr, away_abbr):
+def _parse_espn_summary(data, home_abbr, away_abbr, game_date_str=""):
     """Parse ESPN /summary into feature dict. Returns (row_dict, diag_list)."""
     row = {}
     diag = []
@@ -207,12 +207,13 @@ def _parse_espn_summary(data, home_abbr, away_abbr):
     # ── 5. Season series (H2H) ──
     try:
         for ss in data.get("seasonseries", []):
+            # FIX: statusType is a sibling of status, not nested inside it
             completed = sum(1 for ev in ss.get("events", [])
-                           if _safe_get(ev, "status", "statusType", "completed"))
+                           if _safe_get(ev, "statusType", "completed"))
             row["_h2h_n"] = completed
             margins = []
             for ev in ss.get("events", []):
-                if not _safe_get(ev, "status", "statusType", "completed"): continue
+                if not _safe_get(ev, "statusType", "completed"): continue
                 comps = ev.get("competitors", [])
                 hc = next((c for c in comps if c.get("homeAway")=="home"), None)
                 ac = next((c for c in comps if c.get("homeAway")=="away"), None)
@@ -269,6 +270,12 @@ def _parse_espn_summary(data, home_abbr, away_abbr):
 
     # ── 7. Last 5 games (rolling margins, rest, B2B) ──
     try:
+        # Use game date (not server time) for rest/B2B calculations
+        try:
+            _game_dt = datetime.strptime(game_date_str or "", "%Y-%m-%d")
+        except:
+            _game_dt = datetime.now()
+
         for l5 in data.get("lastFiveGames", []):
             abbr = _safe_abbr(l5.get("team", {}))
             side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
@@ -293,12 +300,11 @@ def _parse_espn_summary(data, home_abbr, away_abbr):
             if dates:
                 try:
                     last = datetime.strptime(dates[0], "%Y-%m-%d")
-                    row[f"{side}_days_rest"] = max(0, (datetime.now() - last).days - 1)
-                    if len(dates) >= 2:
-                        prev = datetime.strptime(dates[1], "%Y-%m-%d")
-                        if (last - prev).days <= 1:
-                            row[f"{side}_is_b2b"] = 1
-                    cutoff = datetime.now() - timedelta(days=14)
+                    row[f"{side}_days_rest"] = max(0, (_game_dt - last).days - 1)
+                    # B2B: team's last game was the day before this game
+                    if (_game_dt - last).days <= 1:
+                        row[f"{side}_is_b2b"] = 1
+                    cutoff = _game_dt - timedelta(days=14)
                     row[f"{side}_games_14d"] = sum(1 for d in dates if datetime.strptime(d, "%Y-%m-%d") >= cutoff)
                 except: pass
             wins_l5 = sum(1 for m in margins if m > 0)
@@ -434,7 +440,7 @@ def predict_nba_full(game: dict):
                         gd = comp.get("date","")
                         if gd: game_date = gd[:10]
                 if home_abbr and away_abbr:
-                    espn, espn_diag = _parse_espn_summary(raw, home_abbr, away_abbr)
+                    espn, espn_diag = _parse_espn_summary(raw, home_abbr, away_abbr, game_date)
                     diag["sources"].append(f"ESPN summary ({len(espn)} fields)")
                     diag["sources"].extend(espn_diag)
         except Exception as e:
@@ -604,6 +610,17 @@ def predict_nba_full(game: dict):
     ov["streak_diff"] = int(row.get("home_streak", 0) or 0) - int(row.get("away_streak", 0) or 0)
     ov["games_diff"] = int(hw + hl) - int(aw + al)
 
+    # ── Additional stat overrides ──
+    # drb_pct_diff: DRB% ≈ 1 - opponent ORB%
+    h_orb = float(row.get("home_orb_pct", 0.25)); a_orb = float(row.get("away_orb_pct", 0.25))
+    ov["drb_pct_diff"] = round((1 - a_orb) - (1 - h_orb), 4)
+
+    # scoring_var_diff: ESPN parser computes {side}_scoring_var from last5 margins
+    h_sv = float(row.get("home_scoring_var", 0) or 0)
+    a_sv = float(row.get("away_scoring_var", 0) or 0)
+    if h_sv or a_sv:
+        ov["scoring_var_diff"] = round(h_sv - a_sv, 2)
+
     # ATS rolling
     ov["roll_ats_margin_gated"] = round(h_sr.get("ats_avg",0) - a_sr.get("ats_avg",0), 2)
 
@@ -631,6 +648,18 @@ def predict_nba_full(game: dict):
             diag["sources"].append(f"Rolling PBP ({len(roll_diffs)} features)")
     except Exception as e:
         diag["warnings"].append(f"rolling PBP: {e}")
+
+    # ── Enrichment features from pre-computed nba_team_enrichment ──
+    try:
+        from nba_enrichment import get_enrichment_diffs
+        enrich_diffs = get_enrichment_diffs(home_abbr, away_abbr)
+        if enrich_diffs:
+            for feat, val in enrich_diffs.items():
+                if val is not None:
+                    ov[feat] = val
+            diag["sources"].append(f"Enrichment ({len(enrich_diffs)} features)")
+    except Exception as e:
+        diag["warnings"].append(f"enrichment: {e}")
 
     # Apply
     for feat, val in ov.items():

@@ -294,6 +294,17 @@ def route_nba_backfill_stats():
         import traceback
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
+@app.route("/nba/backfill-enrichment", methods=["POST"])
+def route_nba_backfill_enrichment():
+    """Recompute nba_team_enrichment for all 30 teams from nba_game_stats."""
+    try:
+        from nba_enrichment import recompute_all_enrichment
+        n = recompute_all_enrichment()
+        return jsonify({"enriched": n})
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
 @app.route("/monte-carlo", methods=["POST"])
 def route_monte_carlo():
     body = request.get_json(force=True, silent=True) or {}
@@ -1203,6 +1214,16 @@ def route_nba_daily():
                     except Exception as se:
                         print(f"  [cron/nba] stats error {game_id}: {se}")
             results["graded"] = graded; results["stats_extracted"] = stats_extracted
+
+            # Recompute enrichment features for all teams after grading
+            if stats_extracted > 0:
+                try:
+                    from nba_enrichment import recompute_all_enrichment
+                    enriched = recompute_all_enrichment()
+                    results["enrichment_updated"] = enriched
+                except Exception as ee:
+                    print(f"  [cron/nba] enrichment error: {ee}")
+                    results["enrichment_error"] = str(ee)
 
         duration = _time.time() - start
         results["duration_sec"] = round(duration, 1)
