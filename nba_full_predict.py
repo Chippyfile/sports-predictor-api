@@ -262,6 +262,7 @@ def _parse_espn_summary(data, home_abbr, away_abbr):
                         if t == "wins": row[f"{side}_wins"] = int(val)
                         elif t == "losses": row[f"{side}_losses"] = int(val)
                         elif t == "winpercent": row[f"{side}_win_pct_standings"] = float(val)
+                        elif t == "streak": row[f"{side}_streak"] = _parse_streak(str(st.get("displayValue", "")))
                     except: pass
     except Exception as _e:
         diag.append(f"Section 6 (standings): {_e}")
@@ -573,6 +574,36 @@ def predict_nba_full(game: dict):
         ov["lineup_value_diff"] = round(h_star*h_fg*2 - a_star*a_fg*2, 2)
     ov["star_minutes_fatigue_diff"] = round(h_mpg - a_mpg, 2)
 
+    # ── Elo (FIX: builder drops elo_diff; override directly) ──
+    elo_d = h_elo - a_elo
+    ov["elo_diff"] = round(elo_d, 1)
+    # elo_market_residual: elo-implied prob minus spread-implied prob
+    elo_prob = 1.0 / (1.0 + 10 ** (-elo_d / 400.0))
+    spread_prob = 1.0 / (1.0 + 10 ** (spread / 8.0)) if spread else 0.5
+    ov["elo_market_residual"] = round(elo_prob - spread_prob, 4)
+
+    # ── Team stat overrides (FIX: column name mismatches with v25 model) ──
+    h_fgpct = float(row.get("home_fgpct", 0.471)); a_fgpct = float(row.get("away_fgpct", 0.471))
+    h_3p = float(row.get("home_threepct", 0.365)); a_3p = float(row.get("away_threepct", 0.365))
+    # efg_diff: eFG% ≈ FG% + 0.2 * 3P% (NBA avg three_rate ~0.40)
+    ov["efg_diff"] = round((h_fgpct + 0.2 * h_3p) - (a_fgpct + 0.2 * a_3p), 4)
+    # turnovers_diff: model expects home_TO - away_TO (not to_margin_diff which is reversed)
+    ov["turnovers_diff"] = round(float(row.get("home_turnovers", 14)) - float(row.get("away_turnovers", 14)), 2)
+    # win_pct_diff: from standings wins/losses
+    hw = float(row.get("home_wins", 0)); hl = float(row.get("home_losses", 0))
+    aw = float(row.get("away_wins", 0)); al = float(row.get("away_losses", 0))
+    if (hw + hl) > 0 and (aw + al) > 0:
+        ov["win_pct_diff"] = round(hw / (hw + hl) - aw / (aw + al), 4)
+
+    # ── Schedule overrides (FIX: ESPN parser extracts data, but no diff computed) ──
+    h_b2b = int(row.get("home_is_b2b", 0) or 0)
+    a_b2b = int(row.get("away_is_b2b", 0) or 0)
+    ov["home_b2b"] = h_b2b
+    ov["b2b_diff"] = h_b2b - a_b2b
+    ov["games_last_14_diff"] = int(row.get("home_games_14d", 0) or 0) - int(row.get("away_games_14d", 0) or 0)
+    ov["streak_diff"] = int(row.get("home_streak", 0) or 0) - int(row.get("away_streak", 0) or 0)
+    ov["games_diff"] = int(hw + hl) - int(aw + al)
+
     # ATS rolling
     ov["roll_ats_margin_gated"] = round(h_sr.get("ats_avg",0) - a_sr.get("ats_avg",0), 2)
 
@@ -595,7 +626,7 @@ def predict_nba_full(game: dict):
                 "second_chance_x_oreb": "second_chance_x_oreb",
             }
             for src, dst in feat_map.items():
-                if src in roll_diffs and roll_diffs[src]:
+                if src in roll_diffs and roll_diffs[src] is not None:
                     ov[dst] = roll_diffs[src]
             diag["sources"].append(f"Rolling PBP ({len(roll_diffs)} features)")
     except Exception as e:
