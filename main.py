@@ -67,6 +67,7 @@ def index():
             "POST /compute/ncaa-efficiency",
             "GET  /ratings/ncaa",
             "GET  /cron/ncaa-daily?mode=predict|refresh|grade|auto",
+            "GET  /cron/nba-daily?mode=predict|grade|auto",
             "GET  /cron/ncaa-ats-record",
         ],
     })
