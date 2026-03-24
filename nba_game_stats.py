@@ -92,25 +92,47 @@ def _fetch_boxscore_stats(game_id):
                 try:
                     stats[name] = float(dv)
                 except (ValueError, TypeError):
-                    stats[name] = dv
+                    stats[name] = dv  # compound strings like "45-85" stay as strings
+
+        # Parse compound stat strings: "made-attempted" → (made, attempted)
+        def _parse_compound(key):
+            v = stats.get(key, "")
+            if isinstance(v, str) and "-" in v:
+                parts = v.split("-")
+                try: return float(parts[0]), float(parts[1])
+                except: return 0, 0
+            return 0, 0
+
+        fgm, fga = _parse_compound("fieldGoalsMade-fieldGoalsAttempted")
+        tpm, tpa = _parse_compound("threePointFieldGoalsMade-threePointFieldGoalsAttempted")
+        ftm, fta = _parse_compound("freeThrowsMade-freeThrowsAttempted")
 
         # Extract the stats we need
+        # NOTE: benchPoints and secondChancePoints are NOT in ESPN boxscore stats
         team_stats = {
             "team_abbr": abbr,
-            "bench_pts": stats.get("benchPoints", 0) or 0,
+            "bench_pts": 0,  # ESPN doesn't provide this in team boxscore
             "paint_pts": stats.get("pointsInPaint", 0) or 0,
             "fast_break_pts": stats.get("fastBreakPoints", 0) or 0,
-            "second_chance_pts": stats.get("secondChancePoints", 0) or 0,
+            "second_chance_pts": 0,  # ESPN doesn't provide this in team boxscore
             "largest_lead": stats.get("largestLead", 0) or 0,
-            "oreb": stats.get("offensiveRebounds", stats.get("avgOffensiveRebounds", 0)) or 0,
+            "oreb": stats.get("offensiveRebounds", 0) or 0,
+            # New fields from ESPN boxscore
+            "turnover_pts": stats.get("turnoverPoints", 0) or 0,
+            "lead_changes": stats.get("leadChanges", 0) or 0,
+            "lead_pct": stats.get("leadPercentage", 0) or 0,
+            "fouls": stats.get("fouls", 0) or 0,
+            "ft_pct": stats.get("freeThrowPct", 0) or 0,
+            "fg_pct": stats.get("fieldGoalPct", 0) or 0,
+            "three_pct": stats.get("threePointFieldGoalPct", 0) or 0,
+            "fgm": fgm, "fga": fga,
+            "tpm": tpm, "tpa": tpa,
+            "ftm": ftm, "fta": fta,
         }
 
-        # FG attempts and 3PT attempts for rates
-        fga = stats.get("fieldGoalsAttempted", 0) or 0
-        three_made = stats.get("threePointFieldGoalsMade", 0) or 0
-        fta = stats.get("freeThrowsAttempted", 0) or 0
+        # Computed rates from parsed compound stats
         if fga > 0:
-            team_stats["three_fg_rate"] = round(three_made / fga, 4)
+            team_stats["three_fg_rate"] = round(tpm / fga, 4)
             team_stats["ft_trip_rate"] = round(fta / fga, 4)
         else:
             team_stats["three_fg_rate"] = 0.35
