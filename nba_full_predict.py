@@ -208,11 +208,11 @@ def _parse_espn_summary(data, home_abbr, away_abbr):
     try:
         for ss in data.get("seasonseries", []):
             completed = sum(1 for ev in ss.get("events", [])
-                           if _safe_get(ev, "status", "statusType", "completed"))
+                           if _safe_get(ev, "statusType", "completed"))
             row["_h2h_n"] = completed
             margins = []
             for ev in ss.get("events", []):
-                if not _safe_get(ev, "status", "statusType", "completed"): continue
+                if not _safe_get(ev, "statusType", "completed"): continue
                 comps = ev.get("competitors", [])
                 hc = next((c for c in comps if c.get("homeAway")=="home"), None)
                 ac = next((c for c in comps if c.get("homeAway")=="away"), None)
@@ -535,8 +535,9 @@ def predict_nba_full(game: dict):
     h_mpg = espn.get("home_star_mpg", 32); a_mpg = espn.get("away_star_mpg", 32)
 
     overrides = {}
-    # Market
     ov = overrides
+
+    # ── Market features ──
     ov["espn_pregame_wp"] = espn.get("espn_pregame_wp", 0)
     ov["espn_pregame_wp_pbp"] = espn.get("espn_pregame_wp_pbp", 0)
     ov["implied_prob_home"] = round(impl_h, 4) if home_ml else 0
@@ -544,12 +545,34 @@ def predict_nba_full(game: dict):
     ov["ml_spread_dislocation"] = round(impl_h - (1/(1+10**(spread/8)) if spread else 0.5), 4) if home_ml else 0
     ov["home_fav"] = 1 if spread < 0 else 0
 
-    # Line movement (from opening vs closing)
-    sm = espn.get("_spread_move", 0); mm = espn.get("_ml_move", 0)
-    ov["reverse_line_movement"] = 1 if (sm and mm and ((sm>0 and mm<0) or (sm<0 and mm>0))) else 0
-    ov["line_reversal"] = 1 if abs(mm) > 0.03 else 0
+    # ── Elo-market residual (Elo-implied margin vs market spread) ──
+    elo_margin = (h_elo - a_elo) / 25.0  # Elo to points conversion
+    market_margin = -spread  # negative spread = home favored = positive margin
+    ov["elo_market_residual"] = round(elo_margin - market_margin, 2)
 
-    # Context
+    # ── Line movement features ──
+    # sharp_spread_signal: raw spread movement in points (training: mean=0.07, std=7.5)
+    sm = espn.get("_spread_move", 0)
+    ov["sharp_spread_signal"] = round(sm, 2) if sm else 0
+
+    # sharp_ml_signal: raw ML odds change (training: mean=-6.2, std=16.3)
+    open_ml = espn.get("_open_spread", 0)  # We need the open ML, not spread
+    # Better: use the actual ML probability shift * 100 to match training scale
+    mm = espn.get("_ml_move", 0)
+    ov["sharp_ml_signal"] = round(mm * 100, 2) if mm else 0  # scale prob shift to match training range
+
+    # reverse_line_movement: RARE binary (training: only 2.2% of games)
+    # True reversal = spread moved one way, ML probability moved the other way
+    # AND both movements are material (not noise)
+    is_reversal = (sm != 0 and mm != 0 and sm * mm > 0  # truly opposite directions
+                   and abs(sm) >= 1.5 and abs(mm) >= 0.02)  # material movement
+    ov["reverse_line_movement"] = 1 if is_reversal else 0
+
+    # line_reversal: continuous prob shift magnitude (training: mean=0.064, ~6% are nonzero)
+    # Set to abs(prob shift) only if material
+    ov["line_reversal"] = round(abs(mm), 4) if abs(mm) >= 0.02 else 0
+
+    # ── Context features ──
     try:
         dt = datetime.strptime(game_date, "%Y-%m-%d")
         ov["is_midweek"] = 1 if dt.weekday() in [1,2,3] else 0
@@ -559,16 +582,16 @@ def predict_nba_full(game: dict):
     cap = espn.get("_venue_cap", VENUE_CAPACITY.get(home_abbr, 19000))
     ov["crowd_pct"] = round(min(1.0, 18500/max(cap, 1)), 4)
 
-    # H2H
+    # ── H2H ──
     ov["h2h_total_games"] = espn.get("_h2h_n", 0)
 
-    # Star players
+    # ── Star players ──
     if h_star and a_star:
         ov["star1_share_diff"] = round(h_star/max(h_ppg,80) - a_star/max(a_ppg,80), 4)
         ov["lineup_value_diff"] = round(h_star*h_fg*2 - a_star*a_fg*2, 2)
     ov["star_minutes_fatigue_diff"] = round(h_mpg - a_mpg, 2)
 
-    # ATS rolling
+    # ── ATS rolling ──
     ov["roll_ats_margin_gated"] = round(h_sr.get("ats_avg",0) - a_sr.get("ats_avg",0), 2)
 
     # Apply
