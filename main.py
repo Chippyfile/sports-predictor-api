@@ -322,23 +322,49 @@ def route_nba_debug_rolling():
 
 @app.route("/nba/debug-espn-boxscore", methods=["GET"])
 def route_nba_debug_boxscore():
-    """Debug: dump all stat names from ESPN boxscore for a completed game."""
+    """Debug: test both public and web ESPN APIs."""
     import requests as _req
     game_id = request.args.get("game_id", "401810878")
-    r = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={game_id}", timeout=15)
-    if not r.ok:
-        return jsonify({"error": f"ESPN returned {r.status_code}"}), 500
-    data = r.json()
     result = {}
-    for tb in data.get("boxscore", {}).get("teams", []):
-        team = tb.get("team", {})
-        abbr = team.get("abbreviation", "?")
-        stats = {}
-        for s in tb.get("statistics", []):
-            if isinstance(s, dict):
-                stats[s.get("name", "?")] = s.get("displayValue", "")
-        result[abbr] = {"stat_names": sorted(stats.keys()), "all_stats": stats}
-    return jsonify({"game_id": game_id, "teams": result})
+
+    # Test public API
+    try:
+        r1 = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={game_id}", timeout=15)
+        result["public_api"] = {"status": r1.status_code, "has_players": "players" in r1.json().get("boxscore", {})} if r1.ok else {"status": r1.status_code}
+        if r1.ok:
+            data = r1.json()
+            for pb in data.get("boxscore", {}).get("players", []):
+                abbr = pb.get("team", {}).get("abbreviation", "?")
+                sg = pb.get("statistics", [{}])[0] if pb.get("statistics") else {}
+                result["public_api"][f"players_{abbr}"] = {
+                    "keys": sg.get("keys", []),
+                    "n_athletes": len(sg.get("athletes", [])),
+                    "sample_starter": next((a.get("starter") for a in sg.get("athletes", []) if a.get("stats")), None),
+                }
+    except Exception as e:
+        result["public_api"] = {"error": str(e)}
+
+    # Test web API
+    try:
+        r2 = _req.get(
+            f"https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary?region=us&lang=en&contentorigin=espn&event={game_id}",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=15)
+        result["web_api"] = {"status": r2.status_code}
+        if r2.ok:
+            data2 = r2.json()
+            result["web_api"]["has_players"] = "players" in data2.get("boxscore", {})
+            for pb in data2.get("boxscore", {}).get("players", []):
+                abbr = pb.get("team", {}).get("abbreviation", "?")
+                sg = pb.get("statistics", [{}])[0] if pb.get("statistics") else {}
+                result["web_api"][f"players_{abbr}"] = {
+                    "n_athletes": len(sg.get("athletes", [])),
+                    "sample_starter": next((a.get("starter") for a in sg.get("athletes", []) if a.get("stats")), None),
+                }
+    except Exception as e:
+        result["web_api"] = {"error": str(e)}
+
+    return jsonify(result)
 
 @app.route("/monte-carlo", methods=["POST"])
 def route_monte_carlo():

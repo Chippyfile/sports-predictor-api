@@ -55,18 +55,20 @@ def _sb():
 
 def _fetch_boxscore_stats(game_id):
     """Fetch completed game boxscore from ESPN web API.
-    Uses site.web.api.espn.com which has player-level data for bench_pts.
+    Includes player-level data for bench_pts computation.
     Returns dict keyed by team_abbr with stats per team."""
     url = (f"https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
            f"?region=us&lang=en&contentorigin=espn&event={game_id}")
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }, timeout=15)
         if not r.ok:
-            print(f"  [nba_game_stats] web API returned {r.status_code} for {game_id}")
+            print(f"  [nba_game_stats] ESPN web API returned {r.status_code} for {game_id}")
             return None
         data = r.json()
     except Exception as e:
-        print(f"  [nba_game_stats] web API fetch error for {game_id}: {e}")
+        print(f"  [nba_game_stats] ESPN web API error for {game_id}: {e}")
         return None
 
     # Verify game is completed
