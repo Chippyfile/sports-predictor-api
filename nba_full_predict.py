@@ -625,6 +625,9 @@ def predict_nba_full(game: dict):
     nz = sum(1 for s in shap_out if s["value"] != 0)
     mkt = float(row.get("market_spread_home", 0) or 0)
 
+    # Debug: return all features if requested
+    debug = game.get("debug", False)
+
     return {
         "sport": "NBA", "game_id": game_id,
         "home_team": home_abbr, "away_team": away_abbr, "game_date": game_date,
@@ -634,7 +637,7 @@ def predict_nba_full(game: dict):
         "pred_away_score": round(float(row.get("away_ppg",112))-margin/2, 1),
         "market_spread": mkt, "market_total": float(row.get("market_ou_total",0) or 0),
         "disagree": round(abs(margin-(-mkt)), 2) if mkt else 0,
-        "shap": shap_out[:20],
+        "shap": shap_out if debug else shap_out[:20],
         "feature_coverage": f"{nz}/{len(feature_list)}",
         "model_meta": {
             "n_train": bundle.get("n_games"), "mae_cv": bundle.get("cv_mae"),
