@@ -545,9 +545,14 @@ def predict_nba_full(game: dict):
     ov["home_fav"] = 1 if spread < 0 else 0
 
     # Line movement (from opening vs closing)
+    # Sign conventions: spread more negative = home favored, ML prob higher = home favored
+    # So concordant movement gives sm<0 & mm>0 (or sm>0 & mm<0) → sm*mm < 0
+    # True reversal: one moves toward home, other away → sm*mm > 0
     sm = espn.get("_spread_move", 0); mm = espn.get("_ml_move", 0)
-    ov["reverse_line_movement"] = 1 if (sm and mm and ((sm>0 and mm<0) or (sm<0 and mm>0))) else 0
-    ov["line_reversal"] = 1 if abs(mm) > 0.03 else 0
+    ov["reverse_line_movement"] = 1 if (sm and mm and sm * mm > 0) else 0
+    ov["line_reversal"] = round(abs(mm), 4)  # continuous, training mean ~0.064
+    ov["sharp_spread_signal"] = round(sm, 2)  # spread movement (close - open)
+    ov["sharp_ml_signal"] = round(mm, 4)      # ML prob movement (close - open)
 
     # Context
     try:
