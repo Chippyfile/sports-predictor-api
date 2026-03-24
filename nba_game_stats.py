@@ -54,9 +54,11 @@ def _sb():
 # ═══════════════════════════════════════════════════════════
 
 def _fetch_boxscore_stats(game_id):
-    """Fetch completed game boxscore from ESPN summary.
+    """Fetch completed game boxscore from ESPN web summary API.
+    Uses site.web.api.espn.com which returns player-level data (starter/bench).
     Returns dict keyed by team_abbr with stats per team."""
-    url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={game_id}"
+    url = (f"https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
+           f"?region=us&lang=en&contentorigin=espn&event={game_id}")
     try:
         r = requests.get(url, timeout=15)
         if not r.ok:
@@ -111,7 +113,7 @@ def _fetch_boxscore_stats(game_id):
         # NOTE: benchPoints and secondChancePoints are NOT in ESPN boxscore stats
         team_stats = {
             "team_abbr": abbr,
-            "bench_pts": 0,  # ESPN doesn't provide this in team boxscore
+            "bench_pts": 0,  # computed from player-level data below
             "paint_pts": stats.get("pointsInPaint", 0) or 0,
             "fast_break_pts": stats.get("fastBreakPoints", 0) or 0,
             "second_chance_pts": 0,  # ESPN doesn't provide this in team boxscore
@@ -139,6 +141,40 @@ def _fetch_boxscore_stats(game_id):
             team_stats["ft_trip_rate"] = 0.25
 
         result[abbr] = team_stats
+
+    # ── Bench points from player-level boxscores ──
+    for pb in boxscore.get("players", []):
+        team_obj = pb.get("team", {})
+        if not isinstance(team_obj, dict):
+            continue
+        abbr = _map(team_obj.get("abbreviation", ""))
+        if abbr not in result:
+            continue
+
+        bench_pts = 0
+        for stat_group in pb.get("statistics", []):
+            keys = stat_group.get("keys", [])
+            pts_idx = None
+            for i, k in enumerate(keys):
+                if k == "points":
+                    pts_idx = i
+                    break
+            if pts_idx is None:
+                continue
+
+            for athlete_entry in stat_group.get("athletes", []):
+                if athlete_entry.get("didNotPlay"):
+                    continue
+                if athlete_entry.get("starter"):
+                    continue  # skip starters, only count bench
+                player_stats = athlete_entry.get("stats", [])
+                if pts_idx < len(player_stats):
+                    try:
+                        bench_pts += int(player_stats[pts_idx])
+                    except (ValueError, TypeError):
+                        pass
+
+        result[abbr]["bench_pts"] = bench_pts
 
     # ── Quarter scoring (for Q4 diff) ──
     header = data.get("header", {})
