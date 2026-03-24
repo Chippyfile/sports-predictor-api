@@ -305,6 +305,20 @@ def route_nba_backfill_enrichment():
         import traceback
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
+@app.route("/nba/debug-rolling", methods=["GET"])
+def route_nba_debug_rolling():
+    """Debug: show raw rolling table + last 3 game_stats rows for a team."""
+    import requests as _req
+    team = request.args.get("team", "CHA")
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    rolling = _req.get(
+        f"{SUPABASE_URL}/rest/v1/nba_team_rolling?team_abbr=eq.{team}&select=*",
+        headers=headers, timeout=10).json()
+    raw_games = _req.get(
+        f"{SUPABASE_URL}/rest/v1/nba_game_stats?team_abbr=eq.{team}&order=game_date.desc&limit=3&select=*",
+        headers=headers, timeout=10).json()
+    return jsonify({"team": team, "rolling": rolling, "last_3_games": raw_games})
+
 @app.route("/monte-carlo", methods=["POST"])
 def route_monte_carlo():
     body = request.get_json(force=True, silent=True) or {}

@@ -196,6 +196,9 @@ def _parse_espn_summary(data, home_abbr, away_abbr, game_date_str=""):
                         if isinstance(st, dict) and st.get("name") == "fieldGoalPct":
                             try: row[f"{side}_star1_fgpct"] = float(st["value"]) / 100
                             except: pass
+                        elif isinstance(st, dict) and st.get("name") == "freeThrowPct":
+                            try: row[f"{side}_ftpct_leader"] = float(st["value"]) / 100
+                            except: pass
                 elif cn == "assistsPerGame":
                     for st in top.get("statistics", []):
                         if isinstance(st, dict) and st.get("name") == "avgMinutes":
@@ -620,6 +623,12 @@ def predict_nba_full(game: dict):
     a_sv = float(row.get("away_scoring_var", 0) or 0)
     if h_sv or a_sv:
         ov["scoring_var_diff"] = round(h_sv - a_sv, 2)
+
+    # ftpct_diff: team FT% not in ESPN team stats, use star player FT% as proxy
+    h_ft = float(espn.get("home_ftpct_leader", 0) or 0)
+    a_ft = float(espn.get("away_ftpct_leader", 0) or 0)
+    if h_ft and a_ft:
+        ov["ftpct_diff"] = round(h_ft - a_ft, 4)
 
     # ATS rolling
     ov["roll_ats_margin_gated"] = round(h_sr.get("ats_avg",0) - a_sr.get("ats_avg",0), 2)
