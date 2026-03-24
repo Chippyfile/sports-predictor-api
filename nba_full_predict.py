@@ -78,221 +78,267 @@ def _parse_espn_summary(data, home_abbr, away_abbr):
     """Parse ESPN /summary into feature dict. Returns (row_dict, diag_list)."""
     row = {}
     diag = []
+    
+    def _safe_get(obj, *keys, default=None):
+        """Safely traverse nested dicts that might contain strings."""
+        for k in keys:
+            if isinstance(obj, dict):
+                obj = obj.get(k, default)
+            else:
+                return default
+        return obj
+
+    def _safe_abbr(obj):
+        """Safely extract team abbreviation from a field that might be a string."""
+        if isinstance(obj, dict):
+            return _map(obj.get("abbreviation", ""))
+        return ""
 
     # ── 1. Team stats from boxscore ──
-    for tb in data.get("boxscore", {}).get("teams", []):
-        abbr = _map(tb.get("team", {}).get("abbreviation", ""))
-        side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
-        if not side: continue
-        stats = {}
-        for s in tb.get("statistics", []):
-            if isinstance(s, dict):
-                stats[s.get("name", "")] = s.get("displayValue", "")
-        def g(n, d=0):
-            v = stats.get(n)
-            if v is None: return d
-            try: return float(v)
-            except: return d
+    try:
+        for tb in data.get("boxscore", {}).get("teams", []):
+            abbr = _safe_abbr(tb.get("team", {}))
+            side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
+            if not side: continue
+            stats = {}
+            for s in tb.get("statistics", []):
+                if isinstance(s, dict):
+                    stats[s.get("name", "")] = s.get("displayValue", "")
+            def g(n, d=0):
+                v = stats.get(n)
+                if v is None: return d
+                try: return float(v)
+                except: return d
 
-        row[f"{side}_ppg"] = g("avgPoints", 112)
-        row[f"{side}_opp_ppg"] = g("avgPointsAgainst", 112)
-        row[f"{side}_fgpct"] = g("fieldGoalPct", 47) / 100
-        row[f"{side}_threepct"] = g("threePointFieldGoalPct", 36) / 100
-        row[f"{side}_assists"] = g("avgAssists", 25)
-        row[f"{side}_blocks"] = g("avgBlocks", 5)
-        row[f"{side}_steals"] = g("avgSteals", 7.5)
-        row[f"{side}_turnovers"] = g("avgTotalTurnovers", g("avgTeamTurnovers", 14))
-        row[f"{side}_total_reb"] = g("avgRebounds", 44)
-        row[f"{side}_streak"] = _parse_streak(stats.get("streak", ""))
-        ppg = row[f"{side}_ppg"]; opp = row[f"{side}_opp_ppg"]
-        row[f"{side}_tempo"] = round(max((ppg + opp) / 2 / 1.1, 80), 1)
-        row[f"{side}_net_rtg"] = round(ppg - opp, 1)
-        row[f"{side}_ato_ratio"] = round(row[f"{side}_assists"] / max(row[f"{side}_turnovers"], 1), 2)
+            row[f"{side}_ppg"] = g("avgPoints", 112)
+            row[f"{side}_opp_ppg"] = g("avgPointsAgainst", 112)
+            row[f"{side}_fgpct"] = g("fieldGoalPct", 47) / 100
+            row[f"{side}_threepct"] = g("threePointFieldGoalPct", 36) / 100
+            row[f"{side}_assists"] = g("avgAssists", 25)
+            row[f"{side}_blocks"] = g("avgBlocks", 5)
+            row[f"{side}_steals"] = g("avgSteals", 7.5)
+            row[f"{side}_turnovers"] = g("avgTotalTurnovers", g("avgTeamTurnovers", 14))
+            row[f"{side}_total_reb"] = g("avgRebounds", 44)
+            row[f"{side}_streak"] = _parse_streak(stats.get("streak", ""))
+            ppg = row[f"{side}_ppg"]; opp = row[f"{side}_opp_ppg"]
+            row[f"{side}_tempo"] = round(max((ppg + opp) / 2 / 1.1, 80), 1)
+            row[f"{side}_net_rtg"] = round(ppg - opp, 1)
+            row[f"{side}_ato_ratio"] = round(row[f"{side}_assists"] / max(row[f"{side}_turnovers"], 1), 2)
+    except Exception as _e:
+        diag.append(f"Section 1 (boxscore): {_e}")
 
     # ── 2. Pickcenter (market + line movement) ──
-    pc_list = data.get("pickcenter", [])
-    if pc_list:
-        pc = pc_list[0]
-        row["market_spread_home"] = pc.get("spread", 0) or 0
-        row["market_ou_total"] = pc.get("overUnder", 0) or 0
-        ho = pc.get("homeTeamOdds", {}); ao = pc.get("awayTeamOdds", {})
-        row["home_ml"] = ho.get("moneyLine", 0) or 0
-        row["away_ml"] = ao.get("moneyLine", 0) or 0
+    try:
+        pc_list = data.get("pickcenter", [])
+        if pc_list:
+            pc = pc_list[0]
+            row["market_spread_home"] = pc.get("spread", 0) or 0
+            row["market_ou_total"] = pc.get("overUnder", 0) or 0
+            ho = pc.get("homeTeamOdds", {}) if isinstance(pc.get("homeTeamOdds"), dict) else {}
+            ao = pc.get("awayTeamOdds", {}) if isinstance(pc.get("awayTeamOdds"), dict) else {}
+            row["home_ml"] = ho.get("moneyLine", 0) or 0
+            row["away_ml"] = ao.get("moneyLine", 0) or 0
 
-        # Opening vs closing lines
-        ps = pc.get("pointSpread", {}); mline = pc.get("moneyline", {})
-        open_sp = _parse_line(ps.get("home",{}).get("open",{}).get("line"))
-        close_sp = _parse_line(ps.get("home",{}).get("close",{}).get("line"))
-        open_ml_h = _parse_odds(mline.get("home",{}).get("open",{}).get("odds"))
-        close_ml_h = _parse_odds(mline.get("home",{}).get("close",{}).get("odds"))
+            # Opening vs closing lines
+            ps = pc.get("pointSpread", {}) if isinstance(pc.get("pointSpread"), dict) else {}
+            mline = pc.get("moneyline", {}) if isinstance(pc.get("moneyline"), dict) else {}
+            open_sp = _parse_line(_safe_get(ps, "home", "open", "line"))
+            close_sp = _parse_line(_safe_get(ps, "home", "close", "line"))
+            open_ml_h = _parse_odds(_safe_get(mline, "home", "open", "odds"))
+            close_ml_h = _parse_odds(_safe_get(mline, "home", "close", "odds"))
 
-        row["_spread_move"] = (close_sp - open_sp) if (open_sp and close_sp) else 0
-        row["_ml_move"] = round(_ml_to_prob(close_ml_h) - _ml_to_prob(open_ml_h), 4) if open_ml_h else 0
-        row["_open_spread"] = open_sp
-        row["_close_spread"] = close_sp
+            row["_spread_move"] = (close_sp - open_sp) if (open_sp and close_sp) else 0
+            row["_ml_move"] = round(_ml_to_prob(close_ml_h) - _ml_to_prob(open_ml_h), 4) if open_ml_h else 0
+            row["_open_spread"] = open_sp
+            row["_close_spread"] = close_sp
 
-        # O/U movement
-        ot = pc.get("total",{}).get("over",{}).get("open",{}).get("line","")
-        open_total = 0
-        if ot and str(ot).startswith("o"):
-            try: open_total = float(str(ot)[1:])
-            except: pass
-        row["ou_movement"] = round((row["market_ou_total"] or 0) - open_total, 1) if open_total else 0
+            # O/U movement
+            ot = _safe_get(pc, "total", "over", "open", "line", default="")
+            open_total = 0
+            if ot and str(ot).startswith("o"):
+                try: open_total = float(str(ot)[1:])
+                except: pass
+            row["ou_movement"] = round((row["market_ou_total"] or 0) - open_total, 1) if open_total else 0
 
-        diag.append(f"Spread: {row['market_spread_home']} (open {open_sp})")
-        diag.append(f"ML: {row['home_ml']}/{row['away_ml']}")
+            diag.append(f"Spread: {row['market_spread_home']} (open {open_sp})")
+            diag.append(f"ML: {row['home_ml']}/{row['away_ml']}")
+    except Exception as _e:
+        diag.append(f"Section 2 (pickcenter): {_e}")
 
     # ── 3. Predictor (ESPN win probability) ──
-    pred = data.get("predictor", {})
-    if pred:
-        hp = pred.get("homeTeam", {}).get("gameProjection")
-        if hp:
-            row["espn_pregame_wp"] = float(hp) / 100
-            row["espn_pregame_wp_pbp"] = float(hp) / 100
+    try:
+        pred = data.get("predictor", {})
+        if isinstance(pred, dict) and pred:
+            hp = _safe_get(pred, "homeTeam", "gameProjection")
+            if hp:
+                row["espn_pregame_wp"] = float(hp) / 100
+                row["espn_pregame_wp_pbp"] = float(hp) / 100
+    except Exception as _e:
+        diag.append(f"Section 3 (predictor): {_e}")
 
     # ── 4. Leaders (star player data) ──
-    for lg in data.get("leaders", []):
-        abbr = _map(lg.get("team", {}).get("abbreviation", ""))
-        side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
-        if not side: continue
-        for cat in lg.get("leaders", []):
-            tops = cat.get("leaders", [])
-            if not tops: continue
-            top = tops[0]
-            mv = 0
-            try: mv = float(top.get("mainStat", {}).get("value", "0"))
-            except: pass
-            cn = cat.get("name", "")
-            if cn == "pointsPerGame":
-                row[f"{side}_star1_ppg"] = mv
-                for st in top.get("statistics", []):
-                    if st.get("name") == "fieldGoalPct":
-                        try: row[f"{side}_star1_fgpct"] = float(st["value"]) / 100
-                        except: pass
-            elif cn == "assistsPerGame":
-                for st in top.get("statistics", []):
-                    if st.get("name") == "avgMinutes":
-                        try: row[f"{side}_star_mpg"] = float(st["value"])
-                        except: pass
+    try:
+        for lg in data.get("leaders", []):
+            abbr = _safe_abbr(lg.get("team", {}))
+            side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
+            if not side: continue
+            for cat in lg.get("leaders", []):
+                tops = cat.get("leaders", [])
+                if not tops: continue
+                top = tops[0]
+                mv = 0
+                try: mv = float(top.get("mainStat", {}).get("value", "0"))
+                except: pass
+                cn = cat.get("name", "")
+                if cn == "pointsPerGame":
+                    row[f"{side}_star1_ppg"] = mv
+                    for st in top.get("statistics", []):
+                        if isinstance(st, dict) and st.get("name") == "fieldGoalPct":
+                            try: row[f"{side}_star1_fgpct"] = float(st["value"]) / 100
+                            except: pass
+                elif cn == "assistsPerGame":
+                    for st in top.get("statistics", []):
+                        if isinstance(st, dict) and st.get("name") == "avgMinutes":
+                            try: row[f"{side}_star_mpg"] = float(st["value"])
+                            except: pass
+    except Exception as _e:
+        diag.append(f"Section 4 (leaders): {_e}")
 
     # ── 5. Season series (H2H) ──
-    for ss in data.get("seasonseries", []):
-        completed = sum(1 for ev in ss.get("events", [])
-                       if ev.get("status",{}).get("statusType",{}).get("completed"))
-        row["_h2h_n"] = completed
-        margins = []
-        for ev in ss.get("events", []):
-            if not ev.get("status",{}).get("statusType",{}).get("completed"): continue
-            comps = ev.get("competitors", [])
-            hc = next((c for c in comps if c.get("homeAway")=="home"), None)
-            ac = next((c for c in comps if c.get("homeAway")=="away"), None)
-            if hc and ac:
-                try:
-                    hs, aws = int(hc["score"]), int(ac["score"])
-                    ha = _map(hc.get("team",{}).get("abbreviation",""))
-                    margins.append((hs-aws) if ha == home_abbr else (aws-hs))
-                except: pass
-        row["_h2h_margin"] = round(np.mean(margins), 1) if margins else 0
-        break
+    try:
+        for ss in data.get("seasonseries", []):
+            completed = sum(1 for ev in ss.get("events", [])
+                           if _safe_get(ev, "status", "statusType", "completed"))
+            row["_h2h_n"] = completed
+            margins = []
+            for ev in ss.get("events", []):
+                if not _safe_get(ev, "status", "statusType", "completed"): continue
+                comps = ev.get("competitors", [])
+                hc = next((c for c in comps if c.get("homeAway")=="home"), None)
+                ac = next((c for c in comps if c.get("homeAway")=="away"), None)
+                if hc and ac:
+                    try:
+                        hs, aws = int(hc["score"]), int(ac["score"])
+                        ha = _safe_abbr(hc.get("team", {}))
+                        margins.append((hs-aws) if ha == home_abbr else (aws-hs))
+                    except: pass
+            row["_h2h_margin"] = round(np.mean(margins), 1) if margins else 0
+            break
+    except Exception as _e:
+        diag.append(f"Section 5 (H2H): {_e}")
 
     # ── 6. Standings ──
-    for group in data.get("standings", {}).get("groups", []):
-        for entry in group.get("standings", {}).get("entries", []):
-            # Match entry to team
-            entry_abbr = None
-            entry_id = entry.get("id") or entry.get("uid", "")
-            for abbr, eid in NBA_ESPN_IDS.items():
-                if str(eid) == str(entry_id):
-                    entry_abbr = abbr; break
-            if not entry_abbr:
-                tn = str(entry.get("team", "")).lower()
-                for abbr in [home_abbr, away_abbr]:
-                    # Simple substring match on city name
-                    city_map = {"ATL":"atlanta","BOS":"boston","CHI":"chicago","CLE":"cleveland",
-                                "DAL":"dallas","DEN":"denver","DET":"detroit","GSW":"golden",
-                                "HOU":"houston","IND":"indiana","LAC":"la clip","LAL":"la laker",
-                                "MEM":"memphis","MIA":"miami","MIL":"milwaukee","MIN":"minnesota",
-                                "NOP":"new orleans","NYK":"new york","OKC":"oklahoma","ORL":"orlando",
-                                "PHI":"philadelphia","PHX":"phoenix","POR":"portland","SAC":"sacramento",
-                                "SAS":"san antonio","TOR":"toronto","UTA":"utah","WAS":"washington",
-                                "BKN":"brooklyn"}
-                    if city_map.get(abbr, "xxx") in tn:
+    try:
+        for group in data.get("standings", {}).get("groups", []):
+            for entry in group.get("standings", {}).get("entries", []):
+                # Match entry to team
+                entry_abbr = None
+                entry_id = entry.get("id") or entry.get("uid", "")
+                for abbr, eid in NBA_ESPN_IDS.items():
+                    if str(eid) == str(entry_id):
                         entry_abbr = abbr; break
-            if entry_abbr not in (home_abbr, away_abbr): continue
-            side = "home" if entry_abbr == home_abbr else "away"
-            for st in entry.get("stats", []):
-                val = st.get("value")
-                if val is None: continue
-                try:
-                    t = st.get("type", "")
-                    if t == "wins": row[f"{side}_wins"] = int(val)
-                    elif t == "losses": row[f"{side}_losses"] = int(val)
-                    elif t == "winpercent": row[f"{side}_win_pct_standings"] = float(val)
-                except: pass
+                if not entry_abbr:
+                    _et = entry.get("team", "")
+                    tn = str(_et).lower() if not isinstance(_et, dict) else str(_et.get("displayName", "")).lower()
+                    for abbr in [home_abbr, away_abbr]:
+                        city_map = {"ATL":"atlanta","BOS":"boston","CHI":"chicago","CLE":"cleveland",
+                                    "DAL":"dallas","DEN":"denver","DET":"detroit","GSW":"golden",
+                                    "HOU":"houston","IND":"indiana","LAC":"la clip","LAL":"la laker",
+                                    "MEM":"memphis","MIA":"miami","MIL":"milwaukee","MIN":"minnesota",
+                                    "NOP":"new orleans","NYK":"new york","OKC":"oklahoma","ORL":"orlando",
+                                    "PHI":"philadelphia","PHX":"phoenix","POR":"portland","SAC":"sacramento",
+                                    "SAS":"san antonio","TOR":"toronto","UTA":"utah","WAS":"washington",
+                                    "BKN":"brooklyn"}
+                        if city_map.get(abbr, "xxx") in tn:
+                            entry_abbr = abbr; break
+                if entry_abbr not in (home_abbr, away_abbr): continue
+                side = "home" if entry_abbr == home_abbr else "away"
+                for st in entry.get("stats", []):
+                    if not isinstance(st, dict): continue
+                    val = st.get("value")
+                    if val is None: continue
+                    try:
+                        t = st.get("type", "")
+                        if t == "wins": row[f"{side}_wins"] = int(val)
+                        elif t == "losses": row[f"{side}_losses"] = int(val)
+                        elif t == "winpercent": row[f"{side}_win_pct_standings"] = float(val)
+                    except: pass
+    except Exception as _e:
+        diag.append(f"Section 6 (standings): {_e}")
 
     # ── 7. Last 5 games (rolling margins, rest, B2B) ──
-    for l5 in data.get("lastFiveGames", []):
-        abbr = _map(l5.get("team", {}).get("abbreviation", ""))
-        side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
-        if not side: continue
-        events = l5.get("events", [])
-        margins, dates = [], []
-        team_id = str(NBA_ESPN_IDS.get(abbr, ""))
-        for ev in events:
-            try:
-                hs = int(ev.get("homeTeamScore", 0) or 0)
-                aws = int(ev.get("awayTeamScore", 0) or 0)
-                if str(ev.get("homeTeamId", "")) == team_id:
-                    margins.append(hs - aws)
-                else:
-                    margins.append(aws - hs)
-                gd = ev.get("gameDate", "")
-                if gd: dates.append(gd[:10])
-            except: pass
-        if margins:
-            row[f"{side}_margin_trend"] = round(np.mean(margins), 2)
-            row[f"{side}_scoring_var"] = round(float(np.std(margins)), 2) if len(margins) >= 3 else 12.0
-        if dates:
-            try:
-                last = datetime.strptime(dates[0], "%Y-%m-%d")
-                row[f"{side}_days_rest"] = max(0, (datetime.now() - last).days - 1)
-                if len(dates) >= 2:
-                    prev = datetime.strptime(dates[1], "%Y-%m-%d")
-                    if (last - prev).days <= 1:
-                        row[f"{side}_is_b2b"] = 1
-                cutoff = datetime.now() - timedelta(days=14)
-                row[f"{side}_games_14d"] = sum(1 for d in dates if datetime.strptime(d, "%Y-%m-%d") >= cutoff)
-            except: pass
-        wins_l5 = sum(1 for m in margins if m > 0)
-        row[f"{side}_form_l5"] = round((wins_l5/max(len(margins),1))*2-1, 3) if margins else 0
+    try:
+        for l5 in data.get("lastFiveGames", []):
+            abbr = _safe_abbr(l5.get("team", {}))
+            side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
+            if not side: continue
+            events = l5.get("events", [])
+            margins, dates = [], []
+            team_id = str(NBA_ESPN_IDS.get(abbr, ""))
+            for ev in events:
+                try:
+                    hs = int(ev.get("homeTeamScore", 0) or 0)
+                    aws = int(ev.get("awayTeamScore", 0) or 0)
+                    if str(ev.get("homeTeamId", "")) == team_id:
+                        margins.append(hs - aws)
+                    else:
+                        margins.append(aws - hs)
+                    gd = ev.get("gameDate", "")
+                    if gd: dates.append(gd[:10])
+                except: pass
+            if margins:
+                row[f"{side}_margin_trend"] = round(np.mean(margins), 2)
+                row[f"{side}_scoring_var"] = round(float(np.std(margins)), 2) if len(margins) >= 3 else 12.0
+            if dates:
+                try:
+                    last = datetime.strptime(dates[0], "%Y-%m-%d")
+                    row[f"{side}_days_rest"] = max(0, (datetime.now() - last).days - 1)
+                    if len(dates) >= 2:
+                        prev = datetime.strptime(dates[1], "%Y-%m-%d")
+                        if (last - prev).days <= 1:
+                            row[f"{side}_is_b2b"] = 1
+                    cutoff = datetime.now() - timedelta(days=14)
+                    row[f"{side}_games_14d"] = sum(1 for d in dates if datetime.strptime(d, "%Y-%m-%d") >= cutoff)
+                except: pass
+            wins_l5 = sum(1 for m in margins if m > 0)
+            row[f"{side}_form_l5"] = round((wins_l5/max(len(margins),1))*2-1, 3) if margins else 0
+    except Exception as _e:
+        diag.append(f"Section 7 (last5): {_e}")
 
     # ── 8. Injuries ──
-    for inj in data.get("injuries", []):
-        abbr = _map(inj.get("team", {}).get("abbreviation", ""))
-        side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
-        if not side: continue
-        out = sum(1 for i in inj.get("injuries", []) if i.get("type",{}).get("abbreviation")=="O")
-        row[f"{side}_injuries_out"] = out
+    try:
+        for inj in data.get("injuries", []):
+            abbr = _safe_abbr(inj.get("team", {}))
+            side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
+            if not side: continue
+            out = sum(1 for i in inj.get("injuries", [])
+                     if isinstance(i, dict) and _safe_get(i, "type", "abbreviation") == "O")
+            row[f"{side}_injuries_out"] = out
+    except Exception as _e:
+        diag.append(f"Section 8 (injuries): {_e}")
 
     # ── 9. Venue + Header ──
-    cap = data.get("gameInfo",{}).get("venue",{}).get("capacity") or VENUE_CAPACITY.get(home_abbr, 19000)
-    row["_venue_cap"] = cap
+    try:
+        cap = _safe_get(data, "gameInfo", "venue", "capacity") or VENUE_CAPACITY.get(home_abbr, 19000)
+        row["_venue_cap"] = cap
 
-    header = data.get("header", {})
-    for comp in header.get("competitions", [{}]):
-        gd = comp.get("date", "")
-        if gd: row["_game_date_utc"] = gd[:10]
-        for c in comp.get("competitors", []):
-            a = _map(c.get("team",{}).get("abbreviation",""))
-            s = "home" if a == home_abbr else "away" if a == away_abbr else None
-            if not s: continue
-            for rec in c.get("record", []):
-                if rec.get("type") == "total":
-                    try:
-                        parts = rec["summary"].split("-")
-                        row.setdefault(f"{s}_wins", int(parts[0]))
-                        row.setdefault(f"{s}_losses", int(parts[1]))
-                    except: pass
+        header = data.get("header", {})
+        for comp in header.get("competitions", [{}]):
+            gd = comp.get("date", "")
+            if gd: row["_game_date_utc"] = gd[:10]
+            for c in comp.get("competitors", []):
+                a = _safe_abbr(c.get("team", {}))
+                s = "home" if a == home_abbr else "away" if a == away_abbr else None
+                if not s: continue
+                for rec in c.get("record", []):
+                    if isinstance(rec, dict) and rec.get("type") == "total":
+                        try:
+                            parts = rec["summary"].split("-")
+                            row.setdefault(f"{s}_wins", int(parts[0]))
+                            row.setdefault(f"{s}_losses", int(parts[1]))
+                        except: pass
+    except Exception as _e:
+        diag.append(f"Section 9 (venue/header): {_e}")
 
     return row, diag
 
