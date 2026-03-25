@@ -13,7 +13,7 @@ import pandas as pd
 # Static: "public" teams that attract betting action
 PUBLIC_TEAMS = {
     "LAL", "LAC", "GSW", "BOS", "NYK", "BKN", "MIA", "CHI",
-    "DAL", "PHX", "PHI", "MIL",
+    "DAL", "PHX", "PHI", "MIL", "OKC", "DEN", "CLE",
 }
 
 
@@ -208,13 +208,14 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
     # Train: (home_roll_max_run + away_roll_max_run) / 2 — NOT a diff
     feats["roll_max_run_avg"] = (g("home_roll_max_run", 0) + g("away_roll_max_run", 0)) / 2
 
-    # 23. away_is_public_team — read column if available (training stores this), derive as fallback
+    # 23. away_is_public_team — check multiple key variants
     _away_ipt = game.get("away_is_public_team")
     if _away_ipt is not None:
         feats["away_is_public_team"] = int(_safe(_away_ipt, 0))
     else:
-        away_abbr = game.get("away_team_abbr", "") or game.get("away_team_name", "")
-        feats["away_is_public_team"] = 1 if away_abbr.upper() in PUBLIC_TEAMS else 0
+        away_abbr = (game.get("away_team_abbr") or game.get("away_abbr") or
+                     game.get("away_team") or game.get("away_team_name", ""))
+        feats["away_is_public_team"] = 1 if str(away_abbr).upper() in PUBLIC_TEAMS else 0
 
     # 24. away_after_loss — direct column preferred; derive from last_result as fallback
     _away_al = game.get("away_after_loss")
@@ -238,7 +239,7 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
     feats["games_diff"] = h_games - a_games
 
     # 29. ref_foul_proxy — referee foul tendency
-    feats["ref_foul_proxy"] = ref("foul_rate", 0)
+    feats["ref_foul_proxy"] = ref("foul_rate", 0) or ref("home_whistle", 0)
 
     # 30. roll_fast_break_diff — rolling fast break points differential
     # Train uses home_roll_fast_break_pts / away_roll_fast_break_pts
