@@ -413,23 +413,24 @@ def _load_elo():
     return {}
 
 def _load_model():
-    # Always load from Supabase first (v27 model)
-    # Remove stale local pkl so db.load_model doesn't serve old version
+    # Load directly from Supabase every time — bypasses per-worker in-memory cache
+    # (gunicorn multi-process: each worker has own _models dict, can't share cache)
+    # v27 model is 9KB so direct fetch is fast
     try:
-        from config import MODEL_DIR
-        import glob
-        for stale in glob.glob(os.path.join(MODEL_DIR, "nba*.pkl")):
-            try: os.remove(stale)
-            except: pass
-    except: pass
-    try:
-        from db import load_model, _models
-        _models.pop("nba", None)  # clear in-memory cache too
-        bundle = load_model("nba")
-        if bundle:
-            return bundle
+        import requests as _req, base64 as _b64, io as _io, joblib as _jl
+        from config import SUPABASE_URL, SUPABASE_KEY
+        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+        resp = _req.get(
+            f"{SUPABASE_URL}/rest/v1/model_store?name=eq.nba&select=data",
+            headers=headers, timeout=30
+        )
+        if resp.ok:
+            rows = resp.json()
+            if rows and rows[0].get("data"):
+                raw = _b64.b64decode(rows[0]["data"])
+                return _jl.load(_io.BytesIO(raw))
     except Exception as e:
-        print(f"  [nba] Supabase model load failed: {e}")
+        print(f"  [nba] Supabase direct load failed: {e}")
     # Local fallback for development
     for p in ["models/nba_v27.pkl", "nba_model_local.pkl", "models/nba_model_local.pkl"]:
         if os.path.exists(p):
