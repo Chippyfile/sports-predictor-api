@@ -565,7 +565,28 @@ def predict_nba_full(game: dict):
         "home": row.get("_home_enrichment", {}),
         "away": row.get("_away_enrichment", {}),
     }
-    ref_profile = row.get("_ref_profile", {})
+    # ── Referee lookup: official.nba.com (posted ~9AM ET) ──
+    ref_profile = {}
+    try:
+        from nba_ref_scraper import get_refs_for_game
+        scraped = get_refs_for_game(home_abbr, away_abbr)
+        if scraped:
+            for k, v in scraped.items():
+                espn[f"_{k}"] = v  # _ref_1, _ref_2, _ref_3
+            from db import sb_get
+            all_refs = sb_get("nba_ref_profiles", "select=ref_name,home_whistle,avg_home_margin&limit=50") or []
+            ref_map = {r["ref_name"]: r for r in all_refs}
+            matched = [ref_map[n] for n in scraped.values() if n in ref_map]
+            if matched:
+                ref_profile = {
+                    "home_whistle": sum(r["home_whistle"] for r in matched) / len(matched),
+                    "foul_rate":    sum(r["home_whistle"] for r in matched) / len(matched),
+                }
+                diag["sources"].append(f"Refs: {', '.join(scraped.values())} ({len(matched)} profiled)")
+            else:
+                diag["sources"].append(f"Refs: {', '.join(scraped.values())} (no profiles yet)")
+    except Exception as e:
+        diag["warnings"].append(f"ref_scraper: {e}")
 
     # Pass all assembled keys into build_v27_features
     feat_df = build_v27_features(row, enrichment=enrichment, ref_profile=ref_profile)
