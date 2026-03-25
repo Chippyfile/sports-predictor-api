@@ -431,11 +431,8 @@ def _load_model():
                 return _jl.load(_io.BytesIO(raw))
     except Exception as e:
         print(f"  [nba] Supabase direct load failed: {e}")
-    # Local fallback for development
-    for p in ["models/nba_v27.pkl", "nba_model_local.pkl", "models/nba_model_local.pkl"]:
-        if os.path.exists(p):
-            with open(p, "rb") as f:
-                return pickle.load(f)
+    # No local fallback — Railway may have stale pkl from previous deploys
+    # Local development: run python3 nba_v27_train.py to generate models/nba_v27.pkl
     return None
 
 def _find_game_id(home, away, date):
