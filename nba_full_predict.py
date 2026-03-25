@@ -50,6 +50,48 @@ VENUE_CAPACITY = {
 }
 
 def _map(a): return ESPN_ABBR_MAP.get(a, a)
+# ESPN team ID map for season stats endpoint
+_ESPN_TEAM_IDS = {
+    "ATL":1,"BOS":2,"BKN":17,"CHA":30,"CHI":4,"CLE":5,"DAL":6,"DEN":7,
+    "DET":8,"GSW":9,"GS":9,"HOU":10,"IND":11,"LAC":12,"LAL":13,"MEM":29,
+    "MIA":14,"MIL":15,"MIN":16,"NOP":3,"NO":3,"NYK":18,"NY":18,"OKC":25,
+    "ORL":19,"PHI":20,"PHX":21,"POR":22,"SAC":23,"SAS":24,"SA":24,
+    "TOR":28,"UTA":26,"UTAH":26,"WAS":27,"WSH":27,
+}
+
+def _fetch_team_season_stats(abbr):
+    """Fetch season shooting stats from ESPN team statistics endpoint."""
+    team_id = _ESPN_TEAM_IDS.get(abbr.upper())
+    if not team_id:
+        return {}
+    try:
+        r = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{team_id}/statistics",
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=8
+        )
+        if not r.ok:
+            return {}
+        cats = r.json().get("results", {}).get("stats", {}).get("categories", [])
+        result = {}
+        for cat in cats:
+            for s in cat.get("stats", []):
+                name = s.get("name", "")
+                val = s.get("value")
+                if val is None:
+                    continue
+                if name == "threePointPct":
+                    result["threepct"] = round(float(val) / 100, 4)
+                elif name == "fieldGoalPct":
+                    result["fgpct"] = round(float(val) / 100, 4)
+                elif name == "avgPoints":
+                    result["ppg"] = round(float(val), 2)
+                elif name == "ftPct":
+                    result["ftpct"] = round(float(val) / 100, 4)
+        return result
+    except Exception:
+        return {}
+
+
 def _ml_to_prob(ml):
     if not ml or ml == 0: return 0.5
     return 100/(ml+100) if ml > 0 else abs(ml)/(abs(ml)+100)
@@ -552,6 +594,28 @@ def predict_nba_full(game: dict):
         df = enrich_v2(df)
         diag["sources"].append("enrich_v2")
     except Exception as e: diag["warnings"].append(f"enrich_v2: {e}")
+
+    # ── Season stats from ESPN team endpoint (fixes rounded placeholders) ──
+    try:
+        for side, abbr in [("home", home_abbr), ("away", away_abbr)]:
+            season_stats = _fetch_team_season_stats(abbr)
+            if season_stats:
+                for stat, val in season_stats.items():
+                    row[f"{side}_{stat}"] = val
+        diag["sources"].append("Season stats (ESPN)")
+    except Exception as e:
+        diag["warnings"].append(f"season_stats: {e}")
+
+    # ── Streak → after_loss flags ──
+    try:
+        h_streak_raw = espn.get("home_streak_raw", "")
+        a_streak_raw = espn.get("away_streak_raw", "")
+        if h_streak_raw.startswith("L"):
+            row["home_after_loss"] = 1
+        if a_streak_raw.startswith("L"):
+            row["away_after_loss"] = 1
+    except Exception as e:
+        diag["warnings"].append(f"streak: {e}")
 
     # ═══ 8. Build v27 features ═══
     bundle = _load_model()
