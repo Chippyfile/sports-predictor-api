@@ -788,11 +788,11 @@ def predict_nba_full(game: dict):
         "pred_away_score": round(float(row.get("away_ppg",112))-margin/2, 1),
         "market_spread": mkt, "market_total": float(row.get("market_ou_total",0) or 0),
         "disagree": round(abs(margin-(-mkt)), 2) if mkt else 0,
-        "shap": shap_out if debug else shap_out[:20],
+        "shap": shap_out,  # all 38 features
         "feature_coverage": f"{nz}/{len(feature_cols)}",
         "model_meta": {
             "n_train": bundle.get("n_games"), "mae_cv": bundle.get("cv_mae"),
-            "model_type": bundle.get("architecture","Lasso_solo_v26"),
+            "model_type": bundle.get("model_type", bundle.get("architecture","unknown")),
             "n_features": len(feature_cols), "has_isotonic": cal is not None,
         },
         "diagnostics": diag,
