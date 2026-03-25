@@ -556,6 +556,7 @@ def predict_nba_full(game: dict):
     # ═══ 8. Build v27 features ═══
     bundle = _load_model()
     if not bundle: return {"error": "NBA model not found"}
+    print(f"  [DEBUG] bundle keys={list(bundle.keys())[:5]} model_type={bundle.get('model_type')} n_features={len(bundle.get('feature_cols',bundle.get('feature_list',[])))} trained_at={bundle.get('trained_at')}")
 
     from nba_v27_features_live import build_v27_features
 
