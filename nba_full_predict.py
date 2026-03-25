@@ -686,6 +686,13 @@ def predict_nba_full(game: dict):
     ov["streak_diff"] = int(row.get("home_streak", 0) or 0) - int(row.get("away_streak", 0) or 0)
     ov["games_diff"] = int(hw + hl) - int(aw + al)
 
+    # games_last_14_diff — populated from schedule at line ~323
+    # if still 0, approximate from games_diff (teams play similar schedules)
+    g14h = int(row.get("home_games_14d", 0) or 0)
+    g14a = int(row.get("away_games_14d", 0) or 0)
+    if g14h or g14a:
+        ov["games_last_14_diff"] = g14h - g14a
+
     # ── Additional stat overrides ──
     # scoring_var_diff: ESPN parser computes {side}_scoring_var from last5 margins
     h_sv = float(row.get("home_scoring_var", 0) or 0)
@@ -701,6 +708,12 @@ def predict_nba_full(game: dict):
 
     # ATS rolling
     ov["roll_ats_margin_gated"] = round(h_sr.get("ats_avg",0) - a_sr.get("ats_avg",0), 2)
+
+    # home_after_loss / away_after_loss — derive from last game result
+    h_streak = int(row.get("home_streak", 0) or 0)
+    a_streak = int(row.get("away_streak", 0) or 0)
+    ov["home_after_loss"] = 1 if h_streak < 0 else 0
+    ov["away_after_loss"] = 1 if a_streak < 0 else 0
 
     # ── Rolling PBP stats from pre-computed nba_team_rolling ──
     try:
@@ -735,6 +748,11 @@ def predict_nba_full(game: dict):
             for feat, val in enrich_diffs.items():
                 if val is not None:
                     ov[feat] = val
+            # Map enrichment keys → v27 feature names
+            if "scoring_entropy_diff" in enrich_diffs:
+                ov["scoring_hhi_diff"] = enrich_diffs["scoring_entropy_diff"]
+            if "drb_pct_diff" in enrich_diffs:
+                ov["roll_dreb_diff"] = enrich_diffs["drb_pct_diff"]
             diag["sources"].append(f"Enrichment ({len(enrich_diffs)} features)")
     except Exception as e:
         diag["warnings"].append(f"enrichment: {e}")
