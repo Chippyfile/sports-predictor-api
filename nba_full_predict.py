@@ -413,9 +413,19 @@ def _load_elo():
     return {}
 
 def _load_model():
-    for p in ["nba_model_local.pkl","models/nba_model_local.pkl"]:
+    # Always load from Supabase first (v27 model)
+    try:
+        from db import load_model
+        bundle = load_model("nba")
+        if bundle:
+            return bundle
+    except Exception as e:
+        print(f"  [nba] Supabase model load failed: {e}")
+    # Local fallback for development
+    for p in ["models/nba_v27.pkl", "nba_model_local.pkl", "models/nba_model_local.pkl"]:
         if os.path.exists(p):
-            with open(p,"rb") as f: return pickle.load(f)
+            with open(p, "rb") as f:
+                return pickle.load(f)
     return None
 
 def _find_game_id(home, away, date):
