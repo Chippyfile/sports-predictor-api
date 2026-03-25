@@ -146,3 +146,5 @@ nba_v27_features.parquet
 *.textClipping
 .DS_Store
 nba_model_local.pkl
+models/nba.pkl
+models/nba_v26*
