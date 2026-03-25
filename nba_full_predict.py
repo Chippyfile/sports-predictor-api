@@ -536,33 +536,30 @@ def predict_nba_full(game: dict):
         diag["sources"].append("enrich_v2")
     except Exception as e: diag["warnings"].append(f"enrich_v2: {e}")
 
-    # ═══ 8. Build features + override from ESPN ═══
+    # ═══ 8. Build v27 features ═══
     bundle = _load_model()
     if not bundle: return {"error": "NBA model not found"}
 
-    try:
-        from nba_build_features_v25 import nba_build_features
-    except ImportError:
-        from sports.nba import nba_build_features
+    from nba_v27_features_live import build_v27_features
 
-    X = nba_build_features(df)
-    feature_list = bundle["feature_list"]
-    for f in feature_list:
-        if f not in X.columns: X[f] = 0.0
+    # Enrichment dict (from nba_team_enrichment if available)
+    enrichment = {
+        "home": row.get("_home_enrichment", {}),
+        "away": row.get("_away_enrichment", {}),
+    }
+    ref_profile = row.get("_ref_profile", {})
 
-    # ── Override features from ESPN that pipeline couldn't compute ──
-    spread = row.get("market_spread_home", 0) or 0
-    home_ml = espn.get("home_ml", 0)
-    away_ml = espn.get("away_ml", 0)
-    impl_h = _ml_to_prob(home_ml)
-    impl_a = _ml_to_prob(away_ml)
+    # Pass all assembled keys into build_v27_features
+    feat_df = build_v27_features(row, enrichment=enrichment, ref_profile=ref_profile)
 
-    h_star = espn.get("home_star1_ppg", 0); a_star = espn.get("away_star1_ppg", 0)
-    h_ppg = row.get("home_ppg", 112); a_ppg = row.get("away_ppg", 112)
-    h_fg = espn.get("home_star1_fgpct", 0.45); a_fg = espn.get("away_star1_fgpct", 0.45)
-    h_mpg = espn.get("home_star_mpg", 32); a_mpg = espn.get("away_star_mpg", 32)
+    # Select only the features this model was trained on
+    feature_cols = bundle.get("feature_cols", bundle.get("feature_list", []))
+    for f in feature_cols:
+        if f not in feat_df.columns:
+            feat_df[f] = 0.0
+    X = feat_df[feature_cols]
 
-    overrides = {}
+    overrides = {}  # v27 features are self-contained — no post-hoc overrides needed
     # Market
     ov = overrides
     ov["espn_pregame_wp"] = espn.get("espn_pregame_wp", 0)
@@ -711,26 +708,41 @@ def predict_nba_full(game: dict):
         except Exception as e:
             diag["warnings"].append(f"ref_whistle: {e}")
 
-    # Apply
+    # Apply ESPN overrides onto v27 feat_df
     for feat, val in ov.items():
-        if feat in X.columns and val is not None:
-            X.at[X.index[0], feat] = val
+        if feat in feat_df.columns and val is not None:
+            feat_df.at[feat_df.index[0], feat] = val
 
-    X_slim = X[feature_list]
+    # Build X from verified v27 feature set
+    feature_cols = bundle.get("feature_cols", bundle.get("feature_list", []))
+    for f in feature_cols:
+        if f not in feat_df.columns:
+            feat_df[f] = 0.0
+    X_slim = feat_df[feature_cols]
 
     # ═══ 9. Predict ═══
     X_s = bundle["scaler"].transform(X_slim)
-    margin = float(bundle["model"].predict(X_s)[0])
-    raw_p = 1.0 / (1.0 + np.exp(-margin / 8.0))
-    cal = bundle.get("calibrator")
+    reg = bundle.get("reg", bundle.get("model"))
+    margin = float(reg.predict(X_s)[0])
+    clf = bundle.get("clf")
+    if clf:
+        raw_p = float(clf.predict_proba(X_s)[0][1])
+    else:
+        raw_p = 1.0 / (1.0 + np.exp(-margin / 8.0))
+    cal = bundle.get("calibrator") or bundle.get("isotonic")
     wp = float(cal.predict([raw_p])[0]) if cal else raw_p
 
     # Contributions
-    contribs = bundle["model"].coef_ * X_s[0]
-    shap_out = sorted([
-        {"feature": f, "shap": round(float(c), 4), "value": round(float(X_slim[f].iloc[0]), 3)}
-        for f, c in zip(feature_list, contribs)
-    ], key=lambda x: abs(x["shap"]), reverse=True)
+    try:
+        reg_model = bundle.get("reg", bundle.get("model"))
+        contribs = reg_model.coef_ * X_s[0]
+        shap_out = sorted([
+            {"feature": f, "shap": round(float(c), 4), "value": round(float(X_slim[f].iloc[0]), 3)}
+            for f, c in zip(feature_cols, contribs)
+        ], key=lambda x: abs(x["shap"]), reverse=True)
+    except Exception as e:
+        shap_out = []
+        diag["warnings"].append(f"shap: {e}")
 
     nz = sum(1 for s in shap_out if s["value"] != 0)
     mkt = float(row.get("market_spread_home", 0) or 0)
