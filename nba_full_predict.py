@@ -414,8 +414,17 @@ def _load_elo():
 
 def _load_model():
     # Always load from Supabase first (v27 model)
+    # Remove stale local pkl so db.load_model doesn't serve old version
     try:
-        from db import load_model
+        from config import MODEL_DIR
+        import glob
+        for stale in glob.glob(os.path.join(MODEL_DIR, "nba*.pkl")):
+            try: os.remove(stale)
+            except: pass
+    except: pass
+    try:
+        from db import load_model, _models
+        _models.pop("nba", None)  # clear in-memory cache too
         bundle = load_model("nba")
         if bundle:
             return bundle
