@@ -32,7 +32,12 @@ from nba_game_stats import process_completed_games, backfill_game_stats
 from sports.nfl import train_nfl, predict_nfl, nfl_build_features
 from sports.ncaaf import train_ncaaf, predict_ncaaf, ncaaf_build_features
 # REMOVED: nba_backfill cleaned from repo
-from quick_backtest import quick_backtest_nba, quick_backtest_ncaa, quick_backtest_mlb
+try:
+    from quick_backtest import quick_backtest_nba, quick_backtest_ncaa, quick_backtest_mlb
+except ImportError:
+    def quick_backtest_nba(*a, **k): return {"error": "quick_backtest not available"}
+    def quick_backtest_ncaa(*a, **k): return {"error": "quick_backtest not available"}
+    def quick_backtest_mlb(*a, **k): return {"error": "quick_backtest not available"}
 from season_holdout_backtest import season_holdout_nba, season_holdout_ncaa, season_holdout_mlb, season_holdout_all
 from monte_carlo import monte_carlo
 from cron import _active_sports, _log_training, _should_promote
