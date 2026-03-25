@@ -559,7 +559,18 @@ def predict_nba_full(game: dict):
             feat_df[f] = 0.0
     X = feat_df[feature_cols]
 
-    overrides = {}  # v27 features are self-contained — no post-hoc overrides needed
+    # ESPN-derived values used by overrides block below
+    spread = row.get("market_spread_home", 0) or 0
+    home_ml = row.get("home_ml", 0) or row.get("home_moneyline", 0) or espn.get("home_ml", 0)
+    away_ml = row.get("away_ml", 0) or row.get("away_moneyline", 0) or espn.get("away_ml", 0)
+    impl_h = _ml_to_prob(home_ml)
+    impl_a = _ml_to_prob(away_ml)
+    h_star = espn.get("home_star1_ppg", 0); a_star = espn.get("away_star1_ppg", 0)
+    h_ppg = row.get("home_ppg", 112); a_ppg = row.get("away_ppg", 112)
+    h_fg = espn.get("home_star1_fgpct", 0.45); a_fg = espn.get("away_star1_fgpct", 0.45)
+    h_mpg = espn.get("home_star_mpg", 32); a_mpg = espn.get("away_star_mpg", 32)
+
+    overrides = {}
     # Market
     ov = overrides
     ov["espn_pregame_wp"] = espn.get("espn_pregame_wp", 0)
@@ -708,16 +719,16 @@ def predict_nba_full(game: dict):
         except Exception as e:
             diag["warnings"].append(f"ref_whistle: {e}")
 
-    # Apply ESPN overrides onto v27 feat_df
+    # Apply ESPN overrides onto v27 feat_df (cast to float to avoid dtype errors)
+    feat_df = feat_df.astype(float)
     for feat, val in ov.items():
         if feat in feat_df.columns and val is not None:
-            feat_df.at[feat_df.index[0], feat] = val
+            try:
+                feat_df.at[feat_df.index[0], feat] = float(val)
+            except Exception:
+                pass
 
     # Build X from verified v27 feature set
-    feature_cols = bundle.get("feature_cols", bundle.get("feature_list", []))
-    for f in feature_cols:
-        if f not in feat_df.columns:
-            feat_df[f] = 0.0
     X_slim = feat_df[feature_cols]
 
     # ═══ 9. Predict ═══
@@ -760,11 +771,11 @@ def predict_nba_full(game: dict):
         "market_spread": mkt, "market_total": float(row.get("market_ou_total",0) or 0),
         "disagree": round(abs(margin-(-mkt)), 2) if mkt else 0,
         "shap": shap_out if debug else shap_out[:20],
-        "feature_coverage": f"{nz}/{len(feature_list)}",
+        "feature_coverage": f"{nz}/{len(feature_cols)}",
         "model_meta": {
             "n_train": bundle.get("n_games"), "mae_cv": bundle.get("cv_mae"),
             "model_type": bundle.get("architecture","Lasso_solo_v26"),
-            "n_features": len(feature_list), "has_isotonic": cal is not None,
+            "n_features": len(feature_cols), "has_isotonic": cal is not None,
         },
         "diagnostics": diag,
     }
