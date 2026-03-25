@@ -748,7 +748,7 @@ def predict_nba_full(game: dict):
 
     # ── Referee home whistle ──
     ref_names = [espn.get(f"_ref_{i}", "") for i in range(1, 4)]
-    if any(ref_names):
+    if any(ref_names) and not ref_profile:  # skip if scraper already got refs
         try:
             from nba_enrichment import get_ref_home_whistle
             hw = get_ref_home_whistle(ref_names)
