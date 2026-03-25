@@ -145,3 +145,4 @@ nba_v27_features.parquet
 # OS files
 *.textClipping
 .DS_Store
+nba_model_local.pkl
