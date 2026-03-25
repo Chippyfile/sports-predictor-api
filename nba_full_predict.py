@@ -131,13 +131,22 @@ def _parse_espn_summary(data, home_abbr, away_abbr, game_date_str=""):
     try:
         pc_list = data.get("pickcenter", [])
         if pc_list:
-            pc = pc_list[0]
+            # Prefer DraftKings provider for consistent juice/movement data
+            pc = next(
+                (p for p in pc_list if "draft" in (p.get("provider", {}).get("name", "") or "").lower()),
+                pc_list[0]
+            )
             row["market_spread_home"] = pc.get("spread", 0) or 0
             row["market_ou_total"] = pc.get("overUnder", 0) or 0
             ho = pc.get("homeTeamOdds", {}) if isinstance(pc.get("homeTeamOdds"), dict) else {}
             ao = pc.get("awayTeamOdds", {}) if isinstance(pc.get("awayTeamOdds"), dict) else {}
             row["home_ml"] = ho.get("moneyLine", 0) or 0
             row["away_ml"] = ao.get("moneyLine", 0) or 0
+            # v27 feature keys: moneyline + spread juice for implied_prob / juice_imbalance
+            row["home_moneyline"]   = row["home_ml"]
+            row["away_moneyline"]   = row["away_ml"]
+            row["home_spread_odds"] = ho.get("spreadOdds", 0) or 0
+            row["away_spread_odds"] = ao.get("spreadOdds", 0) or 0
 
             # Opening vs closing lines
             ps = pc.get("pointSpread", {}) if isinstance(pc.get("pointSpread"), dict) else {}
@@ -151,6 +160,9 @@ def _parse_espn_summary(data, home_abbr, away_abbr, game_date_str=""):
             row["_ml_move"] = round(_ml_to_prob(close_ml_h) - _ml_to_prob(open_ml_h), 4) if open_ml_h else 0
             row["_open_spread"] = open_sp
             row["_close_spread"] = close_sp
+            # v27 feature keys used by nba_v27_features_live.py
+            row["spread_open"]  = open_sp or 0
+            row["spread_close"] = close_sp or 0
 
             # O/U movement
             ot = _safe_get(pc, "total", "over", "open", "line", default="")
