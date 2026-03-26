@@ -165,6 +165,76 @@ def compute_team_enrichment(team_abbr, n_games=15):
     avg_ft_trip = float(np.mean(ft_trip_rates))
     avg_oreb = float(np.mean([float(r.get("oreb", 0) or 0) for r in rows]))
     
+    # ══════════════════════════════════════════════════════
+    # NEW: 6 features needed by backward-eliminated 69-feature set
+    # ══════════════════════════════════════════════════════
+    
+    # ── score_kurtosis: same as bimodal (excess kurtosis) but aliased ──
+    score_kurtosis = bimodal  # identical computation, different name in training builder
+    
+    # ── margin_accel: 2nd derivative of margin trend ──
+    # Compare recent 5-game trend vs prior 5-game trend
+    if n >= 10:
+        recent_trend = float(np.mean(margins[:5]) - np.mean(margins[5:10]))
+        prior_trend = float(np.mean(margins[5:10]) - np.mean(margins[10:])) if n >= 15 else 0.0
+        margin_accel = round(recent_trend - prior_trend, 2)
+    elif n >= 5:
+        margin_accel = round(float(np.mean(margins[:3]) - np.mean(margins[3:])), 2)
+    else:
+        margin_accel = 0.0
+    
+    # ── momentum_halflife: exponential decay-weighted form ──
+    # Recent games weighted more heavily (halflife = 5 games)
+    weights = np.exp(-0.693 * np.arange(n) / 5.0)  # ln(2)/5 ≈ 0.1386
+    weights /= weights.sum()
+    momentum_halflife = round(float(np.dot(margins, weights)), 2)
+    
+    # ── win_aging: time-weighted win rate ──
+    # More recent wins count more (decay over 15 games)
+    wins = np.array([1.0 if m > 0 else 0.0 for m in margins])
+    age_weights = np.exp(-0.5 * np.arange(n) / max(n, 1))
+    age_weights /= age_weights.sum()
+    win_aging = round(float(np.dot(wins, age_weights)), 3)
+    
+    # ── pyth_residual: actual win rate minus pythagorean expected ──
+    # Pythagorean: expected_win% = PF^exp / (PF^exp + PA^exp), exp≈13.91 for NBA
+    actual_wins = sum(1 for m in margins if m > 0)
+    actual_win_pct = actual_wins / max(n, 1)
+    # Approximate PF and PA from margins
+    pf_approx = LG_PPG + margin_mean / 2
+    pa_approx = LG_PPG - margin_mean / 2
+    if pf_approx > 0 and pa_approx > 0:
+        pyth_exp = 13.91  # NBA Morey exponent
+        pyth_win_pct = pf_approx ** pyth_exp / (pf_approx ** pyth_exp + pa_approx ** pyth_exp)
+        pyth_residual = round(actual_win_pct - pyth_win_pct, 4)
+    else:
+        pyth_residual = 0.0
+    
+    # ── pyth_luck: similar to residual but scaled ──
+    # Positive = team is "lucky" (winning more than expected)
+    pyth_luck = round(pyth_residual * n, 2)  # scale by games for magnitude
+    
+    # ── recovery_idx: bounce-back tendency after losses ──
+    # What % of losses are followed by a win?
+    recoveries = 0
+    loss_count = 0
+    for i in range(1, n):
+        if margins[i - 1] < 0:  # prior game was a loss (margins[0] = most recent)
+            loss_count += 1
+            if margins[i - 1] < 0 and i < n - 1 and margins[i] > 0:
+                # Wait, margins[0] is most recent. Let me fix the indexing.
+                pass
+    # Simpler: iterate chronologically (reverse since rows are desc)
+    chron_margins = list(reversed(margins))
+    recoveries = 0
+    loss_count = 0
+    for i in range(len(chron_margins) - 1):
+        if chron_margins[i] < 0:
+            loss_count += 1
+            if chron_margins[i + 1] > 0:
+                recoveries += 1
+    recovery_idx = round(recoveries / max(loss_count, 1), 3)
+
     return {
         "team_abbr": team_abbr,
         "updated_date": rows[0].get("game_date", datetime.now().strftime("%Y-%m-%d")),
@@ -174,6 +244,7 @@ def compute_team_enrichment(team_abbr, n_games=15):
         "ceiling": ceiling,
         "floor": floor,
         "bimodal": bimodal,
+        "score_kurtosis": score_kurtosis,  # alias for bimodal
         "scoring_entropy": scoring_entropy,
         "def_stability": def_stability,
         "opp_suppression": opp_suppression,
@@ -182,9 +253,19 @@ def compute_team_enrichment(team_abbr, n_games=15):
         "three_pt_regression": three_pt_regression,
         "pace_leverage": pace_leverage,
         "pace_control": pace_control,
+        # NEW: 6 features for 69-feature model
+        "margin_accel": margin_accel,
+        "momentum_halflife": momentum_halflife,
+        "win_aging": win_aging,
+        "pyth_residual": pyth_residual,
+        "pyth_luck": pyth_luck,
+        "recovery_idx": recovery_idx,
         # Per-team stats for matchup computation at prediction time
+        "ft_trip_rate": round(avg_ft_trip, 4),  # alias for avg_ft_trip_rate
         "avg_ft_trip_rate": round(avg_ft_trip, 4),
+        "three_fg_rate": round(avg_3rate, 4),  # alias for avg_three_fg_rate
         "avg_three_fg_rate": round(avg_3rate, 4),
+        "oreb": round(avg_oreb, 2),  # alias for avg_oreb
         "avg_oreb": round(avg_oreb, 2),
         "avg_margin": round(margin_mean, 2),
         "margin_trend": round(float(np.mean(margins[:5]) - np.mean(margins[5:])), 2) if n >= 10 else 0.0,
@@ -247,12 +328,20 @@ def get_enrichment_diffs(home_abbr, away_abbr):
     
     # Direct diff features (home - away)
     for feat in ["scoring_var", "consistency", "ceiling", "bimodal",
+                 "score_kurtosis",  # alias for bimodal
                  "scoring_entropy", "def_stability", "opp_suppression",
                  "three_value", "ts_regression", "three_pt_regression",
-                 "pace_control"]:
+                 "pace_control",
+                 # NEW: 6 features for 69-feature model
+                 "margin_accel", "momentum_halflife", "win_aging",
+                 "pyth_residual", "pyth_luck", "recovery_idx"]:
         h_val = float(h.get(feat, 0) or 0)
         a_val = float(a.get(feat, 0) or 0)
         diffs[f"{feat}_diff"] = round(h_val - a_val, 4)
+    
+    # Map opp_suppression to row keys that feature builder reads
+    diffs["home_opp_suppression"] = float(h.get("opp_suppression", 0) or 0)
+    diffs["away_opp_suppression"] = float(a.get("opp_suppression", 0) or 0)
     
     # pace_leverage: combined (average of both teams), NOT a diff
     h_pl = float(h.get("pace_leverage", 0) or 0)
