@@ -313,11 +313,52 @@ def build_features(df):
     feats["matchup_ft"] = _safe_diff(df, "home_ft_trip_rate", "away_ft_trip_rate")
     
     # ══════════════════════════════════════════════════════
-    # GROUP 11: H2H (2)
+    # GROUP 11: H2H (3 — computed from prior meetings)
     # ══════════════════════════════════════════════════════
     
     feats["h2h_total_games"] = _safe_col(df, "h2h_total_games", 0)
-    feats["h2h_avg_margin"] = _safe_col(df, "h2h_avg_margin", 0)
+    
+    # Compute h2h_avg_margin and is_revenge_home from actual game results
+    # (These columns don't exist in raw parquet — must derive from prior meetings)
+    h2h_margin = np.zeros(len(df))
+    revenge = np.zeros(len(df))
+    
+    if "home_team" in df.columns and "away_team" in df.columns and "actual_home_score" in df.columns:
+        _ht = df["home_team"].values
+        _at = df["away_team"].values
+        _season = df["season"].values if "season" in df.columns else np.zeros(len(df))
+        _margin = (pd.to_numeric(df["actual_home_score"], errors="coerce").fillna(0) -
+                   pd.to_numeric(df["actual_away_score"], errors="coerce").fillna(0)).values
+        _gd = df["game_date"].values if "game_date" in df.columns else np.arange(len(df))
+        
+        # Group by matchup pair + season for efficiency
+        _pair_key = {}
+        for i in range(len(df)):
+            pair = tuple(sorted([str(_ht[i]), str(_at[i])]))
+            key = (pair, _season[i])
+            if key not in _pair_key:
+                _pair_key[key] = []
+            _pair_key[key].append(i)
+        
+        for key, indices in _pair_key.items():
+            if len(indices) < 2:
+                continue
+            for pos in range(1, len(indices)):
+                idx = indices[pos]
+                home = str(_ht[idx])
+                # Get margins from home team's perspective for all prior meetings
+                prior_margins = []
+                for pi in indices[:pos]:
+                    if str(_ht[pi]) == home:
+                        prior_margins.append(_margin[pi])
+                    else:
+                        prior_margins.append(-_margin[pi])
+                
+                h2h_margin[idx] = round(float(np.mean(prior_margins)), 1)
+                revenge[idx] = 1 if prior_margins[-1] < 0 else 0
+    
+    feats["h2h_avg_margin"] = h2h_margin
+    feats["is_revenge_home"] = revenge
     
     # ══════════════════════════════════════════════════════
     # GROUP 12: CONTEXT (12 — 4 existing + 8 new)
@@ -348,8 +389,24 @@ def build_features(df):
     feats["post_allstar"] = _safe_col(df, "post_allstar", 0)
     feats["altitude_factor"] = _safe_col(df, "altitude_factor", 0)
     feats["timezone_diff"] = _safe_col(df, "timezone_diff", 0)
-    feats["conference_game"] = _safe_col(df, "conference_game", 0)
-    feats["is_revenge_home"] = _safe_col(df, "is_revenge_home", 0)
+    # Compute conference_game from team abbreviations
+    NBA_CONF = {
+        "ATL":"E","BOS":"E","BKN":"E","CHA":"E","CHI":"E","CLE":"E",
+        "DET":"E","IND":"E","MIA":"E","MIL":"E","NYK":"E","ORL":"E",
+        "PHI":"E","TOR":"E","WAS":"E",
+        "DAL":"W","DEN":"W","GSW":"W","HOU":"W","LAC":"W","LAL":"W",
+        "MEM":"W","MIN":"W","NOP":"W","OKC":"W","PHX":"W","POR":"W",
+        "SAC":"W","SAS":"W","UTA":"W",
+    }
+    if "home_team" in df.columns and "away_team" in df.columns:
+        feats["conference_game"] = df.apply(
+            lambda r: 1 if NBA_CONF.get(str(r.get("home_team",""))) == NBA_CONF.get(str(r.get("away_team",""))) else 0,
+            axis=1
+        ).values
+    else:
+        feats["conference_game"] = _safe_col(df, "conference_game", 0)
+    
+    # is_revenge_home already computed in GROUP 11 above
     
     # NEW: injuries
     feats["injuries_out_diff"] = _safe_diff(df, "home_players_out", "away_players_out")

@@ -1,26 +1,55 @@
 """
-nba_v27_features_live.py — Compute v27 features from live game data.
+nba_v27_features_live.py — Compute 69 backward-eliminated features from live game data.
 
-Maps ESPN + Supabase + market data → 38 v27 features for prediction.
+Maps ESPN + Supabase + enrichment + referee data -> 69 features for prediction.
 Used by nba_full_predict.py at inference time.
 
-Each feature documents its data source so missing data produces
-a sensible default (0 for diffs, league average for levels).
+Each feature mirrors the EXACT formula from nba_build_features_v27.py (training builder).
 """
 import numpy as np
 import pandas as pd
+from datetime import datetime
 
-# Static: "public" teams that attract betting action
 PUBLIC_TEAMS = {
     "LAL", "LAC", "GSW", "BOS", "NYK", "BKN", "MIA", "CHI",
     "DAL", "PHX", "PHI", "MIL", "OKC", "DEN", "CLE",
 }
+NBA_CONFERENCES = {
+    "ATL":"E","BOS":"E","BKN":"E","CHA":"E","CHI":"E","CLE":"E",
+    "DET":"E","IND":"E","MIA":"E","MIL":"E","NYK":"E","ORL":"E",
+    "PHI":"E","TOR":"E","WAS":"E",
+    "DAL":"W","DEN":"W","GSW":"W","HOU":"W","LAC":"W","LAL":"W",
+    "MEM":"W","MIN":"W","NOP":"W","OKC":"W","PHX":"W","POR":"W",
+    "SAC":"W","SAS":"W","UTA":"W",
+}
+
+FEATURES_69 = [
+    "after_loss_either", "altitude_factor", "ato_ratio_diff",
+    "away_is_public_team", "b2b_diff", "bimodal_diff", "ceiling_diff",
+    "conference_game", "consistency_diff", "days_since_loss_diff",
+    "efg_diff", "elo_diff", "espn_pregame_wp", "espn_pregame_wp_pbp",
+    "floor_diff", "ftpct_diff", "games_diff", "games_last_14_diff",
+    "h2h_avg_margin", "h2h_total_games", "home_b2b", "home_fav",
+    "implied_prob_home", "is_early_season", "is_friday_sat",
+    "is_revenge_home", "lineup_value_diff", "margin_accel_diff",
+    "market_spread", "matchup_efg", "matchup_ft", "matchup_orb",
+    "momentum_halflife_diff", "opp_suppression_diff", "ou_gap",
+    "overround", "pace_control_diff", "pace_leverage", "post_allstar",
+    "post_trade_deadline", "pyth_luck_diff", "pyth_residual_diff",
+    "recovery_diff", "ref_foul_proxy", "ref_home_whistle", "ref_ou_bias",
+    "ref_pace_impact", "reverse_line_movement", "roll_bench_pts_diff",
+    "roll_ft_trip_rate_diff", "roll_max_run_avg", "roll_paint_fg_rate_diff",
+    "roll_paint_pts_diff", "roll_q4_diff", "roll_three_fg_rate_diff",
+    "score_kurtosis_diff", "scoring_entropy_diff", "scoring_hhi_diff",
+    "sharp_spread_signal", "spread_juice_imbalance", "steals_to_diff",
+    "three_pt_regression_diff", "three_value_diff", "threepct_diff",
+    "ts_regression_diff", "turnovers_diff", "vig_uncertainty",
+    "win_aging_diff", "win_pct_diff",
+]
 
 
 def _safe(val, default=0):
-    """Safely convert to float."""
-    if val is None:
-        return default
+    if val is None: return default
     try:
         v = float(val)
         return default if np.isnan(v) else v
@@ -28,412 +57,167 @@ def _safe(val, default=0):
         return default
 
 
-def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = None, league_avg_ts: float = 0.575) -> pd.DataFrame:
-    """
-    Build 38 v27 features from a live game dict.
-
-    Args:
-        game: Dict with keys from nba_full_predict.py's game assembly
-              (ESPN stats, Supabase rolling stats, market data, etc.)
-        enrichment: Dict with nba_team_enrichment data for both teams
-                    {"home": {...}, "away": {...}}
-        ref_profile: Dict with referee profile data (from nba_ref_profiles)
-        league_avg_ts: League average TS% (rolling from nba_historical, default 0.575)
-
-    Returns:
-        Single-row DataFrame with the 38 v27 feature columns.
-    """
-    if enrichment is None:
-        enrichment = {"home": {}, "away": {}}
-    if ref_profile is None:
-        ref_profile = {}
-
-    he = enrichment.get("home", {})
-    ae = enrichment.get("away", {})
-
-    # ── Helpers ──
-    def g(key, default=0):
-        return _safe(game.get(key), default)
-
-    def h_enr(key, default=0):
-        return _safe(he.get(key), default)
-
-    def a_enr(key, default=0):
-        return _safe(ae.get(key), default)
-
-    def ref(key, default=0):
-        return _safe(ref_profile.get(key), default)
-
-    # ── Basic stats from game dict ──
-    h_ppg = g("home_ppg", 110)
-    a_ppg = g("away_ppg", 110)
-    h_opp_ppg = g("home_opp_ppg", 110)
-    a_opp_ppg = g("away_opp_ppg", 110)
-    h_fgpct = g("home_fgpct", 0.46)
-    a_fgpct = g("away_fgpct", 0.46)
-    h_3pct = g("home_threepct", 0.365)
-    a_3pct = g("away_threepct", 0.365)
-    h_ftpct = g("home_ftpct", 0.77)
-    a_ftpct = g("away_ftpct", 0.77)
-    h_steals = g("home_steals", 7.5)
-    a_steals = g("away_steals", 7.5)
-    h_to = g("home_turnovers", 14)
-    a_to = g("away_turnovers", 14)
-    h_wins = g("home_wins", 20)
-    h_losses = g("home_losses", 20)
-    a_wins = g("away_wins", 20)
-    a_losses = g("away_losses", 20)
-
-    h_net_rtg = g("home_net_rtg", 0)
-    a_net_rtg = g("away_net_rtg", 0)
-
-    market_spread = g("market_spread_home", 0)
-    market_total = g("market_ou_total", 0)
-
-    h_rest = g("home_days_rest", 2)
-    a_rest = g("away_days_rest", 2)
-    h_b2b = 1 if h_rest == 0 else 0
-    a_b2b = 1 if a_rest == 0 else 0
-
-    # ── eFG% (from enrichment or approximate from FG%/3P%) ──
-    h_efg = h_enr("efg_pct", 0)
-    a_efg = a_enr("efg_pct", 0)
-    if h_efg == 0:
-        # Approximate: eFG% ≈ FG% + 0.5 * 3P% * 3PA_rate (rough)
-        h_efg = h_fgpct + 0.015  # rough adjustment
-    if a_efg == 0:
-        a_efg = a_fgpct + 0.015
-
-    # Opponent eFG%
-    h_opp_efg = h_enr("opp_efg_pct", 0) or g("home_opp_fgpct", 0.46) + 0.015
-    a_opp_efg = a_enr("opp_efg_pct", 0) or g("away_opp_fgpct", 0.46) + 0.015
-
-    # ═══════════════════════════════════════════════════════════
-    # FEATURE COMPUTATIONS (38 features)
-    # ═══════════════════════════════════════════════════════════
-
-    feats = {}
-
-    # 1. lineup_value_diff — from enrichment (lineup stability × star impact)
-    feats["lineup_value_diff"] = h_enr("lineup_value", 0) - a_enr("lineup_value", 0)
-
-    # 2. win_pct_diff
-    h_wp = h_wins / max(h_wins + h_losses, 1)
-    a_wp = a_wins / max(a_wins + a_losses, 1)
-    feats["win_pct_diff"] = h_wp - a_wp
-
-    # 3. scoring_hhi_diff — Herfindahl index of scoring concentration
-    feats["scoring_hhi_diff"] = h_enr("scoring_hhi", 0.15) - a_enr("scoring_hhi", 0.15)
-
-    # 4. espn_pregame_wp — ESPN pregame win probability for home team
-    feats["espn_pregame_wp"] = g("espn_pregame_wp", 0.5)
-
-    # 5. ceiling_diff — best N-game stretch margin
-    feats["ceiling_diff"] = h_enr("ceiling", 0) - a_enr("ceiling", 0)
-
-    # 6. matchup_efg — home 3FG rate vs away 3FG rate (matches training: home_three_fg_rate diff)
-    _h_3r = g("home_three_fg_rate", 0)
-    _a_3r = g("away_three_fg_rate", 0)
-    if _h_3r or _a_3r:
-        feats["matchup_efg"] = _h_3r - _a_3r
-    else:
-        # Approximate from 3P% — positively correlated with three_fg_rate
-        feats["matchup_efg"] = h_3pct - a_3pct
-
-    # 7. ml_implied_spread — train formula: -8 * log10(implied_prob / (1-implied_prob))
-    #    Priority: pre-computed implied_prob_home → moneyline → 0.5 sentinel
-    _precomp_imp = g("implied_prob_home", 0)
-    home_odds = g("home_moneyline", 0)
-    if _precomp_imp > 0.01:
-        implied_prob = _precomp_imp  # passed from nba_full_predict (most accurate)
-    elif home_odds != 0:
-        if home_odds > 0:
-            implied_prob = 100 / (home_odds + 100)
-        else:
-            implied_prob = abs(home_odds) / (abs(home_odds) + 100)
-    else:
-        implied_prob = 0.5  # sentinel: matches training default (no-moneyline rows)
-
-    if implied_prob > 0.01:
-        feats["ml_implied_spread"] = round(
-            -8 * np.log10(implied_prob / (1 - implied_prob + 0.001) + 0.001), 2
-        )
-    else:
-        feats["ml_implied_spread"] = 0
-
-    # 8. sharp_spread_signal — market consensus signal
-    #    Derived from: spread × juice direction or public% inverse
-    feats["sharp_spread_signal"] = g("sharp_spread_signal", 0)
-
-    # 9. efg_diff — effective field goal percentage differential
-    feats["efg_diff"] = h_efg - a_efg
-
-    # 10. opp_suppression_diff — raw column diff to match train formula
-    # Train: _safe_diff(df, "home_opp_suppression", "away_opp_suppression") — raw units ~5-13
-    _h_sup = g("home_opp_suppression", 0)
-    _a_sup = g("away_opp_suppression", 0)
-    if _h_sup or _a_sup:
-        feats["opp_suppression_diff"] = _h_sup - _a_sup
-    else:
-        # Approximate: opp_suppression correlates with defensive efficiency
-        # Lower opp_ppg = better suppression → invert sign
-        feats["opp_suppression_diff"] = -(h_opp_ppg - a_opp_ppg) * 0.1
-
-    # 11. net_rtg_diff
-    feats["net_rtg_diff"] = h_net_rtg - a_net_rtg
-
-    # 12. steals_to_diff — steals-to-turnover ratio differential
-    h_sto = h_steals / max(h_to, 1)
-    a_sto = a_steals / max(a_to, 1)
-    feats["steals_to_diff"] = h_sto - a_sto
-
-    # 13. threepct_diff
-    feats["threepct_diff"] = h_3pct - a_3pct
-
-    # 14. b2b_diff
-    feats["b2b_diff"] = h_b2b - a_b2b
-
-    # 15. ftpct_diff
-    feats["ftpct_diff"] = h_ftpct - a_ftpct
-
-    # 16. ou_gap — PPG-implied total vs market total
-    # Train formula: home_ppg + away_ppg - mkt_total (positive = teams score more than market)
-    ppg_total = h_ppg + a_ppg
-    feats["ou_gap"] = ppg_total - market_total  # 0 when no market line → matches training sentinel
-
-    # 17. roll_dreb_diff — rolling defensive rebounds differential
-    # Check pre-computed diff first (from nba_game_stats or nba_enrichment)
-    _pre_dreb = game.get("roll_dreb_diff") or game.get("drb_pct_diff")
-    feats["roll_dreb_diff"] = _safe(_pre_dreb, 0) if _pre_dreb is not None else (
-        g("home_roll_dreb", 0) - g("away_roll_dreb", 0)
-    )
-
-    # 18. ts_regression_diff — true shooting regression toward mean
-    #     Uses rolling league avg TS% (from nba_historical last 1-2 seasons)
-    _lg_ts = league_avg_ts  # dynamic, passed from nba_full_predict.py
-    h_ts = h_enr("ts_pct", 0)
-    a_ts = a_enr("ts_pct", 0)
-    # Fallback: check game dict for season stats-derived TS%
-    if h_ts == 0:
-        h_ts = g("home_ts_pct", 0)
-    if a_ts == 0:
-        a_ts = g("away_ts_pct", 0)
-    # Fallback: compute from PPG/FGA/FTA if available
-    if h_ts == 0:
-        _h_fga = g("home_fga", 0)
-        _h_fta = g("home_fta", 0)
-        if _h_fga > 0:
-            _h_tsa = _h_fga + 0.44 * _h_fta
-            h_ts = h_ppg / (2 * _h_tsa) if _h_tsa > 0 else _lg_ts
-    if a_ts == 0:
-        _a_fga = g("away_fga", 0)
-        _a_fta = g("away_fta", 0)
-        if _a_fga > 0:
-            _a_tsa = _a_fga + 0.44 * _a_fta
-            a_ts = a_ppg / (2 * _a_tsa) if _a_tsa > 0 else _lg_ts
-    # Default to league avg if still missing
-    h_ts = h_ts or _lg_ts
-    a_ts = a_ts or _lg_ts
-    feats["ts_regression_diff"] = (h_ts - _lg_ts) - (a_ts - _lg_ts)
-
-    # 19. roll_paint_pts_diff — rolling paint points differential
-    _pre_paint = game.get("roll_paint_pts_diff")
-    feats["roll_paint_pts_diff"] = _safe(_pre_paint, 0) if _pre_paint is not None else (
-        g("home_roll_paint_pts", 0) - g("away_roll_paint_pts", 0)
-    )
-
-    # 20. ref_home_whistle — referee home bias tendency
-    feats["ref_home_whistle"] = ref("home_whistle", 0)
-
-    # 21. opp_ppg_diff
-    feats["opp_ppg_diff"] = h_opp_ppg - a_opp_ppg
-
-    # 22. roll_max_run_avg — average max run in recent games
-    # Train: (home_roll_max_run + away_roll_max_run) / 2 — NOT a diff
-    _pre_run = game.get("roll_max_run_avg")
-    if _pre_run is not None:
-        feats["roll_max_run_avg"] = _safe(_pre_run, 0)
-    else:
-        feats["roll_max_run_avg"] = (g("home_roll_max_run", 0) + g("away_roll_max_run", 0)) / 2
-
-    # 23. away_is_public_team — check multiple key variants
-    _away_ipt = game.get("away_is_public_team")
-    if _away_ipt is not None:
-        feats["away_is_public_team"] = int(_safe(_away_ipt, 0))
-    else:
-        away_abbr = (game.get("away_team_abbr") or game.get("away_abbr") or
-                     game.get("away_team") or game.get("away_team_name", ""))
-        feats["away_is_public_team"] = 1 if str(away_abbr).upper() in PUBLIC_TEAMS else 0
-
-    # 24. away_after_loss — direct column preferred; derive from last_result as fallback
-    _away_al = game.get("away_after_loss")
-    if _away_al is not None:
-        feats["away_after_loss"] = int(_safe(_away_al, 0))
-    else:
-        feats["away_after_loss"] = 1 if g("away_last_result", 0) == -1 else 0
-
-    # 25. games_last_14_diff — games played in last 14 days
-    # FIX: ESPN parser sets home_games_14d, not home_games_last_14
-    feats["games_last_14_diff"] = (
-        g("home_games_last_14", 0) or g("home_games_14d", 0)
-    ) - (
-        g("away_games_last_14", 0) or g("away_games_14d", 0)
-    )
-
-    # 26. h2h_total_games — season head-to-head games played
-    feats["h2h_total_games"] = g("h2h_total_games", 0)
-
-    # 27. three_pt_regression_diff — reads pre-computed column or derives from 3P%
-    _h_3reg = g("home_three_pt_regression", 0)
-    _a_3reg = g("away_three_pt_regression", 0)
-    if _h_3reg or _a_3reg:
-        feats["three_pt_regression_diff"] = _h_3reg - _a_3reg
-    else:
-        # Approximate: regression toward league avg 3P% (0.365)
-        feats["three_pt_regression_diff"] = (h_3pct - 0.365) - (a_3pct - 0.365)
-
-    # 28. games_diff — total games played differential
-    h_games = h_wins + h_losses
-    a_games = a_wins + a_losses
-    feats["games_diff"] = h_games - a_games
-
-    # 29. ref_foul_proxy — referee foul tendency
-    feats["ref_foul_proxy"] = ref("foul_rate", 0) or ref("home_whistle", 0)
-
-    # 30. roll_fast_break_diff — rolling fast break points differential
-    # Train uses home_roll_fast_break_pts / away_roll_fast_break_pts
-    _pre_fb = game.get("roll_fast_break_pts_diff")
-    feats["roll_fast_break_diff"] = _safe(_pre_fb, 0) if _pre_fb is not None else (
-        g("home_roll_fast_break_pts", 0) - g("away_roll_fast_break_pts", 0)
-    )
-
-    # 31. crowd_pct — attendance / venue_capacity (matches training formula)
-    attendance = g("attendance", 0)
-    venue_cap = g("venue_capacity", 19000)
-    if attendance > 0 and venue_cap > 0:
-        feats["crowd_pct"] = min(1.05, attendance / venue_cap)
-    else:
-        feats["crowd_pct"] = g("crowd_pct", 0.9)
-
-    # 32. matchup_to — training formula: (home_net_rtg - away_net_rtg) * 0.02
-    feats["matchup_to"] = (h_net_rtg - a_net_rtg) * 0.02
-
-    # 33. overround — bookmaker margin (sum of implied probs - 1)
-    home_odds = g("home_moneyline", 0)
-    away_odds = g("away_moneyline", 0)
-
-    def ml_to_prob(ml):
-        if ml > 0:
-            return 100 / (ml + 100)
-        elif ml < 0:
-            return abs(ml) / (abs(ml) + 100)
-        return 0.5
-
-    if home_odds != 0 and away_odds != 0:
-        feats["overround"] = ml_to_prob(home_odds) + ml_to_prob(away_odds) - 1
-    else:
-        feats["overround"] = 0
-
-    # 37. spread_juice_imbalance — h_juice - a_juice (matches train formula exactly)
-    #     Source: pickcenter homeTeamOdds.spreadOdds / awayTeamOdds.spreadOdds
-    #     e.g. home=-108, away=-112 → imbalance=+4 (home side cheaper = public on away)
-    # Train formula: h_juice - a_juice where juice = implied prob from spread odds
-    # e.g. -111 → 111/211 = 0.5261, -108 → 108/208 = 0.5192, diff = +0.0069
-    h_sp_odds = g("home_spread_odds", 0)
-    a_sp_odds = g("away_spread_odds", 0)
-    if h_sp_odds != 0 and a_sp_odds != 0:
-        def _odds_to_juice(ml):
-            if ml < 0:
-                return abs(ml) / (abs(ml) + 100)
-            elif ml > 0:
-                return 100 / (ml + 100)
-            return 0.5
-        feats["spread_juice_imbalance"] = round(
-            _odds_to_juice(h_sp_odds) - _odds_to_juice(a_sp_odds), 4
-        )
-    else:
-        feats["spread_juice_imbalance"] = 0
-
-    # 8. sharp_spread_signal — exact training formula: spread_close - spread_open
-    #    spread_close falls back to market_spread when 0 (matches training line 113)
-    #    When no open line exists, spread_open=0 → signal = market_spread (closing line)
-    #    Live fallback: juice approximation when no open/close data at all
-    _spread_open  = g("spread_open", 0)
-    _spread_close = g("spread_close", 0)
-    if _spread_open != 0 and _spread_close != 0:
-        # Real open+close data — compute actual movement
-        feats["sharp_spread_signal"] = round(_spread_close - _spread_open, 2)
-    elif _spread_open != 0:
-        # Have open but close defaulted to market spread
-        feats["sharp_spread_signal"] = round(market_spread - _spread_open, 2)
-    elif feats["spread_juice_imbalance"] != 0:
-        # No line movement data — approximate from juice asymmetry
-        feats["sharp_spread_signal"] = round(-feats["spread_juice_imbalance"] * 0.05, 2)
-    else:
-        # No data — matches training behavior for pre-2022 no-line games
-        feats["sharp_spread_signal"] = 0
-
-    # 38. vig_uncertainty — overall market uncertainty (train: overround - 0.045)
-    feats["vig_uncertainty"] = round(feats["overround"] - 0.045, 4)
-
-    # 34. roll_ft_trip_rate_diff — FT attempt rate differential (rolling)
-    _pre_ft = game.get("roll_ft_trip_rate_diff")
-    feats["roll_ft_trip_rate_diff"] = _safe(_pre_ft, 0) if _pre_ft is not None else (
-        g("home_roll_ft_trip_rate", 0) - g("away_roll_ft_trip_rate", 0)
-    )
-
-    # 35. home_after_loss — direct column preferred; derive from last_result as fallback
-    _home_al = game.get("home_after_loss")
-    if _home_al is not None:
-        feats["home_after_loss"] = int(_safe(_home_al, 0))
-    else:
-        feats["home_after_loss"] = 1 if g("home_last_result", 0) == -1 else 0
-
-    # 36. rest_diff
-    feats["rest_diff"] = h_rest - a_rest
-
-    return pd.DataFrame([feats])
+def _ml_to_prob(ml):
+    ml = _safe(ml, 0)
+    if ml < 0: return abs(ml) / (abs(ml) + 100)
+    if ml > 0: return 100 / (ml + 100)
+    return 0.5
 
 
-# Feature documentation for data sourcing in nba_full_predict.py
-FEATURE_DATA_SOURCES = {
-    # Feature name → (primary source, fallback, game_dict key needed)
-    "lineup_value_diff": ("nba_team_enrichment.lineup_value", "0", "enrichment"),
-    "win_pct_diff": ("ESPN records", "0.5 each", "home_wins/losses, away_wins/losses"),
-    "scoring_hhi_diff": ("nba_team_enrichment.scoring_hhi", "0.15", "enrichment"),
-    "espn_pregame_wp": ("ESPN pregame predictor", "0.5", "espn_pregame_wp"),
-    "ceiling_diff": ("nba_team_enrichment.ceiling", "0", "enrichment"),
-    "matchup_efg": ("enrichment eFG% + opp eFG%", "0", "enrichment"),
-    "ml_implied_spread": ("moneyline implied prob → -8*log10(p/(1-p))", "0", "home_moneyline → espn_pregame_wp fallback"),
-    "sharp_spread_signal": ("precomputed OR approx: -(h_sp_odds - a_sp_odds)*0.05", "0", "sharp_spread_signal OR home/away_spread_odds"),
-    "efg_diff": ("enrichment eFG%", "~FG%", "enrichment or home/away_fgpct"),
-    "opp_suppression_diff": ("home/away_opp_suppression raw col", "0", "home_opp_suppression, away_opp_suppression"),
-    "net_rtg_diff": ("ESPN or enrichment", "0", "home_net_rtg, away_net_rtg"),
-    "steals_to_diff": ("ESPN stats", "0", "home_steals/turnovers"),
-    "threepct_diff": ("ESPN stats", "0", "home_threepct, away_threepct"),
-    "b2b_diff": ("schedule", "0", "home_days_rest, away_days_rest"),
-    "ftpct_diff": ("ESPN stats", "0", "home_ftpct, away_ftpct"),
-    "ou_gap": ("PPG total - market total (positive=teams outscore market)", "0", "market_ou_total, home/away_ppg"),
-    "roll_dreb_diff": ("nba_game_stats rolling", "0", "home_roll_dreb, away_roll_dreb"),
-    "ts_regression_diff": ("enrichment TS%", "0", "enrichment"),
-    "roll_paint_pts_diff": ("nba_game_stats rolling", "0", "home_roll_paint_pts"),
-    "ref_home_whistle": ("nba_ref_profiles", "0", "ref_profile"),
-    "opp_ppg_diff": ("ESPN/Supabase", "0", "home_opp_ppg, away_opp_ppg"),
-    "roll_max_run_avg": ("nba_game_stats rolling — AVERAGE of both teams, not diff", "0", "home_roll_max_run, away_roll_max_run"),
-    "away_is_public_team": ("static list", "0", "away_team_abbr"),
-    "away_after_loss": ("last game result", "0", "away_last_result"),
-    "games_last_14_diff": ("schedule data", "0", "home_games_last_14"),
-    "h2h_total_games": ("nba_game_stats H2H lookup", "0", "h2h_total_games"),
-    "three_pt_regression_diff": ("derived from threepct", "0", "home/away_threepct"),
-    "games_diff": ("ESPN records", "0", "home/away wins+losses"),
-    "ref_foul_proxy": ("nba_ref_profiles", "0", "ref_profile"),
-    "roll_fast_break_diff": ("nba_game_stats rolling", "0", "home_roll_fast_break_pts, away_roll_fast_break_pts"),
-    "crowd_pct": ("ESPN attendance/capacity", "0.9", "crowd_pct"),
-    "matchup_to": ("derived from TO and PPG", "0", "home/away turnovers/ppg"),
-    "overround": ("moneyline odds", "0", "home/away_moneyline"),
-    "roll_ft_trip_rate_diff": ("nba_game_stats rolling", "0", "home_roll_ft_trip_rate"),
-    "home_after_loss": ("last game result", "0", "home_last_result"),
-    "rest_diff": ("schedule data", "0", "home/away_days_rest"),
-    "spread_juice_imbalance": ("pickcenter homeTeamOdds.spreadOdds - awayTeamOdds.spreadOdds", "0", "home_spread_odds, away_spread_odds"),
-    "vig_uncertainty": ("derived: overround - 0.045", "0", "home/away_moneyline"),
-}
+def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.575):
+    if enrichment is None: enrichment = {"home": {}, "away": {}}
+    if ref_profile is None: ref_profile = {}
+    he = enrichment.get("home", {}); ae = enrichment.get("away", {})
+
+    def g(key, default=0): return _safe(game.get(key), default)
+    def h_enr(key, default=0): return _safe(he.get(key), default)
+    def a_enr(key, default=0): return _safe(ae.get(key), default)
+    def ref(key, default=0): return _safe(ref_profile.get(key), default)
+
+    h_ppg=g("home_ppg",110); a_ppg=g("away_ppg",110)
+    h_fgpct=g("home_fgpct",0.46); a_fgpct=g("away_fgpct",0.46)
+    h_3pct=g("home_threepct",0.365); a_3pct=g("away_threepct",0.365)
+    h_ftpct=g("home_ftpct",0.77); a_ftpct=g("away_ftpct",0.77)
+    h_steals=g("home_steals",7.5); a_steals=g("away_steals",7.5)
+    h_to=g("home_turnovers",14); a_to=g("away_turnovers",14)
+    h_wins=g("home_wins",20); h_losses=g("home_losses",20)
+    a_wins=g("away_wins",20); a_losses=g("away_losses",20)
+    h_rest=g("home_days_rest",2); a_rest=g("away_days_rest",2)
+    market_spread=g("market_spread_home",0)
+    home_abbr=game.get("home_team",game.get("home_team_abbr",""))
+    away_abbr=game.get("away_team",game.get("away_team_abbr",""))
+    game_date_str=game.get("game_date","")
+
+    f = {}
+
+    # === MARKET (9) ===
+    f["market_spread"] = market_spread
+    h_ml=g("home_moneyline",0) or g("home_ml",0) or g("home_ml_close",0)
+    a_ml=g("away_moneyline",0) or g("away_ml",0) or g("away_ml_close",0)
+    impl_h=_ml_to_prob(h_ml); impl_a=_ml_to_prob(a_ml)
+    f["implied_prob_home"] = round(impl_h/max(impl_h+impl_a,0.01),4) if (h_ml and a_ml) else 0.5
+    f["overround"] = round(impl_h+impl_a-1,4) if (h_ml and a_ml) else 0
+    f["home_fav"] = 1 if market_spread < 0 else 0
+    mkt_total=g("market_ou_total",0) or g("ou_total",0)
+    f["ou_gap"] = (h_ppg+a_ppg)-mkt_total if mkt_total>0 else 0
+    sm=g("_spread_move",0); so=g("spread_open",0); sc=g("spread_close",0)
+    f["sharp_spread_signal"] = round(sm,2) if sm else (round((sc or market_spread)-so,2) if so else 0)
+    hso=g("home_spread_odds",0); aso=g("away_spread_odds",0)
+    f["spread_juice_imbalance"] = round(_ml_to_prob(hso)-_ml_to_prob(aso),4) if (hso and aso) else 0
+    f["vig_uncertainty"] = round(f["overround"]-0.045,4)
+    mm=g("_ml_move",0)
+    f["reverse_line_movement"] = 1 if (sm and mm and sm*mm>0) else 0
+
+    # === ESPN WP (2) ===
+    f["espn_pregame_wp"] = g("espn_pregame_wp",0.5)
+    f["espn_pregame_wp_pbp"] = g("espn_pregame_wp_pbp",0.5)
+
+    # === TEAM STATS (11) ===
+    f["efg_diff"] = round((h_fgpct+0.2*h_3pct)-(a_fgpct+0.2*a_3pct),4)
+    f["ftpct_diff"] = round(h_ftpct-a_ftpct,4)
+    f["threepct_diff"] = round(h_3pct-a_3pct,4)
+    f["turnovers_diff"] = round(h_to-a_to,2)
+    f["ato_ratio_diff"] = round(g("home_ato_ratio",1.8)-g("away_ato_ratio",1.8),4)
+    f["steals_to_diff"] = round(h_steals/max(h_to,1)-a_steals/max(a_to,1),4)
+    h_wp=h_wins/max(h_wins+h_losses,1); a_wp=a_wins/max(a_wins+a_losses,1)
+    f["win_pct_diff"] = round(h_wp-a_wp,4)
+    f["opp_suppression_diff"] = g("home_opp_suppression",0)-g("away_opp_suppression",0)
+    h3r=g("home_three_fg_rate",0) or h_enr("three_fg_rate",0)
+    a3r=g("away_three_fg_rate",0) or a_enr("three_fg_rate",0)
+    f["three_value_diff"] = round(h3r*(h3r-0.20)-a3r*(a3r-0.20),4)
+    h3reg=g("home_three_pt_regression",0) or (h_3pct-0.365)
+    a3reg=g("away_three_pt_regression",0) or (a_3pct-0.365)
+    f["three_pt_regression_diff"] = round(h3reg-a3reg,4)
+    hts=h_enr("ts_pct",0) or g("home_ts_pct",0)
+    ats=a_enr("ts_pct",0) or g("away_ts_pct",0)
+    f["ts_regression_diff"] = round((hts-league_avg_ts)-(ats-league_avg_ts),4) if (hts>0 and ats>0) else 0
+
+    # === PLAYER/LINEUP (3) ===
+    f["lineup_value_diff"] = h_enr("lineup_value",0)-a_enr("lineup_value",0)
+    f["scoring_hhi_diff"] = h_enr("scoring_hhi",0.15)-a_enr("scoring_hhi",0.15)
+    f["scoring_entropy_diff"] = h_enr("scoring_entropy",0)-a_enr("scoring_entropy",0)
+
+    # === ELO (1) ===
+    f["elo_diff"] = g("elo_diff",0) or (g("home_elo",1500)-g("away_elo",1500))
+
+    # === ENRICHMENT (16) ===
+    f["ceiling_diff"] = h_enr("ceiling",0)-a_enr("ceiling",0)
+    f["floor_diff"] = h_enr("floor",0)-a_enr("floor",0)
+    f["consistency_diff"] = f["ceiling_diff"]-f["floor_diff"]
+    f["bimodal_diff"] = h_enr("bimodal",0)-a_enr("bimodal",0)
+    f["score_kurtosis_diff"] = h_enr("score_kurtosis",0)-a_enr("score_kurtosis",0)
+    f["margin_accel_diff"] = h_enr("margin_accel",0)-a_enr("margin_accel",0)
+    f["momentum_halflife_diff"] = h_enr("momentum_halflife",0)-a_enr("momentum_halflife",0)
+    f["win_aging_diff"] = h_enr("win_aging",0)-a_enr("win_aging",0)
+    f["pyth_residual_diff"] = h_enr("pyth_residual",0)-a_enr("pyth_residual",0)
+    f["pyth_luck_diff"] = h_enr("pyth_luck",0)-a_enr("pyth_luck",0)
+    hsv=h_enr("scoring_var",0) or g("home_scoring_var",0)
+    asv=a_enr("scoring_var",0) or g("away_scoring_var",0)
+    f["pace_control_diff"] = (1/max(hsv,1))-(1/max(asv,1)) if (hsv>0 or asv>0) else 0
+    f["pace_leverage"] = (abs(g("home_opp_suppression",0))+abs(g("away_opp_suppression",0)))*0.01
+    f["recovery_diff"] = h_enr("recovery_idx",0)-a_enr("recovery_idx",0)
+    f["matchup_efg"] = g("home_three_fg_rate",0)-g("away_three_fg_rate",0)
+    hfr=h_enr("ft_trip_rate",0) or g("home_fta_rate",0.28)
+    afr=a_enr("ft_trip_rate",0) or g("away_fta_rate",0.28)
+    f["matchup_ft"] = round(hfr-afr,4)
+    horb=g("home_roll_oreb",0) or h_enr("oreb",0) or g("home_orb_pct",0.25)*40
+    aorb=g("away_roll_oreb",0) or a_enr("oreb",0) or g("away_orb_pct",0.25)*40
+    f["matchup_orb"] = round(horb-aorb,2)
+
+    # === ROLLING PBP (7) ===
+    f["roll_q4_diff"] = g("home_roll_q4",0)-g("away_roll_q4",0)
+    f["roll_paint_pts_diff"] = g("home_roll_paint_pts",0)-g("away_roll_paint_pts",0)
+    f["roll_bench_pts_diff"] = g("home_roll_bench_pts",0)-g("away_roll_bench_pts",0)
+    f["roll_ft_trip_rate_diff"] = g("home_roll_ft_trip_rate",0)-g("away_roll_ft_trip_rate",0)
+    f["roll_three_fg_rate_diff"] = g("home_roll_three_fg_rate",0)-g("away_roll_three_fg_rate",0)
+    f["roll_paint_fg_rate_diff"] = g("home_roll_paint_fg_rate",0)-g("away_roll_paint_fg_rate",0)
+    f["roll_max_run_avg"] = (g("home_roll_max_run",0)+g("away_roll_max_run",0))/2
+
+    # === SCHEDULE (10) ===
+    hb2b=1 if h_rest==0 else 0; ab2b=1 if a_rest==0 else 0
+    f["b2b_diff"]=hb2b-ab2b; f["home_b2b"]=hb2b
+    f["games_last_14_diff"] = (g("home_games_last_14",0) or g("home_games_14d",0))-(g("away_games_last_14",0) or g("away_games_14d",0))
+    ht=h_wins+h_losses; at=a_wins+a_losses
+    f["games_diff"]=ht-at
+    f["days_since_loss_diff"]=g("home_days_since_loss",0)-g("away_days_since_loss",0)
+    f["is_early_season"]=1 if ht<15 else 0
+    try:
+        dt=datetime.strptime(game_date_str,"%Y-%m-%d")
+        f["is_friday_sat"]=1 if dt.weekday() in [4,5] else 0
+        f["post_allstar"]=1 if (dt.month>2 or (dt.month==2 and dt.day>20)) else 0
+        f["post_trade_deadline"]=1 if (dt.month>2 or (dt.month==2 and dt.day>6)) else 0
+    except (ValueError,TypeError):
+        f["is_friday_sat"]=0; f["post_allstar"]=0; f["post_trade_deadline"]=0
+    f["altitude_factor"]=1 if str(home_abbr).upper()=="DEN" else 0
+
+    # === H2H (4) ===
+    f["h2h_total_games"]=g("h2h_total_games",0) or g("_h2h_n",0)
+    f["h2h_avg_margin"]=g("h2h_avg_margin",0)
+    f["is_revenge_home"]=g("is_revenge_home",0)
+    hc=NBA_CONFERENCES.get(str(home_abbr).upper()); ac=NBA_CONFERENCES.get(str(away_abbr).upper())
+    f["conference_game"]=1 if (hc and ac and hc==ac) else g("conference_game",0)
+
+    # === SITUATIONAL (2) ===
+    hal=g("home_after_loss",0); aal=g("away_after_loss",0)
+    if hal==0:
+        hsr=game.get("home_streak_raw","")
+        if isinstance(hsr,str) and hsr.startswith("L"): hal=1
+        elif g("home_last_result",0)==-1: hal=1
+    if aal==0:
+        asr=game.get("away_streak_raw","")
+        if isinstance(asr,str) and asr.startswith("L"): aal=1
+        elif g("away_last_result",0)==-1: aal=1
+    f["after_loss_either"]=1 if (hal or aal) else 0
+    f["away_is_public_team"]=1 if str(away_abbr).upper() in PUBLIC_TEAMS else 0
+
+    # === REFEREE (4) ===
+    f["ref_home_whistle"]=ref("home_whistle",0)
+    f["ref_foul_proxy"]=ref("foul_rate",0) or ref("home_whistle",0)
+    f["ref_ou_bias"]=ref("ou_bias",0)
+    f["ref_pace_impact"]=ref("pace_impact",0)
+
+    # === VALIDATE ===
+    for feat in FEATURES_69:
+        if feat not in f: f[feat]=0
+
+    return pd.DataFrame([f])

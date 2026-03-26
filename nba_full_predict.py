@@ -41,6 +41,14 @@ NBA_ESPN_IDS = {
     "POR":22,"SAC":23,"SAS":24,"TOR":28,"UTA":26,"WAS":27,
 }
 PUBLIC_TEAMS = {"LAL","LAC","GSW","BOS","NYK","BKN","CHI","MIA","PHX","DAL","PHI","MIL","OKC","DEN","CLE"}
+NBA_CONFERENCES = {
+    "ATL":"East","BOS":"East","BKN":"East","CHA":"East","CHI":"East","CLE":"East",
+    "DET":"East","IND":"East","MIA":"East","MIL":"East","NYK":"East","ORL":"East",
+    "PHI":"East","TOR":"East","WAS":"East",
+    "DAL":"West","DEN":"West","GSW":"West","HOU":"West","LAC":"West","LAL":"West",
+    "MEM":"West","MIN":"West","NOP":"West","OKC":"West","PHX":"West","POR":"West",
+    "SAC":"West","SAS":"West","UTA":"West",
+}
 VENUE_CAPACITY = {
     "ATL":16600,"BOS":19156,"BKN":17732,"CHA":19077,"CHI":20917,"CLE":19432,
     "DAL":19200,"DEN":19520,"DET":20332,"GSW":18064,"HOU":18055,"IND":18165,
@@ -314,6 +322,11 @@ def _parse_espn_summary(data, home_abbr, away_abbr, game_date_str=""):
                         margins.append((hs-aws) if ha == home_abbr else (aws-hs))
                     except: pass
             row["_h2h_margin"] = round(np.mean(margins), 1) if margins else 0
+            # h2h_avg_margin: expose without underscore so it flows into row
+            row["h2h_avg_margin"] = row["_h2h_margin"]
+            # is_revenge_home: home team lost last completed meeting
+            if margins:
+                row["is_revenge_home"] = 1 if margins[-1] < 0 else 0
             break
     except Exception as _e:
         diag.append(f"Section 5 (H2H): {_e}")
@@ -583,11 +596,17 @@ def predict_nba_full(game: dict):
             if v is not None and k != "id": row[k] = v
     for k, v in espn.items():
         if v is not None and not k.startswith("_"): row[k] = v
+    # Pass specific underscore keys needed by feature builder
+    for _uk in ["_spread_move", "_ml_move", "_h2h_n", "_venue_cap"]:
+        if _uk in espn and espn[_uk] is not None:
+            row[_uk] = espn[_uk]
 
     row["game_date"] = game_date; row["home_team"] = home_abbr
     row["away_team"] = away_abbr; row["season"] = 2026
     row["home_elo"] = h_elo; row["away_elo"] = a_elo; row["elo_diff"] = h_elo - a_elo
     row["model_ml_home"] = espn.get("home_ml", 0)
+    # Conference game flag
+    row["conference_game"] = 1 if NBA_CONFERENCES.get(home_abbr) == NBA_CONFERENCES.get(away_abbr) else 0
     row.setdefault("market_spread_home", 0); row.setdefault("market_ou_total", 228)
     row.setdefault("espn_pregame_wp", 0.5); row.setdefault("espn_pregame_wp_pbp", 0.5)
 
