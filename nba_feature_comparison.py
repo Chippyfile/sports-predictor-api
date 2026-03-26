@@ -91,7 +91,12 @@ def fetch_game(game_id):
 
 
 def extract_feature_values(prediction):
-    """Extract feature values from SHAP output."""
+    """Extract feature values — prefer all_features (69), fallback to shap (38)."""
+    # all_features has the full 69-feature vector
+    all_feats = prediction.get("all_features", {})
+    if all_feats:
+        return {k: v for k, v in all_feats.items()}
+    # Fallback to shap output (only model's trained features)
     values = {}
     for s in prediction.get("shap", []):
         values[s["feature"]] = s["value"]

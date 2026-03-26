@@ -1012,6 +1012,7 @@ def predict_nba_full(game: dict):
         "disagree": round(abs(margin-(-mkt)), 2) if mkt else 0,
         "shap": shap_out,  # all 38 features
         "feature_coverage": f"{nz}/{len(feature_cols)}",
+        "all_features": {f: round(float(feat_df[f].iloc[0]), 4) for f in feat_df.columns if f in feat_df.columns},
         "model_meta": {
             "n_train": bundle.get("n_games"), "mae_cv": bundle.get("cv_mae"),
             "model_type": bundle.get("model_type", bundle.get("architecture","unknown")),
