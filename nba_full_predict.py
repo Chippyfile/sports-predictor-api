@@ -60,7 +60,7 @@ _ESPN_TEAM_IDS = {
 }
 
 def _fetch_team_season_stats(abbr):
-    """Fetch season shooting stats from ESPN team statistics endpoint."""
+    """Fetch season stats from ESPN team statistics endpoint."""
     team_id = _ESPN_TEAM_IDS.get(abbr.upper())
     if not team_id:
         return {}
@@ -73,20 +73,53 @@ def _fetch_team_season_stats(abbr):
             return {}
         cats = r.json().get("results", {}).get("stats", {}).get("categories", [])
         result = {}
+        # Map ESPN stat names → our column suffixes
+        stat_map = {
+            "threePointPct":          ("threepct", 100),      # divide by 100
+            "threePointFieldGoalPct": ("threepct", 100),
+            "fieldGoalPct":           ("fgpct", 100),
+            "freeThrowPct":           ("ftpct", 100),
+            "avgPoints":              ("ppg", 1),
+            "avgPointsAgainst":       ("opp_ppg", 1),
+            "avgPointsAllowed":       ("opp_ppg", 1),
+            "oppPoints":              ("opp_ppg", 1),
+            "avgSteals":              ("steals", 1),
+            "avgTurnovers":           ("turnovers", 1),
+            "avgTeamTurnovers":       ("turnovers", 1),
+            "avgTotalTurnovers":      ("turnovers", 1),
+            "avgBlocks":              ("blocks", 1),
+            "avgAssists":             ("assists", 1),
+            "avgRebounds":            ("total_reb", 1),
+            "avgOffensiveRebounds":   ("oreb", 1),
+            "avgDefensiveRebounds":   ("dreb", 1),
+            "avgFieldGoalsAttempted":  ("fga", 1),
+            "avgFreeThrowsAttempted":  ("fta", 1),
+            "avgFieldGoalsMade":       ("fgm", 1),
+            "avgThreePointFieldGoalsAttempted": ("three_att", 1),
+            "avgThreePointFieldGoalsMade": ("three_made", 1),
+            "fieldGoalsAttempted":     ("fga", 1),
+            "freeThrowsAttempted":     ("fta", 1),
+        }
         for cat in cats:
             for s in cat.get("stats", []):
                 name = s.get("name", "")
                 val = s.get("value")
-                if val is None:
+                if val is None or name not in stat_map:
                     continue
-                if name == "threePointPct":
-                    result["threepct"] = round(float(val) / 100, 4)
-                elif name == "fieldGoalPct":
-                    result["fgpct"] = round(float(val) / 100, 4)
-                elif name == "avgPoints":
-                    result["ppg"] = round(float(val), 2)
-                elif name == "ftPct":
-                    result["ftpct"] = round(float(val) / 100, 4)
+                col_suffix, divisor = stat_map[name]
+                # First match wins — don't overwrite with alternative stat names
+                result.setdefault(col_suffix, round(float(val) / divisor, 4))
+        # Derive TS% if we have the components: TS% = PPG / (2 * (FGA + 0.44 * FTA))
+        if "ppg" in result and "fga" in result and "fta" in result:
+            tsa = result["fga"] + 0.44 * result["fta"]
+            if tsa > 0:
+                result["ts_pct"] = round(result["ppg"] / (2 * tsa), 4)
+        # Derive three_fg_rate: 3PA / FGA
+        if "three_att" in result and "fga" in result and result["fga"] > 0:
+            result["three_fg_rate"] = round(result["three_att"] / result["fga"], 4)
+        # Derive net_rtg approximation from PPG - OPP_PPG
+        if "ppg" in result and "opp_ppg" in result:
+            result["net_rtg"] = round(result["ppg"] - result["opp_ppg"], 1)
         return result
     except Exception:
         return {}
@@ -583,12 +616,15 @@ def predict_nba_full(game: dict):
     # ── Season stats from ESPN team endpoint FIRST (before df creation) ──
     # FIX: Was after df creation, so enrich_v2 couldn't see accurate shooting stats
     try:
+        _ss_count = 0
         for side, abbr in [("home", home_abbr), ("away", away_abbr)]:
             season_stats = _fetch_team_season_stats(abbr)
             if season_stats:
                 for stat, val in season_stats.items():
                     row[f"{side}_{stat}"] = val
-        diag["sources"].append("Season stats (ESPN)")
+                _ss_count += len(season_stats)
+        if _ss_count:
+            diag["sources"].append(f"Season stats ({_ss_count} stats)")
     except Exception as e:
         diag["warnings"].append(f"season_stats: {e}")
 
@@ -726,8 +762,16 @@ def predict_nba_full(game: dict):
     except Exception as e:
         diag["warnings"].append(f"ref_scraper: {e}")
 
-    # Pass all assembled keys into build_v27_features
-    feat_df = build_v27_features(row, enrichment=enrichment, ref_profile=ref_profile)
+    # Get dynamic league average TS% (rolling 1-2 seasons from nba_historical)
+    _lg_ts = 0.575  # static fallback
+    try:
+        from dynamic_constants import compute_nba_league_averages, NBA_DEFAULT_AVERAGES
+        _nba_avgs = compute_nba_league_averages() or NBA_DEFAULT_AVERAGES
+        _lg_ts = _nba_avgs.get("ts_pct", 0.575)
+    except ImportError:
+        pass
+
+    feat_df = build_v27_features(row, enrichment=enrichment, ref_profile=ref_profile, league_avg_ts=_lg_ts)
 
     # Select only the features this model was trained on
     feature_cols = bundle.get("feature_cols", bundle.get("feature_list", []))

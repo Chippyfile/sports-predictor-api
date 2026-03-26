@@ -28,7 +28,7 @@ def _safe(val, default=0):
         return default
 
 
-def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = None) -> pd.DataFrame:
+def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = None, league_avg_ts: float = 0.575) -> pd.DataFrame:
     """
     Build 38 v27 features from a live game dict.
 
@@ -38,6 +38,7 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
         enrichment: Dict with nba_team_enrichment data for both teams
                     {"home": {...}, "away": {...}}
         ref_profile: Dict with referee profile data (from nba_ref_profiles)
+        league_avg_ts: League average TS% (rolling from nba_historical, default 0.575)
 
     Returns:
         Single-row DataFrame with the 38 v27 feature columns.
@@ -208,9 +209,32 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
     )
 
     # 18. ts_regression_diff — true shooting regression toward mean
-    h_ts = h_enr("ts_pct", 0.56)
-    a_ts = a_enr("ts_pct", 0.56)
-    feats["ts_regression_diff"] = (h_ts - 0.56) - (a_ts - 0.56)
+    #     Uses rolling league avg TS% (from nba_historical last 1-2 seasons)
+    _lg_ts = league_avg_ts  # dynamic, passed from nba_full_predict.py
+    h_ts = h_enr("ts_pct", 0)
+    a_ts = a_enr("ts_pct", 0)
+    # Fallback: check game dict for season stats-derived TS%
+    if h_ts == 0:
+        h_ts = g("home_ts_pct", 0)
+    if a_ts == 0:
+        a_ts = g("away_ts_pct", 0)
+    # Fallback: compute from PPG/FGA/FTA if available
+    if h_ts == 0:
+        _h_fga = g("home_fga", 0)
+        _h_fta = g("home_fta", 0)
+        if _h_fga > 0:
+            _h_tsa = _h_fga + 0.44 * _h_fta
+            h_ts = h_ppg / (2 * _h_tsa) if _h_tsa > 0 else _lg_ts
+    if a_ts == 0:
+        _a_fga = g("away_fga", 0)
+        _a_fta = g("away_fta", 0)
+        if _a_fga > 0:
+            _a_tsa = _a_fga + 0.44 * _a_fta
+            a_ts = a_ppg / (2 * _a_tsa) if _a_tsa > 0 else _lg_ts
+    # Default to league avg if still missing
+    h_ts = h_ts or _lg_ts
+    a_ts = a_ts or _lg_ts
+    feats["ts_regression_diff"] = (h_ts - _lg_ts) - (a_ts - _lg_ts)
 
     # 19. roll_paint_pts_diff — rolling paint points differential
     _pre_paint = game.get("roll_paint_pts_diff")
