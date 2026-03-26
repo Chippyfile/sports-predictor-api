@@ -81,6 +81,10 @@ def fetch_game(game_id):
             data = r.json()
             print(f"    {data.get('home_team', '?')} vs {data.get('away_team', '?')} — "
                   f"coverage {data.get('feature_coverage', '?')}")
+            # Print debug components if present
+            dbg = data.get("debug_components", {})
+            if dbg:
+                print(f"    DEBUG: {dbg}")
             return data
         else:
             print(f"    ERROR: {r.status_code} {r.text[:100]}")

@@ -1013,6 +1013,19 @@ def predict_nba_full(game: dict):
         "shap": shap_out,  # all 38 features
         "feature_coverage": f"{nz}/{len(feature_cols)}",
         "all_features": {f: round(float(feat_df[f].iloc[0]), 4) for f in feat_df.columns if f in feat_df.columns},
+        # Debug: raw component values for zero-feature diagnosis
+        "debug_components": {
+            "home_games_14d": row.get("home_games_14d"),
+            "away_games_14d": row.get("away_games_14d"),
+            "home_games_last_14": row.get("home_games_last_14"),
+            "away_games_last_14": row.get("away_games_last_14"),
+            "home_streak": row.get("home_streak"),
+            "away_streak": row.get("away_streak"),
+            "home_days_since_loss": row.get("home_days_since_loss"),
+            "away_days_since_loss": row.get("away_days_since_loss"),
+            "home_roll_paint_fg_rate": row.get("home_roll_paint_fg_rate"),
+            "away_roll_paint_fg_rate": row.get("away_roll_paint_fg_rate"),
+        },
         "model_meta": {
             "n_train": bundle.get("n_games"), "mae_cv": bundle.get("cv_mae"),
             "model_type": bundle.get("model_type", bundle.get("architecture","unknown")),
