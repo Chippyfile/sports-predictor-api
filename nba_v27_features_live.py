@@ -178,14 +178,10 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     f["roll_ft_trip_rate_diff"] = _roll("home_roll_ft_trip_rate", "away_roll_ft_trip_rate", "roll_ft_trip_rate_diff")
     f["roll_three_fg_rate_diff"] = _roll("home_roll_three_fg_rate", "away_roll_three_fg_rate", "roll_three_fg_rate_diff")
     f["roll_paint_fg_rate_diff"] = _roll("home_roll_paint_fg_rate", "away_roll_paint_fg_rate", "roll_paint_fg_rate_diff")
-    # Fallback: derive from paint_pts / ppg (paint scoring share)
-    if f["roll_paint_fg_rate_diff"] == 0:
-        h_paint = g("home_roll_paint_pts", 0)
-        a_paint = g("away_roll_paint_pts", 0)
-        if h_paint > 0 or a_paint > 0:
-            h_rate = h_paint / max(h_ppg, 80) if h_paint > 0 else 0
-            a_rate = a_paint / max(a_ppg, 80) if a_paint > 0 else 0
-            f["roll_paint_fg_rate_diff"] = round(h_rate - a_rate, 4)
+    # Fallback: derive from already-computed roll_paint_pts_diff / avg_ppg
+    # (nba_game_stats has no paint_fg_rate column, so derive from paint_pts)
+    if f["roll_paint_fg_rate_diff"] == 0 and f.get("roll_paint_pts_diff", 0) != 0:
+        f["roll_paint_fg_rate_diff"] = round(f["roll_paint_pts_diff"] / max((h_ppg + a_ppg) / 2, 80), 4)
     _rmr_h = g("home_roll_max_run", 0); _rmr_a = g("away_roll_max_run", 0)
     f["roll_max_run_avg"] = (_rmr_h + _rmr_a) / 2 if (_rmr_h or _rmr_a) else g("roll_max_run_avg", 0)
 

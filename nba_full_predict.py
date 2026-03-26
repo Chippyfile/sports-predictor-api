@@ -687,6 +687,39 @@ def predict_nba_full(game: dict):
     row.setdefault("home_games_last_14", row.get("home_games_14d", 0))
     row.setdefault("away_games_last_14", row.get("away_games_14d", 0))
 
+    # ── FIX: Real games_last_14 + days_since_loss from Supabase ──
+    # (ESPN lastFiveGames caps at 5, Supabase days_since_loss defaults to 30.0)
+    try:
+        from db import sb_get
+        _cutoff_14d = (datetime.strptime(game_date, "%Y-%m-%d") - timedelta(days=14)).strftime("%Y-%m-%d")
+        _game_dt = datetime.strptime(game_date, "%Y-%m-%d")
+        for _side, _abbr in [("home", home_abbr), ("away", away_abbr)]:
+            # games_last_14: count games in nba_game_stats within 14 days
+            _g14_rows = sb_get("nba_game_stats",
+                f"team_abbr=eq.{_abbr}&game_date=gte.{_cutoff_14d}&game_date=lt.{game_date}"
+                f"&select=game_date&limit=20")
+            if _g14_rows:
+                row[f"{_side}_games_last_14"] = len(_g14_rows)
+                row[f"{_side}_games_14d"] = len(_g14_rows)
+
+            # days_since_loss: find most recent loss (actual_margin < 0)
+            _loss_rows = sb_get("nba_game_stats",
+                f"team_abbr=eq.{_abbr}&actual_margin=lt.0&game_date=lt.{game_date}"
+                f"&order=game_date.desc&select=game_date&limit=1")
+            if _loss_rows:
+                _last_loss = datetime.strptime(_loss_rows[0]["game_date"][:10], "%Y-%m-%d")
+                row[f"{_side}_days_since_loss"] = max(0, (_game_dt - _last_loss).days)
+            else:
+                # No losses found — team hasn't lost (or no data)
+                row[f"{_side}_days_since_loss"] = 30  # cap at 30
+
+            _g14 = row.get(f"{_side}_games_last_14", 0)
+            _dsl = row.get(f"{_side}_days_since_loss", 0)
+            if _g14 or _dsl:
+                diag["sources"].append(f"{_side}: g14={_g14}, dsl={_dsl}")
+    except Exception as _e:
+        diag["warnings"].append(f"games_last_14/days_since_loss: {_e}")
+
     # ═══ 8. Build v27 features ═══
     bundle = _load_model()
     if not bundle: return {"error": "NBA model not found"}
