@@ -579,6 +579,19 @@ def predict_nba_full(game: dict):
         row.setdefault(k, v)
 
     # ═══ 7. Pipeline ═══
+
+    # ── Season stats from ESPN team endpoint FIRST (before df creation) ──
+    # FIX: Was after df creation, so enrich_v2 couldn't see accurate shooting stats
+    try:
+        for side, abbr in [("home", home_abbr), ("away", away_abbr)]:
+            season_stats = _fetch_team_season_stats(abbr)
+            if season_stats:
+                for stat, val in season_stats.items():
+                    row[f"{side}_{stat}"] = val
+        diag["sources"].append("Season stats (ESPN)")
+    except Exception as e:
+        diag["warnings"].append(f"season_stats: {e}")
+
     df = pd.DataFrame([row])
     if "actual_home_score" not in df.columns:
         df["actual_home_score"] = df["pred_home_score"]
@@ -595,16 +608,14 @@ def predict_nba_full(game: dict):
         diag["sources"].append("enrich_v2")
     except Exception as e: diag["warnings"].append(f"enrich_v2: {e}")
 
-    # ── Season stats from ESPN team endpoint (fixes rounded placeholders) ──
-    try:
-        for side, abbr in [("home", home_abbr), ("away", away_abbr)]:
-            season_stats = _fetch_team_season_stats(abbr)
-            if season_stats:
-                for stat, val in season_stats.items():
-                    row[f"{side}_{stat}"] = val
-        diag["sources"].append("Season stats (ESPN)")
-    except Exception as e:
-        diag["warnings"].append(f"season_stats: {e}")
+    # FIX: Sync enriched df columns back to row for build_v27_features
+    # enrich_v2 computes three_pt_regression, opp_suppression, three_fg_rate, etc.
+    # into df, but build_v27_features reads from row dict — so sync them.
+    for col in df.columns:
+        if col not in row:
+            val = df[col].iloc[0]
+            if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                row[col] = val
 
     # ── Streak → after_loss flags ──
     try:
@@ -617,6 +628,10 @@ def predict_nba_full(game: dict):
     except Exception as e:
         diag["warnings"].append(f"streak: {e}")
 
+    # ── FIX: Key aliases (ESPN parser vs feature builder naming) ──
+    row.setdefault("home_games_last_14", row.get("home_games_14d", 0))
+    row.setdefault("away_games_last_14", row.get("away_games_14d", 0))
+
     # ═══ 8. Build v27 features ═══
     bundle = _load_model()
     if not bundle: return {"error": "NBA model not found"}
@@ -624,11 +639,70 @@ def predict_nba_full(game: dict):
 
     from nba_v27_features_live import build_v27_features
 
-    # Enrichment dict (from nba_team_enrichment if available)
-    enrichment = {
-        "home": row.get("_home_enrichment", {}),
-        "away": row.get("_away_enrichment", {}),
-    }
+    # ── FIX: Fetch rolling PBP data BEFORE build_v27_features ──
+    # Was in overrides block (after build), so feature builder always got zeros
+    try:
+        from nba_game_stats import get_rolling_diffs
+        roll_diffs = get_rolling_diffs(home_abbr, away_abbr)
+        if roll_diffs:
+            # Map rolling source keys → row keys that build_v27_features reads
+            _roll_row_map = {
+                "roll_bench_pts_diff":           ("home_roll_bench_pts", "away_roll_bench_pts"),
+                "roll_paint_pts_diff":           ("home_roll_paint_pts", "away_roll_paint_pts"),
+                "roll_fast_break_pts_diff":      ("home_roll_fast_break_pts", "away_roll_fast_break_pts"),
+                "roll_second_chance_pts_diff":   ("home_roll_second_chance_pts", "away_roll_second_chance_pts"),
+                "roll_largest_lead_diff":        ("home_roll_largest_lead", "away_roll_largest_lead"),
+                "roll_q4_scoring_diff":          ("home_roll_q4_scoring", "away_roll_q4_scoring"),
+                "roll_three_fg_rate_diff":       ("home_roll_three_fg_rate", "away_roll_three_fg_rate"),
+                "roll_ft_trip_rate_diff":        ("home_roll_ft_trip_rate", "away_roll_ft_trip_rate"),
+            }
+            # For diffs, put them directly in row for override; for component keys, approximate
+            for src_key, val in roll_diffs.items():
+                if val is not None:
+                    row[src_key] = val  # raw diff available for overrides
+            # roll_max_run_avg is an average, not a diff — put components if available
+            if "roll_max_run_avg" in roll_diffs and roll_diffs["roll_max_run_avg"] is not None:
+                avg = roll_diffs["roll_max_run_avg"]
+                row.setdefault("home_roll_max_run", avg)
+                row.setdefault("away_roll_max_run", avg)
+            # roll_dreb_diff → split into components
+            if "roll_dreb_diff" in roll_diffs and roll_diffs["roll_dreb_diff"] is not None:
+                row["home_roll_dreb"] = roll_diffs["roll_dreb_diff"]  # will be overridden by enrichment if available
+                row.setdefault("away_roll_dreb", 0)
+            diag["sources"].append(f"Rolling PBP ({len(roll_diffs)} features)")
+    except Exception as e:
+        diag["warnings"].append(f"rolling PBP: {e}")
+
+    # ── FIX: Fetch enrichment data BEFORE build_v27_features ──
+    # Was in overrides block (after build), so enrichment dict was always empty
+    enrichment = {"home": {}, "away": {}}
+    try:
+        from nba_enrichment import get_enrichment_diffs
+        enrich_diffs = get_enrichment_diffs(home_abbr, away_abbr)
+        if enrich_diffs:
+            # Put raw diffs into row for overrides
+            for feat, val in enrich_diffs.items():
+                if val is not None:
+                    row[feat] = val
+            # Build per-team enrichment dict for build_v27_features
+            # get_enrichment_diffs returns diffs; try to get per-team data too
+            try:
+                from nba_enrichment import get_team_enrichment
+                h_enr = get_team_enrichment(home_abbr) or {}
+                a_enr = get_team_enrichment(away_abbr) or {}
+                enrichment = {"home": h_enr, "away": a_enr}
+            except ImportError:
+                # Fallback: populate enrichment from diff values where possible
+                if "scoring_entropy_diff" in enrich_diffs:
+                    enrichment["home"]["scoring_hhi"] = 0.15 + (enrich_diffs["scoring_entropy_diff"] or 0) / 2
+                    enrichment["away"]["scoring_hhi"] = 0.15 - (enrich_diffs["scoring_entropy_diff"] or 0) / 2
+                if "drb_pct_diff" in enrich_diffs:
+                    row["home_roll_dreb"] = (enrich_diffs["drb_pct_diff"] or 0)
+                    row.setdefault("away_roll_dreb", 0)
+            diag["sources"].append(f"Enrichment ({len(enrich_diffs)} features)")
+    except Exception as e:
+        diag["warnings"].append(f"enrichment: {e}")
+
     # ── Referee lookup: official.nba.com (posted ~9AM ET) ──
     ref_profile = {}
     try:
@@ -779,47 +853,29 @@ def predict_nba_full(game: dict):
     ov["home_after_loss"] = 1 if h_streak < 0 else 0
     ov["away_after_loss"] = 1 if a_streak < 0 else 0
 
-    # ── Rolling PBP stats from pre-computed nba_team_rolling ──
-    try:
-        from nba_game_stats import get_rolling_diffs
-        roll_diffs = get_rolling_diffs(home_abbr, away_abbr)
-        if roll_diffs:
-            # Map to model feature names
-            feat_map = {
-                "roll_bench_pts_diff": "roll_bench_pts_diff",
-                "roll_paint_pts_diff": "roll_paint_pts_diff",
-                "roll_fast_break_pts_diff": "roll_fast_break_diff",
-                "roll_second_chance_pts_diff": "roll_second_chance_diff",
-                "roll_largest_lead_diff": "roll_largest_lead_diff",
-                "roll_q4_scoring_diff": "roll_q4_diff",
-                "roll_three_fg_rate_diff": "roll_three_fg_rate_diff",
-                "roll_ft_trip_rate_diff": "roll_ft_trip_rate_diff",
-                "roll_max_run_avg": "roll_max_run_avg",
-                "second_chance_x_oreb": "second_chance_x_oreb",
-            }
-            for src, dst in feat_map.items():
-                if src in roll_diffs and roll_diffs[src] is not None:
-                    ov[dst] = roll_diffs[src]
-            diag["sources"].append(f"Rolling PBP ({len(roll_diffs)} features)")
-    except Exception as e:
-        diag["warnings"].append(f"rolling PBP: {e}")
+    # ── Rolling PBP overrides (data already fetched into row before build_v27_features) ──
+    # Map raw diff keys → v27 feature names for feat_df patching
+    _roll_feat_map = {
+        "roll_paint_pts_diff": "roll_paint_pts_diff",
+        "roll_fast_break_pts_diff": "roll_fast_break_diff",
+        "roll_ft_trip_rate_diff": "roll_ft_trip_rate_diff",
+        "roll_max_run_avg": "roll_max_run_avg",
+        "roll_dreb_diff": "roll_dreb_diff",
+    }
+    for src, dst in _roll_feat_map.items():
+        val = row.get(src)
+        if val is not None:
+            ov[dst] = val
 
-    # ── Enrichment features from pre-computed nba_team_enrichment ──
-    try:
-        from nba_enrichment import get_enrichment_diffs
-        enrich_diffs = get_enrichment_diffs(home_abbr, away_abbr)
-        if enrich_diffs:
-            for feat, val in enrich_diffs.items():
-                if val is not None:
-                    ov[feat] = val
-            # Map enrichment keys → v27 feature names
-            if "scoring_entropy_diff" in enrich_diffs:
-                ov["scoring_hhi_diff"] = enrich_diffs["scoring_entropy_diff"]
-            if "drb_pct_diff" in enrich_diffs:
-                ov["roll_dreb_diff"] = enrich_diffs["drb_pct_diff"]
-            diag["sources"].append(f"Enrichment ({len(enrich_diffs)} features)")
-    except Exception as e:
-        diag["warnings"].append(f"enrichment: {e}")
+    # ── Enrichment overrides (data already fetched into row before build_v27_features) ──
+    _enrich_map = {
+        "scoring_entropy_diff": "scoring_hhi_diff",
+        "drb_pct_diff": "roll_dreb_diff",
+    }
+    for src, dst in _enrich_map.items():
+        val = row.get(src)
+        if val is not None:
+            ov[dst] = val
 
     # ── Interaction features ──
     # clutch_x_tight_spread: Q4 scoring diff (clutch proxy) × tight spread indicator

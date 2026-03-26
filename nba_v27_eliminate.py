@@ -120,6 +120,8 @@ def cv_score(learner, X, y, n_splits=10, name="", scale=True):
 
 def ats_eval_detailed(X, y_margin, spreads, n_folds=10, model_type="catboost"):
     """Walk-forward ATS evaluation at multiple thresholds."""
+    if isinstance(X, np.ndarray) and X.ndim == 1:
+        X = X.reshape(-1, 1)
     n = len(X)
     fold_size = n // (n_folds + 2)
     min_train = fold_size * 3
@@ -129,14 +131,17 @@ def ats_eval_detailed(X, y_margin, spreads, n_folds=10, model_type="catboost"):
     for fold in range(n_folds):
         ts = min_train + fold * fold_size
         te = min(ts + fold_size, n)
-        if te > n: break
+        if ts >= n or te <= ts:
+            break
 
         sc = StandardScaler()
         X_tr = sc.fit_transform(X[:ts])
         X_te = sc.transform(X[ts:te])
 
-        if model_type == "catboost":
-            mdl = CatBoostRegressor(depth=4, iterations=500, learning_rate=0.05,
+        # CatBoost needs 2+ features; use Lasso for small sets
+        n_feats = X_tr.shape[1] if len(X_tr.shape) > 1 else 1
+        if model_type == "catboost" and n_feats >= 2:
+            mdl = CatBoostRegressor(depth=min(4, n_feats), iterations=500, learning_rate=0.05,
                                      l2_leaf_reg=3, random_seed=42, verbose=0)
         else:
             mdl = Lasso(alpha=0.1, max_iter=5000)

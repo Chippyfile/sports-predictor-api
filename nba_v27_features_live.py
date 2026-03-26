@@ -131,7 +131,13 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
     feats["ceiling_diff"] = h_enr("ceiling", 0) - a_enr("ceiling", 0)
 
     # 6. matchup_efg — home 3FG rate vs away 3FG rate (matches training: home_three_fg_rate diff)
-    feats["matchup_efg"] = g("home_three_fg_rate", 0) - g("away_three_fg_rate", 0)
+    _h_3r = g("home_three_fg_rate", 0)
+    _a_3r = g("away_three_fg_rate", 0)
+    if _h_3r or _a_3r:
+        feats["matchup_efg"] = _h_3r - _a_3r
+    else:
+        # Approximate from 3P% — positively correlated with three_fg_rate
+        feats["matchup_efg"] = h_3pct - a_3pct
 
     # 7. ml_implied_spread — train formula: -8 * log10(implied_prob / (1-implied_prob))
     #    Priority: pre-computed implied_prob_home → moneyline → 0.5 sentinel
@@ -163,7 +169,14 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
 
     # 10. opp_suppression_diff — raw column diff to match train formula
     # Train: _safe_diff(df, "home_opp_suppression", "away_opp_suppression") — raw units ~5-13
-    feats["opp_suppression_diff"] = g("home_opp_suppression", 0) - g("away_opp_suppression", 0)
+    _h_sup = g("home_opp_suppression", 0)
+    _a_sup = g("away_opp_suppression", 0)
+    if _h_sup or _a_sup:
+        feats["opp_suppression_diff"] = _h_sup - _a_sup
+    else:
+        # Approximate: opp_suppression correlates with defensive efficiency
+        # Lower opp_ppg = better suppression → invert sign
+        feats["opp_suppression_diff"] = -(h_opp_ppg - a_opp_ppg) * 0.1
 
     # 11. net_rtg_diff
     feats["net_rtg_diff"] = h_net_rtg - a_net_rtg
@@ -188,7 +201,11 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
     feats["ou_gap"] = ppg_total - market_total  # 0 when no market line → matches training sentinel
 
     # 17. roll_dreb_diff — rolling defensive rebounds differential
-    feats["roll_dreb_diff"] = g("home_roll_dreb", 0) - g("away_roll_dreb", 0)
+    # Check pre-computed diff first (from nba_game_stats or nba_enrichment)
+    _pre_dreb = game.get("roll_dreb_diff") or game.get("drb_pct_diff")
+    feats["roll_dreb_diff"] = _safe(_pre_dreb, 0) if _pre_dreb is not None else (
+        g("home_roll_dreb", 0) - g("away_roll_dreb", 0)
+    )
 
     # 18. ts_regression_diff — true shooting regression toward mean
     h_ts = h_enr("ts_pct", 0.56)
@@ -196,7 +213,10 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
     feats["ts_regression_diff"] = (h_ts - 0.56) - (a_ts - 0.56)
 
     # 19. roll_paint_pts_diff — rolling paint points differential
-    feats["roll_paint_pts_diff"] = g("home_roll_paint_pts", 0) - g("away_roll_paint_pts", 0)
+    _pre_paint = game.get("roll_paint_pts_diff")
+    feats["roll_paint_pts_diff"] = _safe(_pre_paint, 0) if _pre_paint is not None else (
+        g("home_roll_paint_pts", 0) - g("away_roll_paint_pts", 0)
+    )
 
     # 20. ref_home_whistle — referee home bias tendency
     feats["ref_home_whistle"] = ref("home_whistle", 0)
@@ -206,7 +226,11 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
 
     # 22. roll_max_run_avg — average max run in recent games
     # Train: (home_roll_max_run + away_roll_max_run) / 2 — NOT a diff
-    feats["roll_max_run_avg"] = (g("home_roll_max_run", 0) + g("away_roll_max_run", 0)) / 2
+    _pre_run = game.get("roll_max_run_avg")
+    if _pre_run is not None:
+        feats["roll_max_run_avg"] = _safe(_pre_run, 0)
+    else:
+        feats["roll_max_run_avg"] = (g("home_roll_max_run", 0) + g("away_roll_max_run", 0)) / 2
 
     # 23. away_is_public_team — check multiple key variants
     _away_ipt = game.get("away_is_public_team")
@@ -225,13 +249,24 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
         feats["away_after_loss"] = 1 if g("away_last_result", 0) == -1 else 0
 
     # 25. games_last_14_diff — games played in last 14 days
-    feats["games_last_14_diff"] = g("home_games_last_14", 6) - g("away_games_last_14", 6)
+    # FIX: ESPN parser sets home_games_14d, not home_games_last_14
+    feats["games_last_14_diff"] = (
+        g("home_games_last_14", 0) or g("home_games_14d", 0)
+    ) - (
+        g("away_games_last_14", 0) or g("away_games_14d", 0)
+    )
 
     # 26. h2h_total_games — season head-to-head games played
     feats["h2h_total_games"] = g("h2h_total_games", 0)
 
-    # 27. three_pt_regression_diff — reads pre-computed column (matches training)
-    feats["three_pt_regression_diff"] = g("home_three_pt_regression", 0) - g("away_three_pt_regression", 0)
+    # 27. three_pt_regression_diff — reads pre-computed column or derives from 3P%
+    _h_3reg = g("home_three_pt_regression", 0)
+    _a_3reg = g("away_three_pt_regression", 0)
+    if _h_3reg or _a_3reg:
+        feats["three_pt_regression_diff"] = _h_3reg - _a_3reg
+    else:
+        # Approximate: regression toward league avg 3P% (0.365)
+        feats["three_pt_regression_diff"] = (h_3pct - 0.365) - (a_3pct - 0.365)
 
     # 28. games_diff — total games played differential
     h_games = h_wins + h_losses
@@ -243,7 +278,10 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
 
     # 30. roll_fast_break_diff — rolling fast break points differential
     # Train uses home_roll_fast_break_pts / away_roll_fast_break_pts
-    feats["roll_fast_break_diff"] = g("home_roll_fast_break_pts", 0) - g("away_roll_fast_break_pts", 0)
+    _pre_fb = game.get("roll_fast_break_pts_diff")
+    feats["roll_fast_break_diff"] = _safe(_pre_fb, 0) if _pre_fb is not None else (
+        g("home_roll_fast_break_pts", 0) - g("away_roll_fast_break_pts", 0)
+    )
 
     # 31. crowd_pct — attendance / venue_capacity (matches training formula)
     attendance = g("attendance", 0)
@@ -315,7 +353,10 @@ def build_v27_features(game: dict, enrichment: dict = None, ref_profile: dict = 
     feats["vig_uncertainty"] = round(feats["overround"] - 0.045, 4)
 
     # 34. roll_ft_trip_rate_diff — FT attempt rate differential (rolling)
-    feats["roll_ft_trip_rate_diff"] = g("home_roll_ft_trip_rate", 0) - g("away_roll_ft_trip_rate", 0)
+    _pre_ft = game.get("roll_ft_trip_rate_diff")
+    feats["roll_ft_trip_rate_diff"] = _safe(_pre_ft, 0) if _pre_ft is not None else (
+        g("home_roll_ft_trip_rate", 0) - g("away_roll_ft_trip_rate", 0)
+    )
 
     # 35. home_after_loss — direct column preferred; derive from last_result as fallback
     _home_al = game.get("home_after_loss")
