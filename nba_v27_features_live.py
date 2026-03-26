@@ -178,6 +178,14 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     f["roll_ft_trip_rate_diff"] = _roll("home_roll_ft_trip_rate", "away_roll_ft_trip_rate", "roll_ft_trip_rate_diff")
     f["roll_three_fg_rate_diff"] = _roll("home_roll_three_fg_rate", "away_roll_three_fg_rate", "roll_three_fg_rate_diff")
     f["roll_paint_fg_rate_diff"] = _roll("home_roll_paint_fg_rate", "away_roll_paint_fg_rate", "roll_paint_fg_rate_diff")
+    # Fallback: derive from paint_pts / ppg (paint scoring share)
+    if f["roll_paint_fg_rate_diff"] == 0:
+        h_paint = g("home_roll_paint_pts", 0)
+        a_paint = g("away_roll_paint_pts", 0)
+        if h_paint > 0 or a_paint > 0:
+            h_rate = h_paint / max(h_ppg, 80) if h_paint > 0 else 0
+            a_rate = a_paint / max(a_ppg, 80) if a_paint > 0 else 0
+            f["roll_paint_fg_rate_diff"] = round(h_rate - a_rate, 4)
     _rmr_h = g("home_roll_max_run", 0); _rmr_a = g("away_roll_max_run", 0)
     f["roll_max_run_avg"] = (_rmr_h + _rmr_a) / 2 if (_rmr_h or _rmr_a) else g("roll_max_run_avg", 0)
 
@@ -185,24 +193,35 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     hb2b=1 if h_rest==0 else 0; ab2b=1 if a_rest==0 else 0
     f["b2b_diff"]=hb2b-ab2b; f["home_b2b"]=hb2b
 
-    # games_last_14_diff — multiple key names in pipeline
-    _g14h = g("home_games_last_14", 0) or g("home_games_14d", 0)
-    _g14a = g("away_games_last_14", 0) or g("away_games_14d", 0)
-    f["games_last_14_diff"] = _g14h - _g14a if (_g14h or _g14a) else g("games_last_14_diff", 0)
+    # games_last_14_diff — ESPN lastFiveGames only returns 5, so games_14d caps at 5
+    # Prefer games_14d (from ESPN schedule parser) over games_last_14 (from Supabase, often 0)
+    _g14h = g("home_games_14d", 0)
+    _g14a = g("away_games_14d", 0)
+    if _g14h == 0: _g14h = g("home_games_last_14", 0)
+    if _g14a == 0: _g14a = g("away_games_last_14", 0)
+    # If still both same (e.g. both 5 from ESPN cap), check overrides
+    if _g14h == _g14a and _g14h > 0:
+        f["games_last_14_diff"] = g("games_last_14_diff", 0)  # use pre-computed override if available
+    else:
+        f["games_last_14_diff"] = _g14h - _g14a
 
     ht=h_wins+h_losses; at=a_wins+a_losses
     f["games_diff"]=ht-at
 
-    # days_since_loss_diff — derive from streak if not directly available
+    # days_since_loss_diff — Supabase often stores defaults (30.0)
+    # Derive from streak data which is always fresh from ESPN
     _dsl_h = g("home_days_since_loss", 0)
     _dsl_a = g("away_days_since_loss", 0)
-    if _dsl_h == 0 and _dsl_a == 0:
-        # Approximate from streak: positive streak → days_since_loss grows
-        # A team on a 5-game win streak has ~10-12 days since last loss
-        h_streak = g("home_streak", 0)
-        a_streak = g("away_streak", 0)
-        if h_streak > 0: _dsl_h = h_streak * 2.2  # ~2.2 days per game
-        if a_streak > 0: _dsl_a = a_streak * 2.2
+    h_streak = g("home_streak", 0)
+    a_streak = g("away_streak", 0)
+    # Detect stale defaults: if both are identical non-zero (e.g. 30.0), or if streak contradicts
+    _stale = (_dsl_h == _dsl_a and _dsl_h > 0) or \
+             (h_streak < 0 and _dsl_h > 5) or \
+             (a_streak < 0 and _dsl_a > 5)
+    if _stale or (_dsl_h == 0 and _dsl_a == 0):
+        # Derive from streak: negative streak = just lost (0 days), positive = streak * ~2.2 days
+        _dsl_h = 0 if h_streak < 0 else max(h_streak * 2.2, 0)
+        _dsl_a = 0 if a_streak < 0 else max(a_streak * 2.2, 0)
     f["days_since_loss_diff"] = round(_dsl_h - _dsl_a, 1)
 
     f["is_early_season"]=1 if ht<15 else 0
