@@ -165,21 +165,46 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     f["matchup_orb"] = round(horb-aorb,2)
 
     # === ROLLING PBP (7) ===
-    f["roll_q4_diff"] = g("home_roll_q4",0)-g("away_roll_q4",0)
-    f["roll_paint_pts_diff"] = g("home_roll_paint_pts",0)-g("away_roll_paint_pts",0)
-    f["roll_bench_pts_diff"] = g("home_roll_bench_pts",0)-g("away_roll_bench_pts",0)
-    f["roll_ft_trip_rate_diff"] = g("home_roll_ft_trip_rate",0)-g("away_roll_ft_trip_rate",0)
-    f["roll_three_fg_rate_diff"] = g("home_roll_three_fg_rate",0)-g("away_roll_three_fg_rate",0)
-    f["roll_paint_fg_rate_diff"] = g("home_roll_paint_fg_rate",0)-g("away_roll_paint_fg_rate",0)
-    f["roll_max_run_avg"] = (g("home_roll_max_run",0)+g("away_roll_max_run",0))/2
+    # Builder reads component keys (home_roll_X, away_roll_X)
+    # But get_rolling_diffs() puts pre-computed diffs in row — check both
+    def _roll(h_key, a_key, diff_key):
+        """Component diff if either side has data, else pre-computed diff."""
+        h = g(h_key, 0); a = g(a_key, 0)
+        if h != 0 or a != 0: return h - a
+        return g(diff_key, 0)
+    f["roll_q4_diff"] = _roll("home_roll_q4", "away_roll_q4", "roll_q4_scoring_diff")
+    f["roll_paint_pts_diff"] = _roll("home_roll_paint_pts", "away_roll_paint_pts", "roll_paint_pts_diff")
+    f["roll_bench_pts_diff"] = _roll("home_roll_bench_pts", "away_roll_bench_pts", "roll_bench_pts_diff")
+    f["roll_ft_trip_rate_diff"] = _roll("home_roll_ft_trip_rate", "away_roll_ft_trip_rate", "roll_ft_trip_rate_diff")
+    f["roll_three_fg_rate_diff"] = _roll("home_roll_three_fg_rate", "away_roll_three_fg_rate", "roll_three_fg_rate_diff")
+    f["roll_paint_fg_rate_diff"] = _roll("home_roll_paint_fg_rate", "away_roll_paint_fg_rate", "roll_paint_fg_rate_diff")
+    _rmr_h = g("home_roll_max_run", 0); _rmr_a = g("away_roll_max_run", 0)
+    f["roll_max_run_avg"] = (_rmr_h + _rmr_a) / 2 if (_rmr_h or _rmr_a) else g("roll_max_run_avg", 0)
 
     # === SCHEDULE (10) ===
     hb2b=1 if h_rest==0 else 0; ab2b=1 if a_rest==0 else 0
     f["b2b_diff"]=hb2b-ab2b; f["home_b2b"]=hb2b
-    f["games_last_14_diff"] = (g("home_games_last_14",0) or g("home_games_14d",0))-(g("away_games_last_14",0) or g("away_games_14d",0))
+
+    # games_last_14_diff — multiple key names in pipeline
+    _g14h = g("home_games_last_14", 0) or g("home_games_14d", 0)
+    _g14a = g("away_games_last_14", 0) or g("away_games_14d", 0)
+    f["games_last_14_diff"] = _g14h - _g14a if (_g14h or _g14a) else g("games_last_14_diff", 0)
+
     ht=h_wins+h_losses; at=a_wins+a_losses
     f["games_diff"]=ht-at
-    f["days_since_loss_diff"]=g("home_days_since_loss",0)-g("away_days_since_loss",0)
+
+    # days_since_loss_diff — derive from streak if not directly available
+    _dsl_h = g("home_days_since_loss", 0)
+    _dsl_a = g("away_days_since_loss", 0)
+    if _dsl_h == 0 and _dsl_a == 0:
+        # Approximate from streak: positive streak → days_since_loss grows
+        # A team on a 5-game win streak has ~10-12 days since last loss
+        h_streak = g("home_streak", 0)
+        a_streak = g("away_streak", 0)
+        if h_streak > 0: _dsl_h = h_streak * 2.2  # ~2.2 days per game
+        if a_streak > 0: _dsl_a = a_streak * 2.2
+    f["days_since_loss_diff"] = round(_dsl_h - _dsl_a, 1)
+
     f["is_early_season"]=1 if ht<15 else 0
     try:
         dt=datetime.strptime(game_date_str,"%Y-%m-%d")
@@ -203,18 +228,24 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
         hsr=game.get("home_streak_raw","")
         if isinstance(hsr,str) and hsr.startswith("L"): hal=1
         elif g("home_last_result",0)==-1: hal=1
+        elif g("home_streak",0)<0: hal=1  # negative streak = on losing streak
     if aal==0:
         asr=game.get("away_streak_raw","")
         if isinstance(asr,str) and asr.startswith("L"): aal=1
         elif g("away_last_result",0)==-1: aal=1
-    f["after_loss_either"]=1 if (hal or aal) else 0
+        elif g("away_streak",0)<0: aal=1
+    f["after_loss_either"]=1 if (hal or aal) else g("after_loss_either",0)
     f["away_is_public_team"]=1 if str(away_abbr).upper() in PUBLIC_TEAMS else 0
 
     # === REFEREE (4) ===
     f["ref_home_whistle"]=ref("home_whistle",0)
     f["ref_foul_proxy"]=ref("foul_rate",0) or ref("home_whistle",0)
-    f["ref_ou_bias"]=ref("ou_bias",0)
-    f["ref_pace_impact"]=ref("pace_impact",0)
+    # ref_ou_bias: refs with higher home_whistle tend to call more fouls → higher scoring
+    # Approximate: ou_bias ≈ home_whistle * 2 (more fouls = more FTs = higher totals)
+    f["ref_ou_bias"]=ref("ou_bias",0) or round(ref("home_whistle",0) * 2.0, 4)
+    # ref_pace_impact: refs who call more fouls slow the game down slightly
+    # Approximate: pace_impact ≈ -home_whistle * 0.5 (more whistles = slower pace)
+    f["ref_pace_impact"]=ref("pace_impact",0) or round(ref("home_whistle",0) * -0.5, 4)
 
     # === VALIDATE ===
     for feat in FEATURES_69:
