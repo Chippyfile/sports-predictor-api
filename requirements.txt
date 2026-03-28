@@ -44,3 +44,4 @@ xgboost==3.2.0
 # redeploy 1773007329
 beautifulsoup4
 numpy==1.26.4
+lightgbm
