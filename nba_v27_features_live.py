@@ -138,7 +138,17 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     f["scoring_entropy_diff"] = h_enr("scoring_entropy",0)-a_enr("scoring_entropy",0)
 
     # === ELO (1) ===
-    f["elo_diff"] = g("elo_diff",0) or (g("home_elo",1500)-g("away_elo",1500))
+    # CRITICAL: Training uses home_form/away_form (range -1 to +1, diff -2 to +2)
+    # NOT raw Elo ratings (range 1200-1800, diff -400 to +400)
+    # home_form comes from ESPN form_l5 score
+    h_form = g("home_form", 0)
+    a_form = g("away_form", 0)
+    if h_form != 0 or a_form != 0:
+        f["elo_diff"] = round(h_form - a_form, 4)
+    else:
+        # Fallback: normalize raw elo_diff to training scale (-2 to +2)
+        raw_elo = g("elo_diff", 0) or (g("home_elo", 1500) - g("away_elo", 1500))
+        f["elo_diff"] = round(np.clip(raw_elo / 200, -2, 2), 4)
 
     # === ENRICHMENT (16) ===
     f["ceiling_diff"] = h_enr("ceiling",0)-a_enr("ceiling",0)
@@ -265,5 +275,48 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     # === VALIDATE ===
     for feat in FEATURES_69:
         if feat not in f: f[feat]=0
+
+    # === TRAINING RANGE CLAMP (safety net for scale mismatches) ===
+    # Clips features to training min/max to prevent nonsense predictions.
+    # Only features with known scale issues are clamped tightly;
+    # others get wide 3x range to allow natural variation.
+    TRAIN_RANGES = {
+        "elo_diff": (-2.5, 2.5),
+        "pyth_luck_diff": (-0.35, 0.35),
+        "pyth_residual_diff": (-0.25, 0.25),
+        "win_pct_diff": (-1.0, 1.0),
+        "efg_diff": (-0.15, 0.15),
+        "ftpct_diff": (-0.25, 0.25),
+        "threepct_diff": (-0.15, 0.15),
+        "espn_pregame_wp": (0.01, 0.99),
+        "espn_pregame_wp_pbp": (0.01, 0.99),
+        "implied_prob_home": (0.0, 1.0),
+        "overround": (-0.05, 0.15),
+        "lineup_value_diff": (-100, 100),
+        "momentum_halflife_diff": (-70, 70),
+        "opp_suppression_diff": (-150, 150),
+        "ceiling_diff": (-50, 50),
+        "floor_diff": (-50, 50),
+        "consistency_diff": (-50, 50),
+        "margin_accel_diff": (-60, 60),
+        "score_kurtosis_diff": (-5, 5),
+        "bimodal_diff": (-1, 1),
+        "scoring_hhi_diff": (-0.5, 0.5),
+        "scoring_entropy_diff": (-1, 1),
+        "pace_control_diff": (-0.5, 0.5),
+        "pace_leverage": (0, 2),
+        "recovery_diff": (-2, 2),
+        "ts_regression_diff": (-0.15, 0.15),
+        "three_pt_regression_diff": (-0.15, 0.15),
+        "three_value_diff": (-0.15, 0.15),
+        "steals_to_diff": (-0.5, 0.5),
+        "roll_max_run_avg": (0, 15),
+        "roll_paint_fg_rate_diff": (-0.3, 0.3),
+        "roll_ft_trip_rate_diff": (-0.2, 0.2),
+        "roll_three_fg_rate_diff": (-0.15, 0.15),
+    }
+    for feat, (lo, hi) in TRAIN_RANGES.items():
+        if feat in f:
+            f[feat] = float(np.clip(f[feat], lo, hi))
 
     return pd.DataFrame([f])
