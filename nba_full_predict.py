@@ -596,10 +596,6 @@ def predict_nba_full(game: dict):
             if v is not None and k != "id": row[k] = v
     for k, v in espn.items():
         if v is not None and not k.startswith("_"): row[k] = v
-    # Pass specific underscore keys needed by feature builder
-    for _uk in ["_spread_move", "_ml_move", "_h2h_n", "_venue_cap"]:
-        if _uk in espn and espn[_uk] is not None:
-            row[_uk] = espn[_uk]
 
     row["game_date"] = game_date; row["home_team"] = home_abbr
     row["away_team"] = away_abbr; row["season"] = 2026
@@ -686,39 +682,6 @@ def predict_nba_full(game: dict):
     # ── FIX: Key aliases (ESPN parser vs feature builder naming) ──
     row.setdefault("home_games_last_14", row.get("home_games_14d", 0))
     row.setdefault("away_games_last_14", row.get("away_games_14d", 0))
-
-    # ── FIX: Real games_last_14 + days_since_loss from Supabase ──
-    # (ESPN lastFiveGames caps at 5, Supabase days_since_loss defaults to 30.0)
-    try:
-        from db import sb_get
-        _cutoff_14d = (datetime.strptime(game_date, "%Y-%m-%d") - timedelta(days=14)).strftime("%Y-%m-%d")
-        _game_dt = datetime.strptime(game_date, "%Y-%m-%d")
-        for _side, _abbr in [("home", home_abbr), ("away", away_abbr)]:
-            # games_last_14: count games in nba_game_stats within 14 days
-            _g14_rows = sb_get("nba_game_stats",
-                f"team_abbr=eq.{_abbr}&game_date=gte.{_cutoff_14d}&game_date=lt.{game_date}"
-                f"&select=game_date&limit=20")
-            if _g14_rows:
-                row[f"{_side}_games_last_14"] = len(_g14_rows)
-                row[f"{_side}_games_14d"] = len(_g14_rows)
-
-            # days_since_loss: find most recent loss (actual_margin < 0)
-            _loss_rows = sb_get("nba_game_stats",
-                f"team_abbr=eq.{_abbr}&actual_margin=lt.0&game_date=lt.{game_date}"
-                f"&order=game_date.desc&select=game_date&limit=1")
-            if _loss_rows:
-                _last_loss = datetime.strptime(_loss_rows[0]["game_date"][:10], "%Y-%m-%d")
-                row[f"{_side}_days_since_loss"] = max(0, (_game_dt - _last_loss).days)
-            else:
-                # No losses found — team hasn't lost (or no data)
-                row[f"{_side}_days_since_loss"] = 30  # cap at 30
-
-            _g14 = row.get(f"{_side}_games_last_14", 0)
-            _dsl = row.get(f"{_side}_days_since_loss", 0)
-            if _g14 or _dsl:
-                diag["sources"].append(f"{_side}: g14={_g14}, dsl={_dsl}")
-    except Exception as _e:
-        diag["warnings"].append(f"games_last_14/days_since_loss: {_e}")
 
     # ═══ 8. Build v27 features ═══
     bundle = _load_model()
@@ -890,10 +853,16 @@ def predict_nba_full(game: dict):
         ov["lineup_value_diff"] = round(h_star*h_fg*2 - a_star*a_fg*2, 2)
     ov["star_minutes_fatigue_diff"] = round(h_mpg - a_mpg, 2)
 
-    # ── Elo (FIX: builder drops elo_diff; override directly) ──
-    elo_d = h_elo - a_elo
-    ov["elo_diff"] = round(elo_d, 1)
+    # ── Elo (FIXED: training uses home_form/away_form, not raw Elo) ──
+    h_form = float(row.get("home_form", 0))
+    a_form = float(row.get("away_form", 0))
+    if h_form != 0 or a_form != 0:
+        ov["elo_diff"] = round(h_form - a_form, 4)
+    else:
+        # Fallback: normalize raw elo to training scale (-2 to +2)
+        ov["elo_diff"] = round(float(np.clip((h_elo - a_elo) / 200, -2, 2)), 4)
     # elo_market_residual: elo-implied prob minus spread-implied prob
+    elo_d = h_elo - a_elo
     elo_prob = 1.0 / (1.0 + 10 ** (-elo_d / 400.0))
     spread_prob = 1.0 / (1.0 + 10 ** (spread / 8.0)) if spread else 0.5
     ov["elo_market_residual"] = round(elo_prob - spread_prob, 4)
@@ -1045,20 +1014,6 @@ def predict_nba_full(game: dict):
         "disagree": round(abs(margin-(-mkt)), 2) if mkt else 0,
         "shap": shap_out,  # all 38 features
         "feature_coverage": f"{nz}/{len(feature_cols)}",
-        "all_features": {f: round(float(feat_df[f].iloc[0]), 4) for f in feat_df.columns if f in feat_df.columns},
-        # Debug: raw component values for zero-feature diagnosis
-        "debug_components": {
-            "home_games_14d": row.get("home_games_14d"),
-            "away_games_14d": row.get("away_games_14d"),
-            "home_games_last_14": row.get("home_games_last_14"),
-            "away_games_last_14": row.get("away_games_last_14"),
-            "home_streak": row.get("home_streak"),
-            "away_streak": row.get("away_streak"),
-            "home_days_since_loss": row.get("home_days_since_loss"),
-            "away_days_since_loss": row.get("away_days_since_loss"),
-            "home_roll_paint_fg_rate": row.get("home_roll_paint_fg_rate"),
-            "away_roll_paint_fg_rate": row.get("away_roll_paint_fg_rate"),
-        },
         "model_meta": {
             "n_train": bundle.get("n_games"), "mae_cv": bundle.get("cv_mae"),
             "model_type": bundle.get("model_type", bundle.get("architecture","unknown")),
