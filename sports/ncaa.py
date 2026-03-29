@@ -375,9 +375,9 @@ def ncaa_build_features(df):
     # ESPN odds (DraftKings via ESPN, ~77% historical coverage) is preferred.
     # Odds API (market_spread_home, ~4% historical coverage) is the fallback.
     # These are the SAME signal — real Vegas lines — just different data sources.
-    _espn_sp = pd.to_numeric(df["espn_spread"] if "espn_spread" in df.columns else pd.Series(dtype=float), errors="coerce")
-    _odds_sp = pd.to_numeric(df["market_spread_home"] if "market_spread_home" in df.columns else pd.Series(dtype=float), errors="coerce")
-    _espn_ou = pd.to_numeric(df["espn_over_under"] if "espn_over_under" in df.columns else pd.Series(dtype=float), errors="coerce")
+    _espn_sp = pd.to_numeric(df["espn_spread"] if "espn_spread" in df.columns else pd.Series(dtype=float, index=df.index), errors="coerce")
+    _odds_sp = pd.to_numeric(df["market_spread_home"] if "market_spread_home" in df.columns else pd.Series(dtype=float, index=df.index), errors="coerce")
+    _espn_ou = pd.to_numeric(df["espn_over_under"] if "espn_over_under" in df.columns else pd.Series(dtype=float, index=df.index), errors="coerce")
     _odds_ou = pd.to_numeric(
         df["market_ou_total"] if "market_ou_total" in df.columns else (df["ou_total"] if "ou_total" in df.columns else pd.Series(dtype=float)), errors="coerce"
     )
@@ -385,7 +385,7 @@ def ncaa_build_features(df):
     _has_odds = _odds_sp.notna() & (_odds_sp != 0)
     # closing_spread is unified by training_data_fixes Fix 2 (ESPN > DK close > OA close).
     # Use as tertiary fallback so mkt_spread (and consistency_x_spread) stay non-zero for 2026.
-    _closing_sp = pd.to_numeric(df["closing_spread"] if "closing_spread" in df.columns else pd.Series(dtype=float), errors="coerce").fillna(0)
+    _closing_sp = pd.to_numeric(df["closing_spread"] if "closing_spread" in df.columns else pd.Series(dtype=float, index=df.index), errors="coerce").fillna(0)
     _has_closing = _closing_sp != 0
 
     # Prefer ESPN, fall back to Odds API, then closing_spread, else 0
