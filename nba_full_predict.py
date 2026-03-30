@@ -523,6 +523,34 @@ def _load_model():
     # Local development: run python3 nba_v27_train.py to generate models/nba_v27.pkl
     return None
 
+_ou_cache = None
+_ou_cache_time = 0
+
+def _load_ou_model():
+    """Load NBA O/U model from Supabase model_store (cached 10 min)."""
+    global _ou_cache, _ou_cache_time
+    import time as _time
+    if _ou_cache and (_time.time() - _ou_cache_time) < 600:
+        return _ou_cache
+    try:
+        import requests as _req, base64 as _b64, io as _io, pickle as _pkl
+        from config import SUPABASE_URL, SUPABASE_KEY
+        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+        resp = _req.get(
+            f"{SUPABASE_URL}/rest/v1/model_store?name=eq.nba_ou&select=data",
+            headers=headers, timeout=30
+        )
+        if resp.ok:
+            rows = resp.json()
+            if rows and rows[0].get("data"):
+                raw = _b64.b64decode(rows[0]["data"])
+                _ou_cache = _pkl.loads(raw)
+                _ou_cache_time = _time.time()
+                return _ou_cache
+    except Exception as e:
+        print(f"  [nba_ou] load failed: {e}")
+    return None
+
 def _find_game_id(home, away, date):
     ds = date.replace("-","")
     try:
@@ -1003,6 +1031,38 @@ def predict_nba_full(game: dict):
     # Debug: return all features if requested
     debug = game.get("debug", False)
 
+    # ═══ O/U TOTAL MODEL (separate CatBoost, same features) ═══
+    ou_predicted_total = None
+    ou_edge = None
+    ou_pick = None
+    try:
+        ou_bundle = _load_ou_model()
+        if ou_bundle and ou_bundle.get("reg") and ou_bundle.get("scaler"):
+            ou_feature_cols = ou_bundle.get("ou_feature_cols", feature_cols)
+            available_ou = [f for f in ou_feature_cols if f in feature_cols or f in row]
+            if len(available_ou) >= len(ou_feature_cols) * 0.7:
+                ou_vals = {}
+                for f in ou_feature_cols:
+                    if f in feature_cols:
+                        ou_vals[f] = float(X_slim[f].iloc[0])
+                    elif f in row:
+                        ou_vals[f] = float(row.get(f, 0) or 0)
+                    else:
+                        ou_vals[f] = 0.0
+                X_ou = pd.DataFrame([ou_vals])[ou_feature_cols]
+                X_ou_s = ou_bundle["scaler"].transform(X_ou)
+                ou_predicted_total = float(ou_bundle["reg"].predict(X_ou_s)[0])
+                ou_bias = ou_bundle.get("bias_correction", 0)
+                ou_predicted_total += ou_bias
+                mkt_ou = float(row.get("market_ou_total", 0) or 0)
+                if mkt_ou > 0:
+                    ou_edge = round(ou_predicted_total - mkt_ou, 1)
+                    if abs(ou_edge) >= 3:
+                        ou_pick = "OVER" if ou_edge > 0 else "UNDER"
+                diag["sources"].append(f"O/U model ({len(ou_feature_cols)} features)")
+    except Exception as e:
+        diag["warnings"].append(f"ou_model: {e}")
+
     return {
         "sport": "NBA", "game_id": game_id,
         "home_team": home_abbr, "away_team": away_abbr, "game_date": game_date,
@@ -1020,4 +1080,7 @@ def predict_nba_full(game: dict):
             "n_features": len(feature_cols), "has_isotonic": cal is not None,
         },
         "diagnostics": diag,
+        "ou_predicted_total": round(ou_predicted_total, 1) if ou_predicted_total else None,
+        "ou_edge": ou_edge,
+        "ou_pick": ou_pick,
     }
