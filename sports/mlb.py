@@ -708,7 +708,7 @@ def predict_mlb(game: dict):
         "ml_win_prob_away": round(1 - win_prob, 4),
         "ml_win_prob_raw": round(raw_win_prob, 4),
         "bias_correction": round(bias, 3),
-        "shap": shap_out[:10],  # Top 10 SHAP values
+        "shap": shap_out,  # All features for verification panel
         "model_meta": {
             "n_train": bundle["n_train"],
             "n_historical": bundle.get("n_historical", 0),
