@@ -299,7 +299,41 @@ def mlb_build_features(df):
         "platoon_diff", "sp_fip_spread", "both_lineups_confirmed",
         # Market line signal
         "market_spread", "market_total", "spread_vs_market", "has_market",
+        # ── Advanced features (v7) ──
+        "pyth_residual_diff", "babip_luck_diff", "scoring_entropy_diff",
+        "first_inn_rate_diff", "clutch_divergence_diff", "opp_adj_form_diff",
+        "ump_run_env", "series_game_num",
+        "scoring_entropy_combined", "first_inn_rate_combined",
+        "sp_relative_fip_diff", "temp_x_park",
     ]
+
+    # ── Advanced features: compute what we can, default the rest ──
+    advanced_defaults = {
+        "pyth_residual_diff": 0.0, "babip_luck_diff": 0.0,
+        "scoring_entropy_diff": 0.0, "first_inn_rate_diff": 0.0,
+        "clutch_divergence_diff": 0.0, "opp_adj_form_diff": 0.0,
+        "ump_run_env": 8.5, "series_game_num": 1.0,
+        "scoring_entropy_combined": 5.0, "first_inn_rate_combined": 0.8,
+    }
+    for col, default in advanced_defaults.items():
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
+        else:
+            df[col] = default
+
+    # sp_relative_fip: starter FIP relative to own team FIP (computable at serve time)
+    if "sp_relative_fip_diff" in df.columns:
+        df["sp_relative_fip_diff"] = pd.to_numeric(df["sp_relative_fip_diff"], errors="coerce").fillna(0)
+    else:
+        df["sp_relative_fip_diff"] = (
+            (df["home_starter_fip"] - df["home_fip"]) - (df["away_starter_fip"] - df["away_fip"])
+        ).fillna(0)
+
+    # temp × park interaction (computable at serve time)
+    if "temp_x_park" in df.columns:
+        df["temp_x_park"] = pd.to_numeric(df["temp_x_park"], errors="coerce").fillna(0)
+    else:
+        df["temp_x_park"] = ((df["temp_f"] - 70) / 30.0) * df["park_factor"]
 
     return df[feature_cols].fillna(0)
 
@@ -651,6 +685,25 @@ def predict_mlb(game: dict):
     }
     # Derived market feature (after run_diff_pred and market_spread are set)
     row_data["spread_vs_market"] = row_data["run_diff_pred"] - row_data["market_spread"]
+
+    # ── Advanced features (v7) — compute what we can at serve time ──
+    # sp_relative_fip: starter quality vs own team (always computable)
+    row_data["sp_relative_fip_diff"] = (home_starter_fip - home_fip) - (away_starter_fip - away_fip)
+    # temp × park interaction (always computable)
+    row_data["temp_x_park"] = ((temp_f - 70) / 30.0) * park_factor
+    # Umpire run environment (from frontend if available, else league avg)
+    row_data["ump_run_env"] = float(game.get("ump_run_env", 8.5))
+    # Series game number (from frontend if available)
+    row_data["series_game_num"] = float(game.get("series_game_num", 1))
+    # Rolling features — default to neutral until rolling pipeline built
+    row_data["pyth_residual_diff"] = float(game.get("pyth_residual_diff", 0))
+    row_data["babip_luck_diff"] = float(game.get("babip_luck_diff", 0))
+    row_data["scoring_entropy_diff"] = float(game.get("scoring_entropy_diff", 0))
+    row_data["first_inn_rate_diff"] = float(game.get("first_inn_rate_diff", 0))
+    row_data["clutch_divergence_diff"] = float(game.get("clutch_divergence_diff", 0))
+    row_data["opp_adj_form_diff"] = float(game.get("opp_adj_form_diff", 0))
+    row_data["scoring_entropy_combined"] = float(game.get("scoring_entropy_combined", 5.0))
+    row_data["first_inn_rate_combined"] = float(game.get("first_inn_rate_combined", 0.8))
 
     # Gracefully handle any feature the model expects but row_data is missing
     for col in bundle.get("feature_cols", []):
