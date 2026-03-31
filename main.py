@@ -1485,9 +1485,15 @@ def route_mlb_daily():
                             ou_correct = "OVER" if actual_over else "UNDER"
                     elif ou_line and total == float(ou_line):
                         ou_correct = "PUSH"
-                    # ATS pick
+                    # ATS pick — compute model margin from pred runs or spread_home
                     ats_correct = None
                     model_margin = matched.get("spread_home")
+                    if model_margin is None:
+                        # Fallback: compute from predicted runs
+                        phr = matched.get("pred_home_runs")
+                        par = matched.get("pred_away_runs")
+                        if phr is not None and par is not None:
+                            model_margin = float(phr) - float(par)
                     if model_margin is not None and mkt_spread is not None:
                         disagree = abs(float(model_margin) - (-float(mkt_spread)))
                         if disagree >= 0.5:
