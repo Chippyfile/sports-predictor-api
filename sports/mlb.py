@@ -695,15 +695,26 @@ def predict_mlb(game: dict):
     row_data["ump_run_env"] = float(game.get("ump_run_env", 8.5))
     # Series game number (from frontend if available)
     row_data["series_game_num"] = float(game.get("series_game_num", 1))
-    # Rolling features — default to neutral until rolling pipeline built
-    row_data["pyth_residual_diff"] = float(game.get("pyth_residual_diff", 0))
-    row_data["babip_luck_diff"] = float(game.get("babip_luck_diff", 0))
-    row_data["scoring_entropy_diff"] = float(game.get("scoring_entropy_diff", 0))
-    row_data["first_inn_rate_diff"] = float(game.get("first_inn_rate_diff", 0))
-    row_data["clutch_divergence_diff"] = float(game.get("clutch_divergence_diff", 0))
-    row_data["opp_adj_form_diff"] = float(game.get("opp_adj_form_diff", 0))
-    row_data["scoring_entropy_combined"] = float(game.get("scoring_entropy_combined", 5.0))
-    row_data["first_inn_rate_combined"] = float(game.get("first_inn_rate_combined", 0.8))
+    # Rolling features — read from mlb_team_rolling + mlb_ump_profiles
+    try:
+        from mlb_rolling_stats import get_rolling_features
+        home_abbr = game.get("home_team", "")
+        away_abbr = game.get("away_team", "")
+        ump = game.get("ump_name", None)
+        rolling = get_rolling_features(home_abbr, away_abbr, ump)
+        for k, v in rolling.items():
+            row_data[k] = v
+    except Exception as e:
+        # Fallback: use frontend-provided values or neutral defaults
+        row_data["pyth_residual_diff"] = float(game.get("pyth_residual_diff", 0))
+        row_data["babip_luck_diff"] = float(game.get("babip_luck_diff", 0))
+        row_data["scoring_entropy_diff"] = float(game.get("scoring_entropy_diff", 0))
+        row_data["first_inn_rate_diff"] = float(game.get("first_inn_rate_diff", 0))
+        row_data["clutch_divergence_diff"] = float(game.get("clutch_divergence_diff", 0))
+        row_data["opp_adj_form_diff"] = float(game.get("opp_adj_form_diff", 0))
+        row_data["scoring_entropy_combined"] = float(game.get("scoring_entropy_combined", 5.0))
+        row_data["first_inn_rate_combined"] = float(game.get("first_inn_rate_combined", 0.8))
+        row_data["ump_run_env"] = float(game.get("ump_run_env", 8.5))
 
     # Gracefully handle any feature the model expects but row_data is missing
     for col in bundle.get("feature_cols", []):
