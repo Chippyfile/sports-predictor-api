@@ -1,0 +1,43 @@
+name: MLB Daily Cron
+
+on:
+  schedule:
+    # 9:00 AM EST (14:00 UTC) — predict today's games
+    - cron: '0 14 * * *'
+    # 12:30 AM EST (05:30 UTC) — grade completed games (late MLB games)
+    - cron: '30 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  mlb-cron:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Determine mode
+        id: mode
+        run: |
+          HOUR=$(date -u +%H)
+          if [ "$HOUR" -ge 10 ] && [ "$HOUR" -le 18 ]; then
+            echo "mode=predict" >> $GITHUB_OUTPUT
+          else
+            echo "mode=grade" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run MLB cron
+        run: |
+          MODE=${{ steps.mode.outputs.mode }}
+          echo "Running MLB cron in ${MODE} mode..."
+          
+          # Always grade first
+          echo "=== Grading ==="
+          GRADE=$(curl -sf --max-time 120 \
+            "https://sports-predictor-api-production.up.railway.app/cron/mlb-daily?mode=grade")
+          echo "$GRADE" | python3 -m json.tool 2>/dev/null || echo "$GRADE"
+          
+          if [ "$MODE" = "predict" ]; then
+            echo ""
+            echo "=== Predicting ==="
+            PREDICT=$(curl -sf --max-time 120 \
+              "https://sports-predictor-api-production.up.railway.app/cron/mlb-daily?mode=predict")
+            echo "$PREDICT" | python3 -m json.tool 2>/dev/null || echo "$PREDICT"
+          fi

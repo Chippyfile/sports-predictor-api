@@ -1,0 +1,43 @@
+name: NBA Daily Cron
+
+on:
+  schedule:
+    # 10:00 AM EST (15:00 UTC) — predict today's games
+    - cron: '0 15 * * *'
+    # 11:45 PM EST (04:45 UTC) — grade completed games
+    - cron: '45 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  nba-cron:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Determine mode
+        id: mode
+        run: |
+          HOUR=$(date -u +%H)
+          if [ "$HOUR" -ge 10 ] && [ "$HOUR" -le 18 ]; then
+            echo "mode=predict" >> $GITHUB_OUTPUT
+          else
+            echo "mode=grade" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run NBA cron
+        run: |
+          MODE=${{ steps.mode.outputs.mode }}
+          echo "Running NBA cron in ${MODE} mode..."
+          
+          # Always grade first (catch any ungraded from yesterday)
+          echo "=== Grading ==="
+          GRADE=$(curl -sf --max-time 120 \
+            "https://sports-predictor-api-production.up.railway.app/cron/nba-daily?mode=grade")
+          echo "$GRADE" | python3 -m json.tool 2>/dev/null || echo "$GRADE"
+          
+          if [ "$MODE" = "predict" ]; then
+            echo ""
+            echo "=== Predicting ==="
+            PREDICT=$(curl -sf --max-time 120 \
+              "https://sports-predictor-api-production.up.railway.app/cron/nba-daily?mode=predict")
+            echo "$PREDICT" | python3 -m json.tool 2>/dev/null || echo "$PREDICT"
+          fi
