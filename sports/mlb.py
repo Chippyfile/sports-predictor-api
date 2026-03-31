@@ -1,3 +1,17 @@
+import numpy as _np
+
+class EnsembleRegressor:
+    """Averaging ensemble — must be at module level for pickle deserialization on Railway."""
+    def __init__(self, models):
+        self.models = models
+    def predict(self, X):
+        return _np.mean([m.predict(X) for m in self.models], axis=0)
+    @property
+    def coef_(self):
+        if hasattr(self.models[0], 'coef_'):
+            return self.models[0].coef_
+        return None
+
 MLB_NEGBIN_K_DEFAULT = 0.60
 SEASON_CONSTANTS = {
     2015: {"lg_woba": 0.313, "woba_scale": 1.24, "lg_rpg": 4.25, "lg_fip": 3.97, "pa_pg": 38.0},
@@ -726,7 +740,14 @@ def predict_mlb(game: dict):
     
     # Scale and predict
     X_s = bundle["scaler"].transform(row[bundle["feature_cols"]])
-    raw_margin = float(bundle["reg"].predict(X_s)[0])
+    
+    # Ensemble: average predictions from all models if available
+    ensemble_models = bundle.get("_ensemble_models")
+    if ensemble_models and len(ensemble_models) > 1:
+        raw_margin = float(_np.mean([m.predict(X_s)[0] for m in ensemble_models]))
+    else:
+        reg = bundle.get("reg", bundle.get("model"))
+        raw_margin = float(reg.predict(X_s)[0])
 
     # FIX: Bypass broken StackedClassifier + isotonic calibrator.
     # The StackedClassifier (GBM+LR→meta_LR) returns 0.98/0.02 when features are
