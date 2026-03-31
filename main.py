@@ -92,6 +92,7 @@ def index():
             "GET  /ratings/ncaa",
             "GET  /cron/ncaa-daily?mode=predict|refresh|grade|auto",
             "GET  /cron/nba-daily?mode=predict|grade|auto",
+            "GET  /cron/mlb-daily?mode=grade",
             "GET  /cron/ncaa-ats-record",
         ],
     })
@@ -1314,7 +1315,7 @@ def route_nba_daily():
                 compact_date = check_date.replace("-", "")
                 pending = _req.get(
                     f"{SUPABASE_URL}/rest/v1/nba_predictions?game_date=eq.{check_date}&result_entered=eq.false"
-                    f"&select=id,game_id,home_team,away_team,win_pct_home,spread_home,market_spread_home,market_ou_total,pred_home_score,pred_away_score",
+                    f"&select=id,game_id,home_team,away_team,win_pct_home,spread_home,market_spread_home,market_ou_total,pred_home_score,pred_away_score,ats_side,ats_units",
                     headers=headers, timeout=15)
                 pending_rows = pending.json() if pending.ok else []
                 if not pending_rows: continue
@@ -1347,6 +1348,13 @@ def route_nba_daily():
                         ou_correct = "OVER" if (total > ou_line) == (pred_total > ou_line) else "UNDER"
                     patch = {"actual_home_score": home_score, "actual_away_score": away_score,
                              "result_entered": True, "ml_correct": ml_correct, "rl_correct": rl_correct, "ou_correct": ou_correct}
+                    # ATS pick grading (did our specific bet win?)
+                    if matched.get("ats_units") and matched["ats_units"] > 0 and matched.get("ats_side") and mkt_spread is not None:
+                        ats_result = actual_margin + mkt_spread
+                        if ats_result != 0:
+                            home_covered = ats_result > 0
+                            picked_home = matched["ats_side"] == "HOME"
+                            patch["ats_correct"] = picked_home == home_covered
                     _req.patch(f"{SUPABASE_URL}/rest/v1/nba_predictions?id=eq.{matched['id']}",
                         headers={**headers, "Content-Type": "application/json"}, json=patch, timeout=15)
                     graded += 1
@@ -1384,6 +1392,130 @@ def route_nba_daily():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
     finally:
         _nba_cron_lock = False
+
+
+# ═══════════════════════════════════════════════════════════════
+# ROUTES — MLB Daily Cron (grade completed games)
+# Schedule: 12:30 AM EST (05:30 UTC) via GitHub Actions
+# ═══════════════════════════════════════════════════════════════
+
+_mlb_cron_lock = False
+
+@app.route("/cron/mlb-daily", methods=["GET", "POST"])
+def route_mlb_daily():
+    """MLB daily grading — fills final scores for last 4 days of ungraded games."""
+    import time as _time, traceback
+    from datetime import datetime, timezone, timedelta
+    global _mlb_cron_lock
+    if _mlb_cron_lock:
+        return jsonify({"status": "already_running"}), 429
+    _mlb_cron_lock = True
+    start = _time.time()
+    try:
+        mode = request.args.get("mode", "grade")
+        now_utc = datetime.now(timezone.utc)
+        now_est = now_utc - timedelta(hours=5)
+        today_est = now_est.strftime("%Y-%m-%d")
+        hour_est = now_est.hour
+        import requests as _req
+        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+        results = {"mode": mode, "date": today_est, "hour_est": hour_est}
+
+        graded = 0
+        for days_ago in range(0, 4):
+            check_date = (now_est - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+            pending_resp = _req.get(
+                f"{SUPABASE_URL}/rest/v1/mlb_predictions?game_date=eq.{check_date}"
+                f"&result_entered=eq.false"
+                f"&select=id,game_pk,home_team,away_team,win_pct_home,spread_home,"
+                f"market_spread_home,market_ou_total,ou_total,pred_home_runs,pred_away_runs",
+                headers=headers, timeout=15)
+            pending = pending_resp.json() if pending_resp.ok else []
+            if not isinstance(pending, list) or not pending:
+                continue
+            schedule_resp = _req.get(
+                f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={check_date}&hydrate=linescore",
+                timeout=15)
+            if not schedule_resp.ok:
+                continue
+            schedule = schedule_resp.json()
+            for date_obj in schedule.get("dates", []):
+                for game in date_obj.get("games", []):
+                    state = game.get("status", {}).get("abstractGameState", "")
+                    if state != "Final":
+                        continue
+                    home_score = game.get("teams", {}).get("home", {}).get("score")
+                    away_score = game.get("teams", {}).get("away", {}).get("score")
+                    if home_score is None or away_score is None:
+                        continue
+                    game_pk = game.get("gamePk")
+                    home_abbr = game.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation", "")
+                    away_abbr = game.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation", "")
+                    matched = None
+                    for p in pending:
+                        if p.get("game_pk") and str(p["game_pk"]) == str(game_pk):
+                            matched = p; break
+                        if (p.get("home_team", "").upper() == home_abbr.upper() and
+                            p.get("away_team", "").upper() == away_abbr.upper()):
+                            matched = p; break
+                    if not matched:
+                        continue
+                    # ML
+                    model_home = (matched.get("win_pct_home") or 0.5) >= 0.5
+                    home_won = home_score > away_score
+                    ml_correct = model_home == home_won if home_score != away_score else None
+                    # RL (run line)
+                    margin = home_score - away_score
+                    mkt_spread = matched.get("market_spread_home")
+                    rl_correct = None
+                    if mkt_spread is not None:
+                        ats_r = margin + float(mkt_spread)
+                        rl_correct = True if ats_r > 0 else (False if ats_r < 0 else None)
+                    else:
+                        rl_correct = (margin > 1.5 if model_home else margin < -1.5) if abs(margin) > 1.5 else None
+                    # O/U
+                    total = home_score + away_score
+                    ou_line = matched.get("market_ou_total") or matched.get("ou_total")
+                    pred_total = float(matched.get("pred_home_runs") or 0) + float(matched.get("pred_away_runs") or 0)
+                    ou_correct = None
+                    if ou_line and pred_total and total != float(ou_line):
+                        actual_over = total > float(ou_line)
+                        model_over = pred_total > float(ou_line)
+                        if actual_over == model_over:
+                            ou_correct = "OVER" if actual_over else "UNDER"
+                    elif ou_line and total == float(ou_line):
+                        ou_correct = "PUSH"
+                    # ATS pick
+                    ats_correct = None
+                    model_margin = matched.get("spread_home")
+                    if model_margin is not None and mkt_spread is not None:
+                        disagree = abs(float(model_margin) - (-float(mkt_spread)))
+                        if disagree >= 0.5:
+                            model_side_home = float(model_margin) > (-float(mkt_spread))
+                            ats_r = margin + float(mkt_spread)
+                            if ats_r != 0:
+                                ats_correct = model_side_home == (ats_r > 0)
+                    patch = {
+                        "actual_home_runs": home_score, "actual_away_runs": away_score,
+                        "result_entered": True, "ml_correct": ml_correct,
+                        "rl_correct": rl_correct, "ou_correct": ou_correct,
+                    }
+                    if ats_correct is not None:
+                        patch["ats_correct"] = ats_correct
+                    _req.patch(f"{SUPABASE_URL}/rest/v1/mlb_predictions?id=eq.{matched['id']}",
+                        headers={**headers, "Content-Type": "application/json"}, json=patch, timeout=15)
+                    graded += 1
+                    print(f"  [cron/mlb] {away_abbr}@{home_abbr}: {away_score}-{home_score} ml={'T' if ml_correct else 'F'}")
+        results["graded"] = graded
+        duration = _time.time() - start
+        results["duration_sec"] = round(duration, 1)
+        results["status"] = "complete"
+        return jsonify(results)
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+    finally:
+        _mlb_cron_lock = False
 
 
 @app.route("/cron/ncaa-ats-record")
