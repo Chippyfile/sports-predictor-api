@@ -107,9 +107,10 @@ def build_features(df):
     df["k_bb_diff"] = df["k_bb_home"] - df["k_bb_away"]
 
     # SP innings & bullpen exposure
+    # AUDIT FIX F1: Changed baseline from 9.0 to 5.5 (matches serve path + JS intent)
     df["sp_ip_diff"] = df["home_sp_ip"] - df["away_sp_ip"]
-    df["home_bp_exposure"] = np.maximum(0, 9.0 - df["home_sp_ip"]) * (df["home_bullpen_era"] / 4.10)
-    df["away_bp_exposure"] = np.maximum(0, 9.0 - df["away_sp_ip"]) * (df["away_bullpen_era"] / 4.10)
+    df["home_bp_exposure"] = np.maximum(0, 5.5 - df["home_sp_ip"]) * (df["home_bullpen_era"] / 4.10)
+    df["away_bp_exposure"] = np.maximum(0, 5.5 - df["away_sp_ip"]) * (df["away_bullpen_era"] / 4.10)
     df["bp_exposure_diff"] = df["home_bp_exposure"] - df["away_bp_exposure"]
     df["def_oaa_diff"] = df["home_def_oaa"] - df["away_def_oaa"]
 

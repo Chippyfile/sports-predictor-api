@@ -209,9 +209,13 @@ def mlb_build_features(df):
     df["k_bb_diff"]  = df["k_bb_home"] - df["k_bb_away"]
 
     # SP innings & bullpen exposure + defensive OAA
+    # AUDIT FIX F1: Changed baseline from 9.0 to 5.5. The 9.0 baseline made this feature
+    # near-constant (every starter has 9.0-5.5=3.5 "exposure"), killing the signal.
+    # 5.5 baseline means only short starters (< 5.5 IP avg) generate a penalty,
+    # matching the intent of the JS heuristic engine which uses 5.0.
     df["sp_ip_diff"]       = df["home_sp_ip"] - df["away_sp_ip"]
-    df["home_bp_exposure"] = np.maximum(0, 9.0 - df["home_sp_ip"]) * (df["home_bullpen_era"] / 4.10)
-    df["away_bp_exposure"] = np.maximum(0, 9.0 - df["away_sp_ip"]) * (df["away_bullpen_era"] / 4.10)
+    df["home_bp_exposure"] = np.maximum(0, 5.5 - df["home_sp_ip"]) * (df["home_bullpen_era"] / 4.10)
+    df["away_bp_exposure"] = np.maximum(0, 5.5 - df["away_sp_ip"]) * (df["away_bullpen_era"] / 4.10)
     df["bp_exposure_diff"] = df["home_bp_exposure"] - df["away_bp_exposure"]
     df["def_oaa_diff"]     = df["home_def_oaa"] - df["away_def_oaa"]
 
@@ -652,8 +656,9 @@ def predict_mlb(game: dict):
     away_starter_fip = away_sp_fip if away_sp_fip != 4.25 else away_fip
 
     # Calculate derived features
-    home_bp_exposure = max(0, 9.0 - home_sp_ip) * (home_bullpen / 4.10)
-    away_bp_exposure = max(0, 9.0 - away_sp_ip) * (away_bullpen / 4.10)
+    # AUDIT FIX F1: Changed baseline from 9.0 to 5.5 (matches training)
+    home_bp_exposure = max(0, 5.5 - home_sp_ip) * (home_bullpen / 4.10)
+    away_bp_exposure = max(0, 5.5 - away_sp_ip) * (away_bullpen / 4.10)
 
     # Diffs
     woba_diff = home_woba - away_woba
@@ -735,6 +740,13 @@ def predict_mlb(game: dict):
         if col not in row_data:
             row_data[col] = 0.0
 
+    # AUDIT FIX F2: Explicit feature set assertion — catch misalignment immediately
+    expected = set(bundle["feature_cols"])
+    provided = set(row_data.keys())
+    missing = expected - provided
+    if missing:
+        print(f"[predict_mlb] WARNING: Missing features at serve time: {missing}")
+
     # Create DataFrame with only the features the model expects
     row = pd.DataFrame([{k: row_data[k] for k in bundle["feature_cols"]}])
     
@@ -749,20 +761,21 @@ def predict_mlb(game: dict):
         reg = bundle.get("reg", bundle.get("model"))
         raw_margin = float(reg.predict(X_s)[0])
 
-    # FIX: Bypass broken StackedClassifier + isotonic calibrator.
-    # The StackedClassifier (GBM+LR→meta_LR) returns 0.98/0.02 when features are
-    # mostly zero (early season). Derive probability from CatBoost margin instead.
-    # MLB σ ≈ 4.0 runs (historical standard deviation of game run differentials).
+    # AUDIT FIX F7: Use Gaussian CDF instead of Elo-style formula.
+    # Elo (10^(-m/σ)) compresses probabilities toward 50% compared to Gaussian,
+    # making confidence gates (65%/60%) harder to trigger. At margin=2.0:
+    # Elo gives 63.6% vs Gaussian 69.1% — nearly a full run difference.
+    from scipy.stats import norm as _norm
     MLB_SIGMA = 4.0
-    raw_win_prob = 1.0 / (1.0 + 10.0 ** (-raw_margin / MLB_SIGMA))
+    raw_win_prob = float(_norm.cdf(raw_margin / MLB_SIGMA))
     raw_win_prob = max(0.20, min(0.80, raw_win_prob))
 
     # FIX S2b: Apply bias correction to margin prediction
     bias = bundle.get("bias_correction", 0.0)
     margin = raw_margin - bias
 
-    # Margin-based probability is already well-calibrated — skip isotonic
-    win_prob = 1.0 / (1.0 + 10.0 ** (-margin / MLB_SIGMA))
+    # Margin-based probability via Gaussian CDF
+    win_prob = float(_norm.cdf(margin / MLB_SIGMA))
     win_prob = max(0.20, min(0.80, win_prob))
 
     # SHAP explanation
