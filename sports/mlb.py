@@ -42,6 +42,17 @@ PARK_HFA = {
 }
 # H-5 FIX: Dome parks where outdoor weather adjustments should be skipped
 _DOME_PARKS = {109, 117, 136, 139, 140, 141, 146, 158}
+# Abbr → team ID for dome detection at serve time
+_ABBR_TO_ID = {
+    "LAA":108,"ARI":109,"BAL":110,"BOS":111,"CHC":112,"CIN":113,"CLE":114,
+    "COL":115,"DET":116,"HOU":117,"KC":118,"LAD":119,"WSH":120,"NYM":121,
+    "OAK":133,"PIT":134,"SD":135,"SEA":136,"SF":137,"STL":138,"TB":139,
+    "TEX":140,"TOR":141,"MIN":142,"PHI":143,"ATL":144,"CWS":145,"MIA":146,
+    "NYY":147,"MIL":158,
+}
+def _is_dome(home_abbr):
+    """Check if home team plays in a dome/retractable roof park."""
+    return _ABBR_TO_ID.get((home_abbr or "").upper().strip(), 0) in _DOME_PARKS
 import math as _math
 from datetime import timedelta as _td
 
@@ -702,6 +713,14 @@ def predict_mlb(game: dict):
     temp_f = _f(game.get("temp_f"), 70.0)
     wind_mph = _f(game.get("wind_mph"), 5.0)
     wind_out_flag = _f(game.get("wind_out_flag"), 0.0)
+
+    # DOME FIX: Neutralize weather for dome/retractable-roof parks
+    # Outdoor weather data is irrelevant inside a dome — prevents false signal
+    if _is_dome(home_team):
+        temp_f = 70.0
+        wind_mph = 0.0
+        wind_out_flag = 0.0
+
     home_rest = _f(game.get("home_rest_days"), 4.0)
     away_rest = _f(game.get("away_rest_days"), 4.0)
     home_travel = _f(game.get("home_travel"), 0.0)
@@ -940,6 +959,14 @@ def predict_mlb_ou(game: dict):
     temp_f = _f(game.get("temp_f"), 70.0)
     wind_mph = _f(game.get("wind_mph"), 5.0)
     wind_out_flag = _f(game.get("wind_out_flag"), 0.0)
+
+    # DOME FIX: Neutralize weather for dome/retractable-roof parks
+    _home_team_ou = (game.get("home_team") or "").upper().strip()
+    if _is_dome(_home_team_ou):
+        temp_f = 70.0
+        wind_mph = 0.0
+        wind_out_flag = 0.0
+
     home_k9 = _f(game.get("home_k9"), 8.5)
     away_k9 = _f(game.get("away_k9"), 8.5)
     home_bb9 = _f(game.get("home_bb9"), 3.2)
