@@ -273,6 +273,21 @@ def mlb_build_features(df):
     df["bullpen_era_diff"] = df["home_bullpen_era"] - df["away_bullpen_era"]
     df["rest_diff"]        = df["home_rest_days"] - df["away_rest_days"]
     df["travel_diff"]      = df["home_travel"] - df["away_travel"]
+
+    # AUDIT v4 Finding 4: Neutralize weather for dome parks in training data
+    # Matches serve-time dome fix in predict_mlb(). Without this, training sees
+    # real outdoor weather for dome parks but serve sees neutral 70/0/0.
+    _dome_col = None
+    for c in ["home_team_id", "homeTeamId", "park_id"]:
+        if c in df.columns:
+            _dome_col = c
+            break
+    if _dome_col:
+        _is_dome_mask = pd.to_numeric(df[_dome_col], errors="coerce").isin(_DOME_PARKS)
+        df.loc[_is_dome_mask, "temp_f"] = 70.0
+        df.loc[_is_dome_mask, "wind_mph"] = 0.0
+        df.loc[_is_dome_mask, "wind_out_flag"] = 0.0
+
     df["is_warm"]          = (df["temp_f"] > 75).astype(int)
     df["is_cold"]          = (df["temp_f"] < 45).astype(int)
     df["wind_out"]         = df["wind_out_flag"].astype(int)

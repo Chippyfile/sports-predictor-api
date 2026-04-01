@@ -3,7 +3,7 @@
 mlb_ensemble_retrain.py — Production MLB v8 ensemble
 ═══════════════════════════════════════════════════════
 Architecture: Lasso_0.01 + ElasticNet_a0.1_r0.5 + CatBoost_d6_i200_lr0.03
-Features: 32 (trimmed from 41 — dropped 9 constants/noise)
+Features: 29 (trimmed from 41 — dropped heuristic circularity + dead features)
 Includes: ATS + O/U threshold analysis at various edge levels
 
 Usage:
@@ -20,7 +20,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import Lasso, ElasticNet
 from catboost import CatBoostRegressor
 
-# ── Feature set (32 — trimmed from 41) ──
+# ── Feature set (29 — dropped heuristic + dead babip proxy) ──
 FEATURE_COLS = [
     # Core offensive/pitching
     "woba_diff", "fip_diff", "k_bb_diff", "bullpen_era_diff",
@@ -30,15 +30,15 @@ FEATURE_COLS = [
     "park_factor", "temp_f", "wind_mph", "wind_out", "is_warm", "is_cold",
     "temp_x_park",
     # Context
-    "rest_diff", "run_diff_pred",
+    "rest_diff",
     # Market
-    "market_spread", "spread_vs_market",
+    "market_spread",
     # Interactions
     "woba_x_park",
     # Platoon
     "platoon_diff",
     # Advanced rolling (v7)
-    "pyth_residual_diff", "babip_luck_diff", "scoring_entropy_diff",
+    "pyth_residual_diff", "scoring_entropy_diff",
     "first_inn_rate_diff", "clutch_divergence_diff", "opp_adj_form_diff",
     "ump_run_env", "series_game_num",
     "scoring_entropy_combined", "first_inn_rate_combined",
@@ -52,7 +52,7 @@ from mlb_retrain import build_features as build_41_features, load_data
 
 
 def build_features_32(df):
-    """Build 41 features then subset to 32."""
+    """Build 41 features then subset to production set."""
     full = build_41_features(df)
     return full[FEATURE_COLS]
 
@@ -197,7 +197,7 @@ def threshold_analysis(preds, y, market_spread, market_total, actual_total):
     print(f"  MONEYLINE (WIN) ACCURACY BY PROBABILITY THRESHOLD")
     print(f"  {'='*65}")
     
-    # Convert margin to probability: P(home) = 1/(1+10^(-margin/σ))
+    # Convert margin to probability via Gaussian CDF (matches production predict_mlb)
     from scipy.stats import norm as _norm
     SIGMA = 4.0
     win_prob = _norm.cdf(pv / SIGMA)
