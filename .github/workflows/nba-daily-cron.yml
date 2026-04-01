@@ -30,14 +30,14 @@ jobs:
           
           # Always grade first (catch any ungraded from yesterday)
           echo "=== Grading ==="
-          GRADE=$(curl -sf --max-time 120 \
+          GRADE=$(curl -sf --max-time 300 \
             "https://sports-predictor-api-production.up.railway.app/cron/nba-daily?mode=grade")
           echo "$GRADE" | python3 -m json.tool 2>/dev/null || echo "$GRADE"
           
           if [ "$MODE" = "predict" ]; then
             echo ""
             echo "=== Predicting ==="
-            PREDICT=$(curl -sf --max-time 120 \
+            PREDICT=$(curl -sf --max-time 300 \
               "https://sports-predictor-api-production.up.railway.app/cron/nba-daily?mode=predict")
             echo "$PREDICT" | python3 -m json.tool 2>/dev/null || echo "$PREDICT"
           fi
