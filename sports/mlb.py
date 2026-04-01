@@ -673,50 +673,54 @@ def predict_mlb(game: dict):
     if not bundle:
         return {"error": "MLB model not trained — call /train/mlb first"}
 
+    # None-safe float: game.get() returns None when key exists but value is NULL in Supabase
+    def _f(v, d=0.0):
+        return float(v) if v is not None else d
+
     # Get heuristic predictions (may be 0 for historical games)
-    ph = float(game.get("pred_home_runs", 0))
-    pa = float(game.get("pred_away_runs", 0))
+    ph = _f(game.get("pred_home_runs"), 0)
+    pa = _f(game.get("pred_away_runs"), 0)
     
     # AUDIT FIX: capture team abbrs and date for travel/series computation
     home_team = (game.get("home_team") or "").upper().strip()
     away_team = (game.get("away_team") or "").upper().strip()
-    game_date = game.get("game_date", datetime.utcnow().strftime("%Y-%m-%d"))
+    game_date = game.get("game_date") or datetime.utcnow().strftime("%Y-%m-%d")
 
     # Get raw inputs if provided
-    home_woba = float(game.get("home_woba", 0.315))  # AUDIT FIX F-14: match lg_woba
-    away_woba = float(game.get("away_woba", 0.315))
-    home_sp_fip = float(game.get("home_sp_fip", game.get("home_fip", 4.25)))
-    away_sp_fip = float(game.get("away_sp_fip", game.get("away_fip", 4.25)))
-    home_fip = float(game.get("home_fip", 4.25))
-    away_fip = float(game.get("away_fip", 4.25))
-    home_bullpen = float(game.get("home_bullpen_era", 4.10))
-    away_bullpen = float(game.get("away_bullpen_era", 4.10))
-    park_factor = float(game.get("park_factor", 1.00))
-    temp_f = float(game.get("temp_f", 70.0))
-    wind_mph = float(game.get("wind_mph", 5.0))
-    wind_out_flag = float(game.get("wind_out_flag", 0.0))
-    home_rest = float(game.get("home_rest_days", 4.0))
-    away_rest = float(game.get("away_rest_days", 4.0))
-    home_travel = float(game.get("home_travel", 0.0))
-    away_travel = float(game.get("away_travel", 0.0))
+    home_woba = _f(game.get("home_woba"), 0.315)
+    away_woba = _f(game.get("away_woba"), 0.315)
+    home_sp_fip = _f(game.get("home_sp_fip") or game.get("home_fip"), 4.25)
+    away_sp_fip = _f(game.get("away_sp_fip") or game.get("away_fip"), 4.25)
+    home_fip = _f(game.get("home_fip"), 4.25)
+    away_fip = _f(game.get("away_fip"), 4.25)
+    home_bullpen = _f(game.get("home_bullpen_era"), 4.10)
+    away_bullpen = _f(game.get("away_bullpen_era"), 4.10)
+    park_factor = _f(game.get("park_factor"), 1.00)
+    temp_f = _f(game.get("temp_f"), 70.0)
+    wind_mph = _f(game.get("wind_mph"), 5.0)
+    wind_out_flag = _f(game.get("wind_out_flag"), 0.0)
+    home_rest = _f(game.get("home_rest_days"), 4.0)
+    away_rest = _f(game.get("away_rest_days"), 4.0)
+    home_travel = _f(game.get("home_travel"), 0.0)
+    away_travel = _f(game.get("away_travel"), 0.0)
 
-    # K/9 and BB/9 — FIX: now included as ML features
-    home_k9 = float(game.get("home_k9", 8.5))
-    away_k9 = float(game.get("away_k9", 8.5))
-    home_bb9 = float(game.get("home_bb9", 3.2))
-    away_bb9 = float(game.get("away_bb9", 3.2))
+    # K/9 and BB/9
+    home_k9 = _f(game.get("home_k9"), 8.5)
+    away_k9 = _f(game.get("away_k9"), 8.5)
+    home_bb9 = _f(game.get("home_bb9"), 3.2)
+    away_bb9 = _f(game.get("away_bb9"), 3.2)
 
     # SP innings pitched + defensive OAA
-    home_sp_ip = float(game.get("home_sp_ip", 5.5))
-    away_sp_ip = float(game.get("away_sp_ip", 5.5))
-    home_def_oaa = float(game.get("home_def_oaa", 0.0))
-    away_def_oaa = float(game.get("away_def_oaa", 0.0))
+    home_sp_ip = _f(game.get("home_sp_ip"), 5.5)
+    away_sp_ip = _f(game.get("away_sp_ip"), 5.5)
+    home_def_oaa = _f(game.get("home_def_oaa"), 0.0)
+    away_def_oaa = _f(game.get("away_def_oaa"), 0.0)
 
     # Enhancement: Platoon splits and lineup confirmation
-    home_platoon_delta = float(game.get("home_platoon_delta", 0.0))
-    away_platoon_delta = float(game.get("away_platoon_delta", 0.0))
-    home_lineup_confirmed = int(game.get("home_lineup_confirmed", 0))
-    away_lineup_confirmed = int(game.get("away_lineup_confirmed", 0))
+    home_platoon_delta = _f(game.get("home_platoon_delta"), 0.0)
+    away_platoon_delta = _f(game.get("away_platoon_delta"), 0.0)
+    home_lineup_confirmed = int(game.get("home_lineup_confirmed") or 0)
+    away_lineup_confirmed = int(game.get("away_lineup_confirmed") or 0)
 
     # SP FIP known flag
     has_sp_fip = 1 if (home_sp_fip != 4.25 and away_sp_fip != 4.25) else 0
@@ -772,8 +776,8 @@ def predict_mlb(game: dict):
         "sp_fip_spread": abs(home_starter_fip - away_starter_fip),
         "both_lineups_confirmed": 1 if (home_lineup_confirmed and away_lineup_confirmed) else 0,
         # AUDIT FIX F-01: market_total defaults to league avg (8.6) not 0
-        "market_spread": float(game.get("market_spread_home") or game.get("market_spread") or 0),
-        "market_total": float(game.get("market_ou_total") or game.get("market_total") or 0)
+        "market_spread": _f(game.get("market_spread_home") or game.get("market_spread"), 0),
+        "market_total": _f(game.get("market_ou_total") or game.get("market_total"), 0)
                         or DEFAULT_CONSTANTS["lg_rpg"] * 2,
         "has_market": 1 if (game.get("market_spread_home") or game.get("market_ou_total")) else 0,
     }
@@ -786,9 +790,9 @@ def predict_mlb(game: dict):
     # temp × park interaction (always computable)
     row_data["temp_x_park"] = ((temp_f - 70) / 30.0) * park_factor
     # Umpire run environment (from frontend if available, else league avg)
-    row_data["ump_run_env"] = float(game.get("ump_run_env", 8.5))
+    row_data["ump_run_env"] = _f(game.get("ump_run_env"), 8.5)
     # AUDIT FIX F-08: Compute series game number from schedule
-    _sgn = float(game.get("series_game_num", 0))
+    _sgn = _f(game.get("series_game_num"), 0)
     row_data["series_game_num"] = _sgn if _sgn > 0 else float(
         _compute_series_game_num(home_team, away_team, game_date) if home_team and away_team else 1)
     # Rolling features — read from mlb_team_rolling + mlb_ump_profiles
@@ -809,15 +813,15 @@ def predict_mlb(game: dict):
 
     if not _rolling_loaded:
         # Fallback: use frontend-provided values or neutral defaults
-        row_data.setdefault("pyth_residual_diff", float(game.get("pyth_residual_diff", 0)))
-        row_data.setdefault("babip_luck_diff", float(game.get("babip_luck_diff", 0)))
-        row_data.setdefault("scoring_entropy_diff", float(game.get("scoring_entropy_diff", 0)))
-        row_data.setdefault("first_inn_rate_diff", float(game.get("first_inn_rate_diff", 0)))
-        row_data.setdefault("clutch_divergence_diff", float(game.get("clutch_divergence_diff", 0)))
-        row_data.setdefault("opp_adj_form_diff", float(game.get("opp_adj_form_diff", 0)))
-        row_data.setdefault("scoring_entropy_combined", float(game.get("scoring_entropy_combined", 5.0)))
-        row_data.setdefault("first_inn_rate_combined", float(game.get("first_inn_rate_combined", 0.8)))
-        row_data.setdefault("ump_run_env", float(game.get("ump_run_env", 8.5)))
+        row_data.setdefault("pyth_residual_diff", _f(game.get("pyth_residual_diff"), 0))
+        row_data.setdefault("babip_luck_diff", _f(game.get("babip_luck_diff"), 0))
+        row_data.setdefault("scoring_entropy_diff", _f(game.get("scoring_entropy_diff"), 0))
+        row_data.setdefault("first_inn_rate_diff", _f(game.get("first_inn_rate_diff"), 0))
+        row_data.setdefault("clutch_divergence_diff", _f(game.get("clutch_divergence_diff"), 0))
+        row_data.setdefault("opp_adj_form_diff", _f(game.get("opp_adj_form_diff"), 0))
+        row_data.setdefault("scoring_entropy_combined", _f(game.get("scoring_entropy_combined"), 5.0))
+        row_data.setdefault("first_inn_rate_combined", _f(game.get("first_inn_rate_combined"), 0.8))
+        row_data.setdefault("ump_run_env", _f(game.get("ump_run_env"), 8.5))
 
     # Gracefully handle any feature the model expects but row_data is missing
     for col in bundle.get("feature_cols", []):
