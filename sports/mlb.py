@@ -909,6 +909,163 @@ def predict_mlb(game: dict):
     }
 
 
+# ═══════════════════════════════════════════════════════════════
+# MLB O/U MODEL (separate total-runs predictor)
+# ═══════════════════════════════════════════════════════════════
+
+def predict_mlb_ou(game: dict):
+    """Predict total runs using the dedicated O/U model (COMBINED features, not diffs)."""
+    bundle = load_model("mlb_ou")
+    if not bundle:
+        return {"error": "MLB O/U model not trained — run mlb_ou_retrain.py --upload"}
+
+    def _f(v, d=0.0):
+        return float(v) if v is not None else d
+
+    home_woba = _f(game.get("home_woba"), 0.315)
+    away_woba = _f(game.get("away_woba"), 0.315)
+    home_sp_fip = _f(game.get("home_sp_fip") or game.get("home_fip"), 4.25)
+    away_sp_fip = _f(game.get("away_sp_fip") or game.get("away_fip"), 4.25)
+    home_fip = _f(game.get("home_fip"), 4.25)
+    away_fip = _f(game.get("away_fip"), 4.25)
+    home_bullpen = _f(game.get("home_bullpen_era"), 4.10)
+    away_bullpen = _f(game.get("away_bullpen_era"), 4.10)
+    park_factor = _f(game.get("park_factor"), 1.00)
+    temp_f = _f(game.get("temp_f"), 70.0)
+    wind_mph = _f(game.get("wind_mph"), 5.0)
+    wind_out_flag = _f(game.get("wind_out_flag"), 0.0)
+    home_k9 = _f(game.get("home_k9"), 8.5)
+    away_k9 = _f(game.get("away_k9"), 8.5)
+    home_bb9 = _f(game.get("home_bb9"), 3.2)
+    away_bb9 = _f(game.get("away_bb9"), 3.2)
+    home_sp_ip = _f(game.get("home_sp_ip"), 5.5)
+    away_sp_ip = _f(game.get("away_sp_ip"), 5.5)
+    home_rest = _f(game.get("home_rest_days"), 4.0)
+    away_rest = _f(game.get("away_rest_days"), 4.0)
+    pred_home = _f(game.get("pred_home_runs"), 0)
+    pred_away = _f(game.get("pred_away_runs"), 0)
+
+    home_starter_fip = home_sp_fip if home_sp_fip != 4.25 else home_fip
+    away_starter_fip = away_sp_fip if away_sp_fip != 4.25 else away_fip
+    wind_out = int(wind_out_flag)
+
+    game_date = game.get("game_date") or datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        season_year = int(game_date[:4])
+    except (ValueError, TypeError):
+        season_year = datetime.utcnow().year
+    lg_rpg = SEASON_CONSTANTS.get(season_year, DEFAULT_CONSTANTS)["lg_rpg"]
+
+    raw_market = game.get("market_ou_total") or game.get("market_total")
+    market_total = _f(raw_market, 0) or lg_rpg * 2
+
+    row_data = {
+        "woba_combined": home_woba + away_woba,
+        "woba_diff": home_woba - away_woba,
+        "fip_combined": home_starter_fip + away_starter_fip,
+        "fip_diff": home_starter_fip - away_starter_fip,
+        "sp_fip_spread": abs(home_starter_fip - away_starter_fip),
+        "bullpen_combined": home_bullpen + away_bullpen,
+        "k_bb_combined": (home_k9 - home_bb9) + (away_k9 - away_bb9),
+        "sp_ip_combined": home_sp_ip + away_sp_ip,
+        "bp_exposure_combined": (
+            max(0, 5.5 - home_sp_ip) * (home_bullpen / 4.10) +
+            max(0, 5.5 - away_sp_ip) * (away_bullpen / 4.10)
+        ),
+        "park_factor": park_factor,
+        "temp_f": temp_f,
+        "wind_mph": wind_mph,
+        "wind_out": wind_out,
+        "is_warm": 1 if temp_f > 75 else 0,
+        "is_cold": 1 if temp_f < 45 else 0,
+        "temp_x_park": ((temp_f - 70) / 30.0) * park_factor,
+        "lg_rpg": lg_rpg,
+        "market_total": market_total,
+        "has_market": 1 if raw_market and _f(raw_market, 0) > 0 else 0,
+        "total_pred": pred_home + pred_away,
+        "has_heuristic": 1 if (pred_home + pred_away) > 0 else 0,
+        "rest_combined": home_rest + away_rest,
+    }
+
+    # Rolling features
+    try:
+        from mlb_rolling_stats import get_rolling_features
+        home_team = (game.get("home_team") or "").upper().strip()
+        away_team = (game.get("away_team") or "").upper().strip()
+        ump = game.get("ump_name", None)
+        rolling = get_rolling_features(home_team, away_team, ump)
+        row_data["scoring_entropy_combined"] = rolling.get("scoring_entropy_combined", 5.0)
+        row_data["first_inn_rate_combined"] = rolling.get("first_inn_rate_combined", 0.8)
+        row_data["ump_run_env"] = rolling.get("ump_run_env", 8.5)
+    except Exception:
+        row_data.setdefault("scoring_entropy_combined", _f(game.get("scoring_entropy_combined"), 5.0))
+        row_data.setdefault("first_inn_rate_combined", _f(game.get("first_inn_rate_combined"), 0.8))
+        row_data.setdefault("ump_run_env", _f(game.get("ump_run_env"), 8.5))
+
+    home_team = (game.get("home_team") or "").upper().strip()
+    away_team = (game.get("away_team") or "").upper().strip()
+    sgn = _f(game.get("series_game_num"), 0)
+    row_data["series_game_num"] = sgn if sgn > 0 else float(
+        _compute_series_game_num(home_team, away_team, game_date) if home_team and away_team else 1)
+
+    for col in bundle.get("feature_cols", []):
+        if col not in row_data:
+            row_data[col] = 0.0
+
+    row = pd.DataFrame([{k: row_data[k] for k in bundle["feature_cols"]}])
+    X_s = bundle["scaler"].transform(row[bundle["feature_cols"]])
+
+    ensemble_models = bundle.get("_ensemble_models", [])
+    if ensemble_models and len(ensemble_models) > 1:
+        raw_total = float(_np.mean([m.predict(X_s)[0] for m in ensemble_models]))
+    else:
+        raw_total = float(bundle.get("reg", bundle.get("model")).predict(X_s)[0])
+
+    bias = bundle.get("bias_correction", 0.0)
+    pred_total = max(4.0, min(18.0, raw_total - bias))
+
+    market_line = _f(game.get("market_ou_total") or game.get("market_total"), 0)
+    ou_edge = pred_total - market_line if market_line > 0 else 0.0
+
+    # Asymmetric thresholds: UNDER 1.0/1.5/2.0 → 1/2/3u; OVER 2.0+ → 1u
+    ou_pick, ou_units = None, 0
+    if market_line > 0:
+        if ou_edge < -2.0:
+            ou_pick, ou_units = "UNDER", 3
+        elif ou_edge < -1.5:
+            ou_pick, ou_units = "UNDER", 2
+        elif ou_edge < -1.0:
+            ou_pick, ou_units = "UNDER", 1
+        elif ou_edge > 2.0:
+            ou_pick, ou_units = "OVER", 1
+
+    shap_out = []
+    try:
+        shap_vals = bundle["explainer"].shap_values(X_s)
+        if isinstance(shap_vals, list):
+            shap_vals = shap_vals[0]
+        sv = shap_vals[0] if len(shap_vals.shape) > 1 else shap_vals
+        for f, v in zip(bundle["feature_cols"], sv):
+            shap_out.append({"feature": f, "shap": round(float(v), 4), "value": round(float(row[f].iloc[0]), 3)})
+        shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+    except Exception:
+        pass
+
+    return {
+        "sport": "MLB", "type": "ou",
+        "pred_total": round(pred_total, 2),
+        "market_total": round(market_line, 1) if market_line > 0 else None,
+        "ou_edge": round(ou_edge, 2),
+        "ou_pick": ou_pick, "ou_units": ou_units,
+        "bias_correction": round(bias, 3),
+        "shap": shap_out[:10],
+        "model_meta": {
+            "n_train": bundle.get("n_train", 0),
+            "mae_cv": bundle.get("mae_cv", 0),
+            "trained_at": bundle.get("trained_at", ""),
+            "model_type": bundle.get("model_type", "unknown"),
+        },
+    }
 
 
 # ═══════════════════════════════════════════════════════════════

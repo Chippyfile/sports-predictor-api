@@ -307,6 +307,19 @@ def route_predict_nba_full():
         print(f"[predict/nba/full] ERROR: {tb}")
         return jsonify({"error": str(e), "traceback": tb}), 500
 
+@app.route("/predict/mlb/ou", methods=["POST"])
+def route_predict_mlb_ou():
+    """MLB Over/Under prediction using dedicated total-runs model."""
+    game = request.get_json(force=True, silent=True) or {}
+    try:
+        from sports.mlb import predict_mlb_ou
+        return jsonify(predict_mlb_ou(game))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[predict/mlb/ou] ERROR: {tb}")
+        return jsonify({"error": str(e), "traceback": tb}), 500
+
 @app.route("/nba/backfill-stats", methods=["POST"])
 def route_nba_backfill_stats():
     """Backfill nba_game_stats + nba_team_rolling from recent completed games."""
