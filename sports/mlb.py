@@ -689,8 +689,11 @@ def predict_mlb(game: dict):
     # Get raw inputs if provided
     home_woba = _f(game.get("home_woba"), 0.315)
     away_woba = _f(game.get("away_woba"), 0.315)
-    home_sp_fip = _f(game.get("home_sp_fip") or game.get("home_fip"), 4.25)
-    away_sp_fip = _f(game.get("away_sp_fip") or game.get("away_fip"), 4.25)
+    # M-04 FIX: explicit None check (0.0 FIP is falsy but valid in Python `or`)
+    home_sp_fip = _f(game.get("home_sp_fip"), None) if game.get("home_sp_fip") is not None else _f(game.get("home_fip"), 4.25)
+    away_sp_fip = _f(game.get("away_sp_fip"), None) if game.get("away_sp_fip") is not None else _f(game.get("away_fip"), 4.25)
+    if home_sp_fip is None: home_sp_fip = 4.25
+    if away_sp_fip is None: away_sp_fip = 4.25
     home_fip = _f(game.get("home_fip"), 4.25)
     away_fip = _f(game.get("away_fip"), 4.25)
     home_bullpen = _f(game.get("home_bullpen_era"), 4.10)
@@ -924,8 +927,11 @@ def predict_mlb_ou(game: dict):
 
     home_woba = _f(game.get("home_woba"), 0.315)
     away_woba = _f(game.get("away_woba"), 0.315)
-    home_sp_fip = _f(game.get("home_sp_fip") or game.get("home_fip"), 4.25)
-    away_sp_fip = _f(game.get("away_sp_fip") or game.get("away_fip"), 4.25)
+    # M-04 FIX: explicit None check
+    home_sp_fip = _f(game.get("home_sp_fip"), None) if game.get("home_sp_fip") is not None else _f(game.get("home_fip"), 4.25)
+    away_sp_fip = _f(game.get("away_sp_fip"), None) if game.get("away_sp_fip") is not None else _f(game.get("away_fip"), 4.25)
+    if home_sp_fip is None: home_sp_fip = 4.25
+    if away_sp_fip is None: away_sp_fip = 4.25
     home_fip = _f(game.get("home_fip"), 4.25)
     away_fip = _f(game.get("away_fip"), 4.25)
     home_bullpen = _f(game.get("home_bullpen_era"), 4.10)

@@ -198,8 +198,9 @@ def threshold_analysis(preds, y, market_spread, market_total, actual_total):
     print(f"  {'='*65}")
     
     # Convert margin to probability: P(home) = 1/(1+10^(-margin/σ))
+    from scipy.stats import norm as _norm
     SIGMA = 4.0
-    win_prob = 1.0 / (1.0 + 10.0 ** (-pv / SIGMA))
+    win_prob = _norm.cdf(pv / SIGMA)
     home_won = tv > 0
     
     print(f"  {'Prob':>7} {'Side':>6} {'Games':>7} {'Correct':>8} {'Acc%':>7}")

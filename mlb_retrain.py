@@ -205,7 +205,7 @@ def load_data(refresh=False):
         offset = 0
         while True:
             r = requests.get(
-                f"{url}/rest/v1/mlb_historical?select=*&order=game_date.asc&limit=1000&offset={offset}",
+                f"{url}/rest/v1/mlb_historical?is_outlier_season=eq.0&select=*&order=game_date.asc&limit=1000&offset={offset}",
                 headers=headers
             )
             rows = r.json()
