@@ -174,7 +174,17 @@ def route_debug_reload(sport):
 # ═══════════════════════════════════════════════════════════════
 
 @app.route("/train/mlb", methods=["POST"])
-def route_train_mlb(): return jsonify(train_mlb())
+def route_train_mlb():
+    """GUARDED: Production model uses mlb_ensemble_retrain.py (29 features).
+    This endpoint trains a 41-feature CatBoost-solo model that would overwrite it.
+    Pass ?force=true to bypass this guard."""
+    if not request.args.get("force"):
+        return jsonify({
+            "error": "BLOCKED — use local mlb_ensemble_retrain.py --upload instead",
+            "reason": "This endpoint trains a 41-feature model that overwrites the 29-feature production ensemble",
+            "bypass": "Add ?force=true to override (not recommended)"
+        }), 403
+    return jsonify(train_mlb())
 
 @app.route("/train/nba", methods=["POST"])
 def route_train_nba(): return jsonify(train_nba())
@@ -745,6 +755,9 @@ def debug_supabase():
 
 @app.route("/debug/train-mlb", methods=["POST"])
 def debug_train_mlb():
+    """GUARDED: Same as /train/mlb — use local retrain instead."""
+    if not request.args.get("force"):
+        return jsonify({"error": "BLOCKED — use mlb_ensemble_retrain.py --upload", "bypass": "?force=true"}), 403
     import traceback
     try:
         return jsonify(train_mlb())

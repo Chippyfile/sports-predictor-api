@@ -51,7 +51,7 @@ N_FOLDS = 20
 from mlb_retrain import build_features as build_41_features, load_data
 
 
-def build_features_32(df):
+def build_production_features(df):
     """Build 41 features then subset to production set."""
     full = build_41_features(df)
     return full[FEATURE_COLS]
@@ -241,7 +241,7 @@ def main():
     y = df["target_margin"].values
     weights = df["season_weight"].values if "season_weight" in df.columns else None
     
-    X_df = build_features_32(df)
+    X_df = build_production_features(df)
     X = X_df.values
     feature_names = list(X_df.columns)
     print(f"\n  Features: {len(feature_names)}")

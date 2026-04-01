@@ -779,10 +779,9 @@ def predict_mlb(game: dict):
     wind_out = int(wind_out_flag)
 
     row_data = {
-        # ── Pruned feature set (S2/ML1 fix: 47→22) ──
+        # ── 29-feature production set (v8 ensemble) ──
         "woba_diff": woba_diff,
         "fip_diff": fip_diff,
-        "has_sp_fip": has_sp_fip,
         "bullpen_era_diff": bullpen_era_diff,
         "k_bb_diff": k_bb_diff,
         "sp_ip_diff": home_sp_ip - away_sp_ip,
@@ -795,31 +794,14 @@ def predict_mlb(game: dict):
         "is_warm": 1 if temp_f > 75 else 0,
         "is_cold": 1 if temp_f < 45 else 0,
         "rest_diff": home_rest - away_rest,
-        # AUDIT FIX F-02: compute travel from schedule instead of always 0
-        "travel_diff": 0.0 - (_compute_travel_miles(away_team, game_date, home_team) / 3000.0
-                              if away_team and home_team else away_travel),
-        # AUDIT FIX F-06: season-aware lg_rpg
-        "lg_rpg": SEASON_CONSTANTS.get(int(game_date[:4]), DEFAULT_CONSTANTS)["lg_rpg"]
-                  if game_date and len(game_date) >= 4 else DEFAULT_CONSTANTS["lg_rpg"],
-        # Interaction features (ML2 fix)
-        "fip_x_bullpen": fip_diff * bullpen_era_diff,
+        # Interactions
         "woba_x_park": woba_diff * park_factor,
-        "wind_x_fip": float(wind_out) * fip_diff,
-        # Heuristic signal
-        "run_diff_pred": ph - pa,
-        "has_heuristic": 1 if ph > 0 or pa > 0 else 0,
-        # Enhancement: Platoon, starter spread, lineup confirmation
+        # Enhancement: Platoon, starter spread
         "platoon_diff": home_platoon_delta - away_platoon_delta,
         "sp_fip_spread": abs(home_starter_fip - away_starter_fip),
-        "both_lineups_confirmed": 1 if (home_lineup_confirmed and away_lineup_confirmed) else 0,
-        # AUDIT FIX F-01: market_total defaults to league avg (8.6) not 0
+        # Market
         "market_spread": _f(game.get("market_spread_home") or game.get("market_spread"), 0),
-        "market_total": _f(game.get("market_ou_total") or game.get("market_total"), 0)
-                        or DEFAULT_CONSTANTS["lg_rpg"] * 2,
-        "has_market": 1 if (game.get("market_spread_home") or game.get("market_ou_total")) else 0,
     }
-    # Derived market feature (after run_diff_pred and market_spread are set)
-    row_data["spread_vs_market"] = row_data["run_diff_pred"] - row_data["market_spread"]
 
     # ── Advanced features (v7) — compute what we can at serve time ──
     # sp_relative_fip: starter quality vs own team (always computable)
@@ -851,7 +833,6 @@ def predict_mlb(game: dict):
     if not _rolling_loaded:
         # Fallback: use frontend-provided values or neutral defaults
         row_data.setdefault("pyth_residual_diff", _f(game.get("pyth_residual_diff"), 0))
-        row_data.setdefault("babip_luck_diff", _f(game.get("babip_luck_diff"), 0))
         row_data.setdefault("scoring_entropy_diff", _f(game.get("scoring_entropy_diff"), 0))
         row_data.setdefault("first_inn_rate_diff", _f(game.get("first_inn_rate_diff"), 0))
         row_data.setdefault("clutch_divergence_diff", _f(game.get("clutch_divergence_diff"), 0))
