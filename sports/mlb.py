@@ -42,6 +42,71 @@ PARK_HFA = {
 }
 # H-5 FIX: Dome parks where outdoor weather adjustments should be skipped
 _DOME_PARKS = {109, 117, 136, 139, 140, 141, 146, 158}
+import math as _math
+from datetime import timedelta as _td
+
+# ── AUDIT FIX F-02: Team city coordinates for travel distance (Haversine) ──
+_MLB_CITY_COORDS = {
+    "ARI": (33.45, -112.07), "ATL": (33.75, -84.39), "BAL": (39.29, -76.61),
+    "BOS": (42.36, -71.06), "CHC": (41.88, -87.63), "CIN": (39.10, -84.51),
+    "CLE": (41.50, -81.69), "COL": (39.74, -104.99), "CWS": (41.88, -87.63),
+    "DET": (42.33, -83.05), "HOU": (29.76, -95.37), "KC": (39.10, -94.58),
+    "LAA": (33.80, -117.88), "LAD": (34.05, -118.24), "MIA": (25.76, -80.19),
+    "MIL": (43.04, -87.91), "MIN": (44.98, -93.27), "NYM": (40.71, -74.01),
+    "NYY": (40.71, -74.01), "OAK": (37.80, -122.27), "PHI": (39.95, -75.17),
+    "PIT": (40.44, -79.99), "SD": (32.72, -117.16), "SEA": (47.61, -122.33),
+    "SF": (37.77, -122.42), "STL": (38.63, -90.20), "TB": (27.77, -82.64),
+    "TEX": (32.74, -97.11), "TOR": (43.65, -79.38), "WSH": (38.91, -77.04),
+}
+
+def _haversine_miles(lat1, lon1, lat2, lon2):
+    R = 3958.8
+    dlat, dlon = _math.radians(lat2-lat1), _math.radians(lon2-lon1)
+    a = _math.sin(dlat/2)**2 + _math.cos(_math.radians(lat1))*_math.cos(_math.radians(lat2))*_math.sin(dlon/2)**2
+    return R * 2 * _math.asin(_math.sqrt(a))
+
+def _compute_travel_miles(team_abbr, game_date_str, current_home_team):
+    """Compute travel miles for away team from their previous game city to today's park."""
+    try:
+        abbr = (team_abbr or "").upper().strip()
+        home = (current_home_team or "").upper().strip()
+        if abbr not in _MLB_CITY_COORDS or home not in _MLB_CITY_COORDS:
+            return 0.0
+        prev = sb_get("mlb_predictions",
+            f"game_date=lt.{game_date_str}&or=(home_team.eq.{abbr},away_team.eq.{abbr})"
+            f"&order=game_date.desc&limit=1&select=home_team")
+        if not prev:
+            return 0.0
+        prev_city = prev[0].get("home_team", "").upper()
+        if prev_city not in _MLB_CITY_COORDS:
+            return 0.0
+        dest = _MLB_CITY_COORDS[home]
+        src = _MLB_CITY_COORDS[prev_city]
+        return _haversine_miles(src[0], src[1], dest[0], dest[1])
+    except Exception:
+        return 0.0
+
+def _compute_series_game_num(home_team, away_team, game_date_str):
+    """Determine game number in current series (1-4)."""
+    try:
+        recent = sb_get("mlb_predictions",
+            f"home_team=eq.{home_team}&away_team=eq.{away_team}"
+            f"&game_date=lte.{game_date_str}&order=game_date.desc&limit=5&select=game_date")
+        if not recent:
+            return 1
+        from datetime import datetime as _dtparse
+        target = _dtparse.strptime(game_date_str, "%Y-%m-%d")
+        count = 0
+        for r in recent:
+            gd = _dtparse.strptime(r["game_date"], "%Y-%m-%d")
+            if abs((target - gd).days) <= 4:
+                count += 1
+            else:
+                break
+        return min(max(count, 1), 4)
+    except Exception:
+        return 1
+
 import numpy as np, pandas as pd, traceback as _tb, shap
 from datetime import datetime
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingClassifier
@@ -612,9 +677,14 @@ def predict_mlb(game: dict):
     ph = float(game.get("pred_home_runs", 0))
     pa = float(game.get("pred_away_runs", 0))
     
+    # AUDIT FIX: capture team abbrs and date for travel/series computation
+    home_team = (game.get("home_team") or "").upper().strip()
+    away_team = (game.get("away_team") or "").upper().strip()
+    game_date = game.get("game_date", datetime.utcnow().strftime("%Y-%m-%d"))
+
     # Get raw inputs if provided
-    home_woba = float(game.get("home_woba", 0.314))
-    away_woba = float(game.get("away_woba", 0.314))
+    home_woba = float(game.get("home_woba", 0.315))  # AUDIT FIX F-14: match lg_woba
+    away_woba = float(game.get("away_woba", 0.315))
     home_sp_fip = float(game.get("home_sp_fip", game.get("home_fip", 4.25)))
     away_sp_fip = float(game.get("away_sp_fip", game.get("away_fip", 4.25)))
     home_fip = float(game.get("home_fip", 4.25))
@@ -676,7 +746,7 @@ def predict_mlb(game: dict):
         "k_bb_diff": k_bb_diff,
         "sp_ip_diff": home_sp_ip - away_sp_ip,
         "bp_exposure_diff": home_bp_exposure - away_bp_exposure,
-        "def_oaa_diff": home_def_oaa - away_def_oaa,
+        "def_oaa_diff": home_def_oaa - away_def_oaa,  # overwritten by rolling stats if available
         "park_factor": park_factor,
         "temp_f": temp_f,
         "wind_mph": wind_mph,
@@ -684,8 +754,12 @@ def predict_mlb(game: dict):
         "is_warm": 1 if temp_f > 75 else 0,
         "is_cold": 1 if temp_f < 45 else 0,
         "rest_diff": home_rest - away_rest,
-        "travel_diff": home_travel - away_travel,
-        "lg_rpg": DEFAULT_CONSTANTS["lg_rpg"],
+        # AUDIT FIX F-02: compute travel from schedule instead of always 0
+        "travel_diff": 0.0 - (_compute_travel_miles(away_team, game_date, home_team) / 3000.0
+                              if away_team and home_team else away_travel),
+        # AUDIT FIX F-06: season-aware lg_rpg
+        "lg_rpg": SEASON_CONSTANTS.get(int(game_date[:4]), DEFAULT_CONSTANTS)["lg_rpg"]
+                  if game_date and len(game_date) >= 4 else DEFAULT_CONSTANTS["lg_rpg"],
         # Interaction features (ML2 fix)
         "fip_x_bullpen": fip_diff * bullpen_era_diff,
         "woba_x_park": woba_diff * park_factor,
@@ -697,9 +771,10 @@ def predict_mlb(game: dict):
         "platoon_diff": home_platoon_delta - away_platoon_delta,
         "sp_fip_spread": abs(home_starter_fip - away_starter_fip),
         "both_lineups_confirmed": 1 if (home_lineup_confirmed and away_lineup_confirmed) else 0,
-        # Market features — use incoming odds if available, else 0
+        # AUDIT FIX F-01: market_total defaults to league avg (8.6) not 0
         "market_spread": float(game.get("market_spread_home") or game.get("market_spread") or 0),
-        "market_total": float(game.get("market_ou_total") or game.get("market_total") or game.get("ou_total") or 0),
+        "market_total": float(game.get("market_ou_total") or game.get("market_total") or 0)
+                        or DEFAULT_CONSTANTS["lg_rpg"] * 2,
         "has_market": 1 if (game.get("market_spread_home") or game.get("market_ou_total")) else 0,
     }
     # Derived market feature (after run_diff_pred and market_spread are set)
@@ -712,9 +787,12 @@ def predict_mlb(game: dict):
     row_data["temp_x_park"] = ((temp_f - 70) / 30.0) * park_factor
     # Umpire run environment (from frontend if available, else league avg)
     row_data["ump_run_env"] = float(game.get("ump_run_env", 8.5))
-    # Series game number (from frontend if available)
-    row_data["series_game_num"] = float(game.get("series_game_num", 1))
+    # AUDIT FIX F-08: Compute series game number from schedule
+    _sgn = float(game.get("series_game_num", 0))
+    row_data["series_game_num"] = _sgn if _sgn > 0 else float(
+        _compute_series_game_num(home_team, away_team, game_date) if home_team and away_team else 1)
     # Rolling features — read from mlb_team_rolling + mlb_ump_profiles
+    _rolling_loaded = False
     try:
         from mlb_rolling_stats import get_rolling_features
         home_abbr = game.get("home_team", "")
@@ -723,17 +801,23 @@ def predict_mlb(game: dict):
         rolling = get_rolling_features(home_abbr, away_abbr, ump)
         for k, v in rolling.items():
             row_data[k] = v
+        _rolling_loaded = True
+    except ImportError:
+        print("  [predict_mlb] mlb_rolling_stats not deployed — using defaults")
     except Exception as e:
+        print(f"  [predict_mlb] rolling features error: {e}")
+
+    if not _rolling_loaded:
         # Fallback: use frontend-provided values or neutral defaults
-        row_data["pyth_residual_diff"] = float(game.get("pyth_residual_diff", 0))
-        row_data["babip_luck_diff"] = float(game.get("babip_luck_diff", 0))
-        row_data["scoring_entropy_diff"] = float(game.get("scoring_entropy_diff", 0))
-        row_data["first_inn_rate_diff"] = float(game.get("first_inn_rate_diff", 0))
-        row_data["clutch_divergence_diff"] = float(game.get("clutch_divergence_diff", 0))
-        row_data["opp_adj_form_diff"] = float(game.get("opp_adj_form_diff", 0))
-        row_data["scoring_entropy_combined"] = float(game.get("scoring_entropy_combined", 5.0))
-        row_data["first_inn_rate_combined"] = float(game.get("first_inn_rate_combined", 0.8))
-        row_data["ump_run_env"] = float(game.get("ump_run_env", 8.5))
+        row_data.setdefault("pyth_residual_diff", float(game.get("pyth_residual_diff", 0)))
+        row_data.setdefault("babip_luck_diff", float(game.get("babip_luck_diff", 0)))
+        row_data.setdefault("scoring_entropy_diff", float(game.get("scoring_entropy_diff", 0)))
+        row_data.setdefault("first_inn_rate_diff", float(game.get("first_inn_rate_diff", 0)))
+        row_data.setdefault("clutch_divergence_diff", float(game.get("clutch_divergence_diff", 0)))
+        row_data.setdefault("opp_adj_form_diff", float(game.get("opp_adj_form_diff", 0)))
+        row_data.setdefault("scoring_entropy_combined", float(game.get("scoring_entropy_combined", 5.0)))
+        row_data.setdefault("first_inn_rate_combined", float(game.get("first_inn_rate_combined", 0.8)))
+        row_data.setdefault("ump_run_env", float(game.get("ump_run_env", 8.5)))
 
     # Gracefully handle any feature the model expects but row_data is missing
     for col in bundle.get("feature_cols", []):
@@ -806,6 +890,8 @@ def predict_mlb(game: dict):
         "ml_win_prob_away": round(1 - win_prob, 4),
         "ml_win_prob_raw": round(raw_win_prob, 4),
         "bias_correction": round(bias, 3),
+        "feature_coverage": f"{sum(1 for c in bundle['feature_cols'] if row_data.get(c,0)!=0)}/{len(bundle['feature_cols'])}",
+        "rolling_stats_loaded": _rolling_loaded,
         "shap": shap_out,  # All features for verification panel
         "model_meta": {
             "n_train": bundle["n_train"],

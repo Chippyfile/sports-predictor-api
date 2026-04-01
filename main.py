@@ -1513,6 +1513,20 @@ def route_mlb_daily():
                     graded += 1
                     print(f"  [cron/mlb] {away_abbr}@{home_abbr}: {away_score}-{home_score} ml={'T' if ml_correct else 'F'}")
         results["graded"] = graded
+
+        # AUDIT FIX: Refresh team rolling stats after grading new results
+        if graded > 0:
+            try:
+                from mlb_rolling_stats import seed_all as _mlb_seed_rolling
+                print("  [cron/mlb] Refreshing team rolling stats...")
+                _mlb_seed_rolling()
+                results["rolling_stats"] = "updated"
+            except ImportError:
+                results["rolling_stats"] = "skipped (module not deployed)"
+            except Exception as e:
+                print(f"  [cron/mlb] rolling stats error: {e}")
+                results["rolling_stats"] = f"error: {str(e)[:100]}"
+
         duration = _time.time() - start
         results["duration_sec"] = round(duration, 1)
         results["status"] = "complete"
@@ -1522,6 +1536,22 @@ def route_mlb_daily():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
     finally:
         _mlb_cron_lock = False
+
+
+@app.route("/cron/mlb-rolling", methods=["GET", "POST"])
+def route_mlb_rolling():
+    """Manually refresh MLB team rolling stats + umpire profiles."""
+    import time as _time
+    start = _time.time()
+    try:
+        from mlb_rolling_stats import seed_all
+        seed_all()
+        return jsonify({"status": "complete", "duration_sec": round(_time.time() - start, 1)})
+    except ImportError:
+        return jsonify({"error": "mlb_rolling_stats.py not deployed"}), 500
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 @app.route("/cron/ncaa-ats-record")
