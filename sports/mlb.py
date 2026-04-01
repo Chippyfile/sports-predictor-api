@@ -712,18 +712,27 @@ def predict_mlb(game: dict):
     away_team = (game.get("away_team") or "").upper().strip()
     game_date = game.get("game_date") or datetime.utcnow().strftime("%Y-%m-%d")
 
+    # AUDIT v6: Season-aware defaults (replaces hardcoded 0.315/4.25/4.10)
+    try:
+        _sy = int(game_date[:4])
+    except (ValueError, TypeError):
+        _sy = datetime.utcnow().year
+    _sc = SEASON_CONSTANTS.get(_sy, DEFAULT_CONSTANTS)
+    _lg_woba = _sc["lg_woba"]
+    _lg_fip = _sc["lg_fip"]
+
     # Get raw inputs if provided
-    home_woba = _f(game.get("home_woba"), 0.315)
-    away_woba = _f(game.get("away_woba"), 0.315)
+    home_woba = _f(game.get("home_woba"), _lg_woba)
+    away_woba = _f(game.get("away_woba"), _lg_woba)
     # M-04 FIX: explicit None check (0.0 FIP is falsy but valid in Python `or`)
-    home_sp_fip = _f(game.get("home_sp_fip"), None) if game.get("home_sp_fip") is not None else _f(game.get("home_fip"), 4.25)
-    away_sp_fip = _f(game.get("away_sp_fip"), None) if game.get("away_sp_fip") is not None else _f(game.get("away_fip"), 4.25)
-    if home_sp_fip is None: home_sp_fip = 4.25
-    if away_sp_fip is None: away_sp_fip = 4.25
-    home_fip = _f(game.get("home_fip"), 4.25)
-    away_fip = _f(game.get("away_fip"), 4.25)
-    home_bullpen = _f(game.get("home_bullpen_era"), 4.10)
-    away_bullpen = _f(game.get("away_bullpen_era"), 4.10)
+    home_sp_fip = _f(game.get("home_sp_fip"), None) if game.get("home_sp_fip") is not None else _f(game.get("home_fip"), _lg_fip)
+    away_sp_fip = _f(game.get("away_sp_fip"), None) if game.get("away_sp_fip") is not None else _f(game.get("away_fip"), _lg_fip)
+    if home_sp_fip is None: home_sp_fip = _lg_fip
+    if away_sp_fip is None: away_sp_fip = _lg_fip
+    home_fip = _f(game.get("home_fip"), _lg_fip)
+    away_fip = _f(game.get("away_fip"), _lg_fip)
+    home_bullpen = _f(game.get("home_bullpen_era"), _lg_fip)
+    away_bullpen = _f(game.get("away_bullpen_era"), _lg_fip)
     park_factor = _f(game.get("park_factor"), 1.00)
     temp_f = _f(game.get("temp_f"), 70.0)
     wind_mph = _f(game.get("wind_mph"), 5.0)
@@ -940,17 +949,27 @@ def predict_mlb_ou(game: dict):
     def _f(v, d=0.0):
         return float(v) if v is not None else d
 
-    home_woba = _f(game.get("home_woba"), 0.315)
-    away_woba = _f(game.get("away_woba"), 0.315)
+    # AUDIT v6: Season-aware defaults
+    game_date = game.get("game_date") or datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        season_year = int(game_date[:4])
+    except (ValueError, TypeError):
+        season_year = datetime.utcnow().year
+    _sc = SEASON_CONSTANTS.get(season_year, DEFAULT_CONSTANTS)
+    _lg_woba = _sc["lg_woba"]
+    _lg_fip = _sc["lg_fip"]
+
+    home_woba = _f(game.get("home_woba"), _lg_woba)
+    away_woba = _f(game.get("away_woba"), _lg_woba)
     # M-04 FIX: explicit None check
-    home_sp_fip = _f(game.get("home_sp_fip"), None) if game.get("home_sp_fip") is not None else _f(game.get("home_fip"), 4.25)
-    away_sp_fip = _f(game.get("away_sp_fip"), None) if game.get("away_sp_fip") is not None else _f(game.get("away_fip"), 4.25)
-    if home_sp_fip is None: home_sp_fip = 4.25
-    if away_sp_fip is None: away_sp_fip = 4.25
-    home_fip = _f(game.get("home_fip"), 4.25)
-    away_fip = _f(game.get("away_fip"), 4.25)
-    home_bullpen = _f(game.get("home_bullpen_era"), 4.10)
-    away_bullpen = _f(game.get("away_bullpen_era"), 4.10)
+    home_sp_fip = _f(game.get("home_sp_fip"), None) if game.get("home_sp_fip") is not None else _f(game.get("home_fip"), _lg_fip)
+    away_sp_fip = _f(game.get("away_sp_fip"), None) if game.get("away_sp_fip") is not None else _f(game.get("away_fip"), _lg_fip)
+    if home_sp_fip is None: home_sp_fip = _lg_fip
+    if away_sp_fip is None: away_sp_fip = _lg_fip
+    home_fip = _f(game.get("home_fip"), _lg_fip)
+    away_fip = _f(game.get("away_fip"), _lg_fip)
+    home_bullpen = _f(game.get("home_bullpen_era"), _lg_fip)
+    away_bullpen = _f(game.get("away_bullpen_era"), _lg_fip)
     park_factor = _f(game.get("park_factor"), 1.00)
     temp_f = _f(game.get("temp_f"), 70.0)
     wind_mph = _f(game.get("wind_mph"), 5.0)
@@ -974,16 +993,12 @@ def predict_mlb_ou(game: dict):
     pred_home = _f(game.get("pred_home_runs"), 0)
     pred_away = _f(game.get("pred_away_runs"), 0)
 
-    home_starter_fip = home_sp_fip if home_sp_fip != 4.25 else home_fip
-    away_starter_fip = away_sp_fip if away_sp_fip != 4.25 else away_fip
+    home_starter_fip = home_sp_fip if home_sp_fip != _lg_fip else home_fip
+    away_starter_fip = away_sp_fip if away_sp_fip != _lg_fip else away_fip
     wind_out = int(wind_out_flag)
 
-    game_date = game.get("game_date") or datetime.utcnow().strftime("%Y-%m-%d")
-    try:
-        season_year = int(game_date[:4])
-    except (ValueError, TypeError):
-        season_year = datetime.utcnow().year
-    lg_rpg = SEASON_CONSTANTS.get(season_year, DEFAULT_CONSTANTS)["lg_rpg"]
+    # game_date and season_year already parsed above
+    lg_rpg = _sc["lg_rpg"]
 
     raw_market = game.get("market_ou_total") or game.get("market_total")
     market_total = _f(raw_market, 0) or lg_rpg * 2
