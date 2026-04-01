@@ -92,7 +92,7 @@ def index():
             "GET  /ratings/ncaa",
             "GET  /cron/ncaa-daily?mode=predict|refresh|grade|auto",
             "GET  /cron/nba-daily?mode=predict|grade|auto",
-            "GET  /cron/mlb-daily?mode=grade",
+            "GET  /cron/mlb-daily?mode=predict|grade|auto",
             "GET  /cron/ncaa-ats-record",
         ],
     })
@@ -328,6 +328,19 @@ def route_predict_mlb_ou():
         import traceback
         tb = traceback.format_exc()
         print(f"[predict/mlb/ou] ERROR: {tb}")
+        return jsonify({"error": str(e), "traceback": tb}), 500
+
+@app.route("/predict/mlb/full", methods=["POST"])
+def route_predict_mlb_full():
+    """Full server-side MLB prediction — fetches all data from MLB Stats API + Supabase."""
+    game = request.get_json(force=True, silent=True) or {}
+    try:
+        from mlb_full_predict import predict_mlb_full
+        return jsonify(predict_mlb_full(game))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[predict/mlb/full] ERROR: {tb}")
         return jsonify({"error": str(e), "traceback": tb}), 500
 
 @app.route("/nba/backfill-stats", methods=["POST"])
@@ -1429,7 +1442,9 @@ _mlb_cron_lock = False
 
 @app.route("/cron/mlb-daily", methods=["GET", "POST"])
 def route_mlb_daily():
-    """MLB daily grading — fills final scores for last 4 days of ungraded games."""
+    """MLB daily cron — predict + grade.
+    Modes: predict (create server-side predictions), grade (fill scores), auto (morning=predict, night=grade)
+    """
     import time as _time, traceback
     from datetime import datetime, timezone, timedelta
     global _mlb_cron_lock
@@ -1447,6 +1462,68 @@ def route_mlb_daily():
         headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
         results = {"mode": mode, "date": today_est, "hour_est": hour_est}
 
+        # Auto: predict in morning, always grade
+        if mode == "auto":
+            mode = "predict" if 6 <= hour_est <= 14 else "grade"
+            results["resolved_mode"] = mode
+
+        # ── PREDICT: Create server-side predictions for today ──
+        predicted = 0
+        if mode in ("predict", "auto"):
+            try:
+                from mlb_full_predict import predict_mlb_full
+                sched = _req.get(
+                    f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today_est}"
+                    f"&hydrate=probablePitcher,teams,venue,linescore,officials", timeout=15)
+                existing = _req.get(
+                    f"{SUPABASE_URL}/rest/v1/mlb_predictions?game_date=eq.{today_est}&select=game_pk",
+                    headers=headers, timeout=15)
+                existing_pks = set()
+                if existing.ok:
+                    existing_pks = {str(r.get("game_pk")) for r in existing.json() if r.get("game_pk")}
+
+                if sched.ok:
+                    for dt in sched.json().get("dates", []):
+                        for g in dt.get("games", []):
+                            status = g.get("status", {}).get("abstractGameState", "")
+                            if status in ("Final", "Live"):
+                                continue
+                            gpk = g.get("gamePk")
+                            if str(gpk) in existing_pks:
+                                continue
+                            try:
+                                res = predict_mlb_full({"game_id": gpk, "game_date": today_est})
+                                if res and "error" not in res:
+                                    margin = res.get("ml_margin", 0) or 0
+                                    wp = res.get("ml_win_prob_home", 0.5) or 0.5
+                                    pt = res.get("pred_total")
+                                    row = {
+                                        "game_date": today_est, "game_pk": gpk,
+                                        "home_team": res["home_team"], "away_team": res["away_team"],
+                                        "game_type": "R" if today_est >= "2026-03-27" else "S",
+                                        "win_pct_home": round(wp, 4),
+                                        "ml_win_prob_home": round(wp, 4),
+                                        "spread_home": round(margin, 2),
+                                        "confidence": "HIGH",
+                                        "pred_home_runs": round(4.5 + margin / 2, 2),
+                                        "pred_away_runs": round(4.5 - margin / 2, 2),
+                                        "ou_total": round(pt, 1) if pt else 9.0,
+                                        "ml_ou_pred_total": round(pt, 2) if pt else None,
+                                    }
+                                    sv = _req.post(f"{SUPABASE_URL}/rest/v1/mlb_predictions",
+                                        headers={**headers, "Content-Type": "application/json",
+                                                 "Prefer": "return=representation"}, json=row, timeout=15)
+                                    if sv.ok:
+                                        predicted += 1
+                                        print(f"  [cron/mlb] Predicted {res['away_team']}@{res['home_team']}: m={margin:.1f} wp={wp:.3f}")
+                            except Exception as e:
+                                print(f"  [cron/mlb] Predict error {gpk}: {e}")
+            except Exception as e:
+                print(f"  [cron/mlb] Predict mode error: {e}")
+                results["predict_error"] = str(e)[:200]
+            results["predicted"] = predicted
+
+        # ── GRADE: Fill final scores ──
         graded = 0
         for days_ago in range(0, 4):
             check_date = (now_est - timedelta(days=days_ago)).strftime("%Y-%m-%d")
@@ -1454,7 +1531,7 @@ def route_mlb_daily():
                 f"{SUPABASE_URL}/rest/v1/mlb_predictions?game_date=eq.{check_date}"
                 f"&result_entered=eq.false"
                 f"&select=id,game_pk,home_team,away_team,win_pct_home,spread_home,"
-                f"market_spread_home,market_ou_total,ou_total,pred_home_runs,pred_away_runs",
+                f"market_spread_home,market_ou_total,ou_total,pred_home_runs,pred_away_runs,ml_ou_pred_total",
                 headers=headers, timeout=15)
             pending = pending_resp.json() if pending_resp.ok else []
             if not isinstance(pending, list) or not pending:
@@ -1499,10 +1576,13 @@ def route_mlb_daily():
                         rl_correct = True if ats_r > 0 else (False if ats_r < 0 else None)
                     else:
                         rl_correct = (margin > 1.5 if model_home else margin < -1.5) if abs(margin) > 1.5 else None
-                    # O/U
+                    # O/U — prefer ML O/U model total, fall back to heuristic
                     total = home_score + away_score
                     ou_line = matched.get("market_ou_total") or matched.get("ou_total")
-                    pred_total = float(matched.get("pred_home_runs") or 0) + float(matched.get("pred_away_runs") or 0)
+                    pred_total = (
+                        float(matched["ml_ou_pred_total"]) if matched.get("ml_ou_pred_total")
+                        else float(matched.get("pred_home_runs") or 0) + float(matched.get("pred_away_runs") or 0)
+                    )
                     ou_correct = None
                     if ou_line and pred_total and total != float(ou_line):
                         actual_over = total > float(ou_line)
