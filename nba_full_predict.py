@@ -827,8 +827,14 @@ def predict_nba_full(game: dict):
     overrides = {}
     # Market
     ov = overrides
-    ov["espn_pregame_wp"] = espn.get("espn_pregame_wp", 0)
-    ov["espn_pregame_wp_pbp"] = espn.get("espn_pregame_wp_pbp", 0)
+    # FIX: Only override ESPN WP if ESPN actually returned predictor data.
+    # Default 0 overwrites the builder's 0.5 default, making a top feature useless.
+    _espn_wp = espn.get("espn_pregame_wp")
+    _espn_wp_pbp = espn.get("espn_pregame_wp_pbp")
+    if _espn_wp and _espn_wp > 0:
+        ov["espn_pregame_wp"] = _espn_wp
+    if _espn_wp_pbp and _espn_wp_pbp > 0:
+        ov["espn_pregame_wp_pbp"] = _espn_wp_pbp
     ov["implied_prob_home"] = round(impl_h, 4) if home_ml else 0
     ov["overround"] = round(impl_h + impl_a - 1, 4) if (home_ml and away_ml) else 0
     ov["ml_spread_dislocation"] = round(impl_h - (1/(1+10**(spread/8)) if spread else 0.5), 4) if home_ml else 0
@@ -837,7 +843,7 @@ def predict_nba_full(game: dict):
     # public_home_spread_pct: proxy for public money direction
     # DK ML implied prob is influenced by public money; ESPN predictor is model-based
     # Positive = public favoring home more than model suggests
-    espn_wp = espn.get("espn_pregame_wp", 0)
+    espn_wp = espn.get("espn_pregame_wp", 0) or row.get("espn_pregame_wp", 0.5)
     if home_ml and espn_wp and espn_wp > 0:
         dk_implied = impl_h / max(impl_h + impl_a, 0.01)  # vig-removed DK prob
         ov["public_home_spread_pct"] = round(dk_implied - espn_wp, 4)
@@ -869,6 +875,12 @@ def predict_nba_full(game: dict):
     if h_star and a_star:
         ov["star1_share_diff"] = round(h_star/max(h_ppg,80) - a_star/max(a_ppg,80), 4)
         ov["lineup_value_diff"] = round(h_star*h_fg*2 - a_star*a_fg*2, 2)
+    else:
+        # Fallback: approximate from team PPG differential (better teams = higher lineup value)
+        # Scale to match training range (~-100 to +100)
+        _h_ppg = float(row.get("home_ppg", 112))
+        _a_ppg = float(row.get("away_ppg", 112))
+        ov["lineup_value_diff"] = round((_h_ppg - _a_ppg) * 0.5, 2)
     ov["star_minutes_fatigue_diff"] = round(h_mpg - a_mpg, 2)
 
     # ── Elo (FIXED: training uses home_form/away_form, not raw Elo) ──
