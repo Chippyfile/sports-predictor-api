@@ -548,6 +548,7 @@ def _load_ou_model():
     import time as _time
     if _ou_cache and (_time.time() - _ou_cache_time) < 600:
         return _ou_cache
+    _load_errors = []
     try:
         import requests as _req, base64 as _b64, io as _io, joblib as _jl
         from config import SUPABASE_URL, SUPABASE_KEY
@@ -562,15 +563,17 @@ def _load_ou_model():
                 raw = _b64.b64decode(rows[0]["data"])
                 _ou_cache = _jl.load(_io.BytesIO(raw))
                 _ou_cache_time = _time.time()
-                print(f"  [nba_ou] Loaded: {_ou_cache.get('model_type','?')}, {_ou_cache.get('n_features','?')} features")
                 return _ou_cache
             else:
-                print("  [nba_ou] No nba_ou row in model_store")
+                _load_errors.append(f"no nba_ou row in model_store (rows={len(rows or [])})")
         else:
-            print(f"  [nba_ou] Supabase HTTP {resp.status_code}")
+            _load_errors.append(f"HTTP {resp.status_code}")
     except Exception as e:
-        print(f"  [nba_ou] Load failed: {e}")
+        _load_errors.append(f"{type(e).__name__}: {e}")
+    # Store error for diagnostics access
+    _load_ou_model._last_error = "; ".join(_load_errors) if _load_errors else "unknown"
     return None
+_load_ou_model._last_error = ""
 
 def _find_game_id(home, away, date):
     ds = date.replace("-","")
@@ -1110,7 +1113,8 @@ def predict_nba_full(game: dict):
     try:
         ou_bundle = _load_ou_model()
         if not ou_bundle:
-            diag["warnings"].append("O/U model not loaded (check nba_ou in model_store)")
+            _err = getattr(_load_ou_model, '_last_error', 'unknown')
+            diag["warnings"].append(f"O/U model not loaded: {_err}")
         elif ou_bundle.get("reg") and ou_bundle.get("scaler"):
             ou_feature_cols = ou_bundle.get("ou_feature_cols")
             if not ou_feature_cols:
