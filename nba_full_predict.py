@@ -1001,17 +1001,27 @@ def predict_nba_full(game: dict):
         tight = 1.0 if abs(spread) <= 5 else 0.5 if abs(spread) <= 8 else 0.0
         ov["clutch_x_tight_spread"] = round(q4_diff * tight, 3)
 
-    # ── Referee home whistle ──
+    # ── Referee features — fallback when scraper didn't run ──
+    # ESPN parser puts ref names in row["_ref_1"], row["_ref_2"], row["_ref_3"]
+    # If scraper already built ref_profile, skip. Otherwise do full Supabase lookup.
     ref_names = [espn.get(f"_ref_{i}", "") for i in range(1, 4)]
-    if any(ref_names) and not ref_profile:  # skip if scraper already got refs
+    if any(ref_names) and not ref_profile.get("home_whistle"):
         try:
-            from nba_enrichment import get_ref_home_whistle
-            hw = get_ref_home_whistle(ref_names)
-            if hw != 0:
-                ov["ref_home_whistle"] = hw
-                diag["sources"].append(f"Refs: {', '.join(n for n in ref_names if n)}")
+            from db import sb_get
+            all_refs = sb_get("nba_ref_profiles",
+                              "select=ref_name,home_whistle,avg_foul_rate,ou_bias,pace_impact&limit=100") or []
+            ref_map = {r["ref_name"]: r for r in all_refs}
+            matched = [ref_map[n] for n in ref_names if n and n in ref_map]
+            if matched:
+                ov["ref_home_whistle"] = sum(r["home_whistle"] for r in matched) / len(matched)
+                ov["ref_foul_proxy"] = sum(r.get("avg_foul_rate", r["home_whistle"]) for r in matched) / len(matched)
+                ov["ref_ou_bias"] = sum(r.get("ou_bias", 0) for r in matched) / len(matched)
+                ov["ref_pace_impact"] = sum(r.get("pace_impact", 0) for r in matched) / len(matched)
+                diag["sources"].append(f"Refs: {', '.join(n for n in ref_names if n)} ({len(matched)} profiled via ESPN)")
+            else:
+                diag["sources"].append(f"Refs: {', '.join(n for n in ref_names if n)} (no profiles found)")
         except Exception as e:
-            diag["warnings"].append(f"ref_whistle: {e}")
+            diag["warnings"].append(f"ref_fallback: {e}")
 
     # Apply ESPN overrides onto v27 feat_df (cast to float to avoid dtype errors)
     feat_df = feat_df.astype(float)
