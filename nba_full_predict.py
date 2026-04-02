@@ -1098,28 +1098,31 @@ def predict_nba_full(game: dict):
     # Debug: return all features if requested
     debug = game.get("debug", False)
 
-    # ═══ O/U TOTAL MODEL (separate CatBoost, same features) ═══
+    # ═══ O/U TOTAL MODEL (dedicated combined features) ═══
     ou_predicted_total = None
     ou_edge = None
     ou_pick = None
     try:
         ou_bundle = _load_ou_model()
         if ou_bundle and ou_bundle.get("reg") and ou_bundle.get("scaler"):
-            ou_feature_cols = ou_bundle.get("ou_feature_cols", feature_cols)
-            # AUDIT-v3 CRIT-3: Warn if O/U model is using spread model features
-            if "ou_feature_cols" not in ou_bundle:
-                diag["warnings"].append("O/U model missing ou_feature_cols — using spread model features (may hurt accuracy)")
-            available_ou = [f for f in ou_feature_cols if f in feature_cols or f in row]
-            if len(available_ou) >= len(ou_feature_cols) * 0.7:
-                ou_vals = {}
-                for f in ou_feature_cols:
-                    if f in feature_cols:
-                        ou_vals[f] = float(X_slim[f].iloc[0])
-                    elif f in row:
-                        ou_vals[f] = float(row.get(f, 0) or 0)
-                    else:
-                        ou_vals[f] = 0.0
-                X_ou = pd.DataFrame([ou_vals])[ou_feature_cols]
+            ou_feature_cols = ou_bundle.get("ou_feature_cols")
+            if not ou_feature_cols:
+                diag["warnings"].append("O/U model missing ou_feature_cols — cannot predict")
+            else:
+                # Build combined O/U features from row dict
+                try:
+                    from nba_ou_train_v2 import build_ou_features_live
+                    X_ou = build_ou_features_live(row, ou_feature_cols)
+                except ImportError:
+                    # Fallback: build features manually from row
+                    ou_vals = {}
+                    for f in ou_feature_cols:
+                        if f in row:
+                            ou_vals[f] = float(row.get(f, 0) or 0)
+                        else:
+                            ou_vals[f] = 0.0
+                    X_ou = pd.DataFrame([ou_vals])[ou_feature_cols]
+                
                 X_ou_s = ou_bundle["scaler"].transform(X_ou)
                 ou_predicted_total = float(ou_bundle["reg"].predict(X_ou_s)[0])
                 ou_bias = ou_bundle.get("bias_correction", 0)
