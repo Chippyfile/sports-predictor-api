@@ -138,11 +138,16 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     f["scoring_entropy_diff"] = h_enr("scoring_entropy",0)-a_enr("scoring_entropy",0)
 
     # === ELO (1) ===
-    # CRITICAL: Training uses home_form/away_form (range -1 to +1, diff -2 to +2)
+    # CRITICAL: Training uses home_form/away_form (range -1 to +2, diff -2 to +2)
     # NOT raw Elo ratings (range 1200-1800, diff -400 to +400)
-    # home_form comes from ESPN form_l5 score
+    # home_form comes from ESPN form_l5 score or nbaSync.js formScore
     h_form = g("home_form", 0)
     a_form = g("away_form", 0)
+    # FIX HIGH-2: Detect raw Elo scale — form scores are -1 to +2.5, raw Elo is 1200-1800
+    if abs(h_form) > 10 or abs(a_form) > 10:
+        # Raw Elo detected — normalize to form-score scale
+        h_form = (h_form - 1500) / 200 + 1.0
+        a_form = (a_form - 1500) / 200 + 1.0
     if h_form != 0 or a_form != 0:
         f["elo_diff"] = round(h_form - a_form, 4)
     else:

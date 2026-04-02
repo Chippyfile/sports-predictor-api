@@ -1,8 +1,20 @@
 """
-nba_full_predict.py — Server-side enriched NBA prediction (v26 Lasso)
+nba_full_predict.py — Server-side enriched NBA prediction (v27 Ensemble)
 
-ARCHITECTURE: Single ESPN summary call extracts ~50 of 66 features.
-Supabase supplements rolling PBP stats. Elo from local file.
+ARCHITECTURE: Single ESPN summary call extracts ~50 features.
+Supabase supplements enrichment + rolling PBP stats. Elo from local file.
+Model: 5-model ensemble (Lasso+Ridge+CatBoost+LightGBM+GBM), 55 features.
+
+AUDIT v2 FIXES:
+  CRIT-1: Rolling PBP direct diff injection (no fake component splitting)
+  CRIT-2: Enrichment from Supabase tables (no fabricated per-team values)
+  CRIT-3: Removed enrich_v2() on single rows (was zeroing 22 features)
+  CRIT-4: Fixed override mappings (entropy≠HHI, drb_pct≠roll_dreb)
+  CRIT-5: Fixed ref foul_rate (was copy of home_whistle)
+  HIGH-3: ftpct_diff uses team FT% not star player FT%
+  HIGH-5: Bundle feature validation logging
+  HIGH-6: Removed _nba_backfill_heuristic on live rows
+  MED-6:  Feature coverage warning guard
 
 Data extracted from ESPN /summary endpoint:
   - Team stats: PPG, OPP PPG, FG%, 3P%, REB, AST, BLK, STL, TO
@@ -671,30 +683,15 @@ def predict_nba_full(game: dict):
     except Exception as e:
         diag["warnings"].append(f"season_stats: {e}")
 
-    df = pd.DataFrame([row])
-    if "actual_home_score" not in df.columns:
-        df["actual_home_score"] = df["pred_home_score"]
-        df["actual_away_score"] = df["pred_away_score"]
-
-    try:
-        from sports.nba import _nba_backfill_heuristic
-        df = _nba_backfill_heuristic(df)
-    except Exception as e: diag["warnings"].append(f"backfill: {e}")
-
-    try:
-        from enrich_nba_v2 import enrich as enrich_v2
-        df = enrich_v2(df)
-        diag["sources"].append("enrich_v2")
-    except Exception as e: diag["warnings"].append(f"enrich_v2: {e}")
-
-    # FIX: Sync enriched df columns back to row for build_v27_features
-    # enrich_v2 computes three_pt_regression, opp_suppression, three_fg_rate, etc.
-    # into df, but build_v27_features reads from row dict — so sync them.
-    for col in df.columns:
-        if col not in row:
-            val = df[col].iloc[0]
-            if val is not None and not (isinstance(val, float) and np.isnan(val)):
-                row[col] = val
+    # ── FIX HIGH-6: Do NOT call _nba_backfill_heuristic on live rows.
+    # It's designed for historical training data backfill — on a single row it
+    # overwrites ESPN-derived values with heuristic guesses.
+    #
+    # FIX CRIT-3: Do NOT call enrich_v2() on single rows.
+    # enrich_v2 computes rolling window stats (trend, accel, skew, etc.)
+    # requiring 10+ prior games. On a single row ALL rolling features → NaN/0,
+    # creating massive train/serve skew.
+    # Instead, enrichment comes from Supabase tables + direct diff injection.
 
     # ── Streak → after_loss flags ──
     try:
@@ -714,73 +711,63 @@ def predict_nba_full(game: dict):
     # ═══ 8. Build v27 features ═══
     bundle = _load_model()
     if not bundle: return {"error": "NBA model not found"}
-    print(f"  [DEBUG] bundle keys={list(bundle.keys())[:5]} model_type={bundle.get('model_type')} n_features={len(bundle.get('feature_cols',bundle.get('feature_list',[])))} trained_at={bundle.get('trained_at')}")
+    # FIX HIGH-5: Log bundle info for verification
+    feature_cols = bundle.get("feature_cols", bundle.get("feature_list", []))
+    print(f"  [AUDIT] Bundle: {len(feature_cols)} features, "
+          f"model_type={bundle.get('model_type')}, "
+          f"trained_at={bundle.get('trained_at')}")
 
     from nba_v27_features_live import build_v27_features
 
-    # ── FIX: Fetch rolling PBP data BEFORE build_v27_features ──
-    # Was in overrides block (after build), so feature builder always got zeros
+    # ── FIX CRIT-1: Fetch rolling PBP diffs — store for direct override after build ──
+    # Do NOT split diffs into fake per-team components (both sides get same avg → diff=0).
+    # Instead store the pre-computed diffs and inject into feat_df AFTER build_v27_features.
+    _roll_diffs = {}
     try:
         from nba_game_stats import get_rolling_diffs
-        roll_diffs = get_rolling_diffs(home_abbr, away_abbr)
-        if roll_diffs:
-            # Map rolling source keys → row keys that build_v27_features reads
-            _roll_row_map = {
-                "roll_bench_pts_diff":           ("home_roll_bench_pts", "away_roll_bench_pts"),
-                "roll_paint_pts_diff":           ("home_roll_paint_pts", "away_roll_paint_pts"),
-                "roll_fast_break_pts_diff":      ("home_roll_fast_break_pts", "away_roll_fast_break_pts"),
-                "roll_second_chance_pts_diff":   ("home_roll_second_chance_pts", "away_roll_second_chance_pts"),
-                "roll_largest_lead_diff":        ("home_roll_largest_lead", "away_roll_largest_lead"),
-                "roll_q4_scoring_diff":          ("home_roll_q4_scoring", "away_roll_q4_scoring"),
-                "roll_three_fg_rate_diff":       ("home_roll_three_fg_rate", "away_roll_three_fg_rate"),
-                "roll_ft_trip_rate_diff":        ("home_roll_ft_trip_rate", "away_roll_ft_trip_rate"),
-            }
-            # For diffs, put them directly in row for override; for component keys, approximate
-            for src_key, val in roll_diffs.items():
-                if val is not None:
-                    row[src_key] = val  # raw diff available for overrides
-            # roll_max_run_avg is an average, not a diff — put components if available
-            if "roll_max_run_avg" in roll_diffs and roll_diffs["roll_max_run_avg"] is not None:
-                avg = roll_diffs["roll_max_run_avg"]
-                row.setdefault("home_roll_max_run", avg)
-                row.setdefault("away_roll_max_run", avg)
-            # roll_dreb_diff → split into components
-            if "roll_dreb_diff" in roll_diffs and roll_diffs["roll_dreb_diff"] is not None:
-                row["home_roll_dreb"] = roll_diffs["roll_dreb_diff"]  # will be overridden by enrichment if available
-                row.setdefault("away_roll_dreb", 0)
-            diag["sources"].append(f"Rolling PBP ({len(roll_diffs)} features)")
+        _roll_diffs = get_rolling_diffs(home_abbr, away_abbr) or {}
+        if _roll_diffs:
+            diag["sources"].append(f"Rolling PBP ({len(_roll_diffs)} features)")
     except Exception as e:
         diag["warnings"].append(f"rolling PBP: {e}")
 
-    # ── FIX: Fetch enrichment data BEFORE build_v27_features ──
-    # Was in overrides block (after build), so enrichment dict was always empty
+    # ── FIX CRIT-2: Fetch enrichment from Supabase tables + live diff module ──
+    # Do NOT fabricate per-team values from diffs with arbitrary centering.
+    # Fetch per-team enrichment from nba_team_enrichment table first,
+    # then store diffs separately for direct override injection.
     enrichment = {"home": {}, "away": {}}
+    _enrich_diffs = {}
+    try:
+        from db import sb_get
+        for side, abbr in [("home", home_abbr), ("away", away_abbr)]:
+            rows_enr = sb_get("nba_team_enrichment",
+                              f"team_abbr=eq.{abbr}&order=updated_at.desc&limit=1") or []
+            if rows_enr:
+                enrichment[side] = rows_enr[0]
+        n_enr = sum(len(v) for v in enrichment.values())
+        if n_enr:
+            diag["sources"].append(f"Supabase enrichment ({n_enr} fields)")
+    except Exception as e:
+        diag["warnings"].append(f"enrichment_supabase: {e}")
+
+    # Also try live-computed diffs (for direct override after build)
     try:
         from nba_enrichment import get_enrichment_diffs
-        enrich_diffs = get_enrichment_diffs(home_abbr, away_abbr)
-        if enrich_diffs:
-            # Put raw diffs into row for overrides
-            for feat, val in enrich_diffs.items():
-                if val is not None:
-                    row[feat] = val
-            # Build per-team enrichment dict for build_v27_features
-            # get_enrichment_diffs returns diffs; try to get per-team data too
+        _enrich_diffs = get_enrichment_diffs(home_abbr, away_abbr) or {}
+        if _enrich_diffs:
+            diag["sources"].append(f"Enrichment diffs ({len(_enrich_diffs)} features)")
+        # If Supabase enrichment was empty, try per-team module
+        if not enrichment["home"] and not enrichment["away"]:
             try:
                 from nba_enrichment import get_team_enrichment
                 h_enr = get_team_enrichment(home_abbr) or {}
                 a_enr = get_team_enrichment(away_abbr) or {}
-                enrichment = {"home": h_enr, "away": a_enr}
+                if h_enr: enrichment["home"] = h_enr
+                if a_enr: enrichment["away"] = a_enr
             except ImportError:
-                # Fallback: populate enrichment from diff values where possible
-                if "scoring_entropy_diff" in enrich_diffs:
-                    enrichment["home"]["scoring_hhi"] = 0.15 + (enrich_diffs["scoring_entropy_diff"] or 0) / 2
-                    enrichment["away"]["scoring_hhi"] = 0.15 - (enrich_diffs["scoring_entropy_diff"] or 0) / 2
-                if "drb_pct_diff" in enrich_diffs:
-                    row["home_roll_dreb"] = (enrich_diffs["drb_pct_diff"] or 0)
-                    row.setdefault("away_roll_dreb", 0)
-            diag["sources"].append(f"Enrichment ({len(enrich_diffs)} features)")
+                pass
     except Exception as e:
-        diag["warnings"].append(f"enrichment: {e}")
+        diag["warnings"].append(f"enrichment_diffs: {e}")
 
     # ── Referee lookup: official.nba.com (posted ~9AM ET) ──
     ref_profile = {}
@@ -791,13 +778,14 @@ def predict_nba_full(game: dict):
             for k, v in scraped.items():
                 espn[f"_{k}"] = v  # _ref_1, _ref_2, _ref_3
             from db import sb_get
-            all_refs = sb_get("nba_ref_profiles", "select=ref_name,home_whistle,avg_home_margin&limit=50") or []
+            all_refs = sb_get("nba_ref_profiles", "select=ref_name,home_whistle,avg_home_margin,avg_foul_rate&limit=50") or []
             ref_map = {r["ref_name"]: r for r in all_refs}
             matched = [ref_map[n] for n in scraped.values() if n in ref_map]
             if matched:
                 ref_profile = {
                     "home_whistle": sum(r["home_whistle"] for r in matched) / len(matched),
-                    "foul_rate":    sum(r["home_whistle"] for r in matched) / len(matched),
+                    # FIX CRIT-5: Use actual foul rate, not home_whistle copy
+                    "foul_rate":    sum(r.get("avg_foul_rate", r["home_whistle"]) for r in matched) / len(matched),
                 }
                 diag["sources"].append(f"Refs: {', '.join(scraped.values())} ({len(matched)} profiled)")
             else:
@@ -816,8 +804,7 @@ def predict_nba_full(game: dict):
 
     feat_df = build_v27_features(row, enrichment=enrichment, ref_profile=ref_profile, league_avg_ts=_lg_ts)
 
-    # Select only the features this model was trained on
-    feature_cols = bundle.get("feature_cols", bundle.get("feature_list", []))
+    # Select only the features this model was trained on (feature_cols set above)
     for f in feature_cols:
         if f not in feat_df.columns:
             feat_df[f] = 0.0
@@ -931,11 +918,19 @@ def predict_nba_full(game: dict):
     if h_sv or a_sv:
         ov["scoring_var_diff"] = round(h_sv - a_sv, 2)
 
-    # ftpct_diff: team FT% not in ESPN team stats, use star player FT% as proxy
-    h_ft = float(espn.get("home_ftpct_leader", 0) or 0)
-    a_ft = float(espn.get("away_ftpct_leader", 0) or 0)
+    # FIX HIGH-3: ftpct_diff — use TEAM FT% from season stats (already in row),
+    # not star player FT% (different distribution: ~85% vs ~77%)
+    h_ft = float(row.get("home_ftpct", 0) or 0)
+    a_ft = float(row.get("away_ftpct", 0) or 0)
     if h_ft and a_ft:
+        # Normalize: season stats may return as decimal (0.78) or raw (78)
+        if h_ft > 1: h_ft /= 100
+        if a_ft > 1: a_ft /= 100
         ov["ftpct_diff"] = round(h_ft - a_ft, 4)
+    # Only fall back to star FT% if team FT% truly unavailable
+    elif espn.get("home_ftpct_leader") and espn.get("away_ftpct_leader"):
+        ov["ftpct_diff"] = round(float(espn["home_ftpct_leader"]) - float(espn["away_ftpct_leader"]), 4)
+        diag["warnings"].append("ftpct_diff: using star player FT% fallback")
 
     # ATS rolling
     ov["roll_ats_margin_gated"] = round(h_sr.get("ats_avg",0) - a_sr.get("ats_avg",0), 2)
@@ -946,29 +941,55 @@ def predict_nba_full(game: dict):
     ov["home_after_loss"] = 1 if h_streak < 0 else 0
     ov["away_after_loss"] = 1 if a_streak < 0 else 0
 
-    # ── Rolling PBP overrides (data already fetched into row before build_v27_features) ──
-    # Map raw diff keys → v27 feature names for feat_df patching
-    _roll_feat_map = {
-        "roll_paint_pts_diff": "roll_paint_pts_diff",
+    # ── FIX CRIT-1: Rolling PBP direct diff injection ──
+    # Inject pre-computed diffs directly — no component splitting needed.
+    _roll_direct_map = {
+        "roll_bench_pts_diff":      "roll_bench_pts_diff",
+        "roll_paint_pts_diff":      "roll_paint_pts_diff",
         "roll_fast_break_pts_diff": "roll_fast_break_diff",
-        "roll_ft_trip_rate_diff": "roll_ft_trip_rate_diff",
-        "roll_max_run_avg": "roll_max_run_avg",
-        "roll_dreb_diff": "roll_dreb_diff",
+        "roll_ft_trip_rate_diff":   "roll_ft_trip_rate_diff",
+        "roll_three_fg_rate_diff":  "roll_three_fg_rate_diff",
+        "roll_q4_scoring_diff":     "roll_q4_diff",
+        "roll_max_run_avg":         "roll_max_run_avg",
+        "roll_dreb_diff":           "roll_dreb_diff",
+        "roll_paint_fg_rate_diff":  "roll_paint_fg_rate_diff",
     }
-    for src, dst in _roll_feat_map.items():
-        val = row.get(src)
+    for src_key, model_feat in _roll_direct_map.items():
+        val = _roll_diffs.get(src_key)
         if val is not None:
-            ov[dst] = val
+            ov[model_feat] = float(val)
 
-    # ── Enrichment overrides (data already fetched into row before build_v27_features) ──
-    _enrich_map = {
-        "scoring_entropy_diff": "scoring_hhi_diff",
-        "drb_pct_diff": "roll_dreb_diff",
+    # ── FIX CRIT-4: Enrichment direct diff injection ──
+    # Correct feature name mappings (was: entropy→HHI, drb_pct→roll_dreb — both wrong)
+    _enrich_direct_map = {
+        "scoring_entropy_diff":     "scoring_entropy_diff",
+        "scoring_hhi_diff":         "scoring_hhi_diff",
+        "ceiling_diff":             "ceiling_diff",
+        "floor_diff":               "floor_diff",
+        "consistency_diff":         "consistency_diff",
+        "bimodal_diff":             "bimodal_diff",
+        "opp_suppression_diff":     "opp_suppression_diff",
+        "score_kurtosis_diff":      "score_kurtosis_diff",
+        "margin_accel_diff":        "margin_accel_diff",
+        "momentum_halflife_diff":   "momentum_halflife_diff",
+        "win_aging_diff":           "win_aging_diff",
+        "pyth_residual_diff":       "pyth_residual_diff",
+        "pyth_luck_diff":           "pyth_luck_diff",
+        "recovery_diff":            "recovery_diff",
+        "pace_control_diff":        "pace_control_diff",
+        "pace_leverage":            "pace_leverage",
+        "three_value_diff":         "three_value_diff",
+        "ts_regression_diff":       "ts_regression_diff",
+        "three_pt_regression_diff": "three_pt_regression_diff",
+        "matchup_efg":              "matchup_efg",
+        "matchup_ft":               "matchup_ft",
+        "matchup_orb":              "matchup_orb",
+        "lineup_value_diff":        "lineup_value_diff",
     }
-    for src, dst in _enrich_map.items():
-        val = row.get(src)
+    for src_key, model_feat in _enrich_direct_map.items():
+        val = _enrich_diffs.get(src_key)
         if val is not None:
-            ov[dst] = val
+            ov[model_feat] = float(val)
 
     # ── Interaction features ──
     # clutch_x_tight_spread: Q4 scoring diff (clutch proxy) × tight spread indicator
@@ -1026,6 +1047,11 @@ def predict_nba_full(game: dict):
         diag["warnings"].append(f"shap: {e}")
 
     nz = sum(1 for s in shap_out if s["value"] != 0)
+    # FIX MED-6: Warn on low feature coverage
+    coverage_pct = nz / len(feature_cols) if feature_cols else 0
+    if coverage_pct < 0.50:
+        diag["warnings"].append(
+            f"LOW COVERAGE: {nz}/{len(feature_cols)} features non-zero ({coverage_pct:.0%})")
     mkt = float(row.get("market_spread_home", 0) or 0)
 
     # Debug: return all features if requested
