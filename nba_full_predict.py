@@ -907,8 +907,16 @@ def predict_nba_full(game: dict):
         a_form = float(espn.get("away_form_l5", 0) or row.get("away_form_l5", 0) or 0)
     _elo_source = "none"
     if h_form != 0 or a_form != 0:
-        ov["elo_diff"] = round(h_form - a_form, 4)
-        _elo_source = f"form(h={h_form:.3f},a={a_form:.3f})"
+        form_diff = round(h_form - a_form, 4)
+        if form_diff != 0:
+            ov["elo_diff"] = form_diff
+            _elo_source = f"form(h={h_form:.3f},a={a_form:.3f})"
+        else:
+            # Form scores tied (common with coarse ESPN L5: only 6 possible values)
+            # Use raw Elo as tiebreaker — it captures season-long strength differences
+            _raw = h_elo - a_elo
+            ov["elo_diff"] = round(float(np.clip(_raw / 200, -2, 2)), 4)
+            _elo_source = f"elo_tiebreak(form_tied={h_form:.3f},raw_elo_diff={_raw:.0f},norm={ov['elo_diff']:.3f})"
     else:
         # Fallback: normalize raw elo to training scale (-2 to +2)
         _raw = h_elo - a_elo
