@@ -1,12 +1,13 @@
 """
-nba_full_predict.py — Server-side enriched NBA prediction (v27 Lasso)
+nba_full_predict.py — Server-side enriched NBA prediction (v27)
 
 ARCHITECTURE: Single ESPN summary call extracts ~50 raw values.
 Supabase supplements enrichment + rolling PBP stats. Elo from local file.
-Model: Lasso (alpha=0.1) regressor, 38 features selected by L1 from 69 candidates.
-Feature builder (nba_v27_features_live.py) is the SINGLE SOURCE OF TRUTH for
-feature computation. This file only injects supplementary external data
-(rolling PBP diffs, enrichment diffs, ref profiles) AFTER the builder runs.
+Model: Loaded from Supabase model_store (key="nba"). Current deployment is
+ensemble_5_v27 (55 features). Feature builder (nba_v27_features_live.py) is
+the SINGLE SOURCE OF TRUTH for feature computation. This file only injects
+supplementary external data (rolling PBP diffs, enrichment diffs, ref profiles)
+AFTER the builder runs.
 
 AUDIT v2 FIXES:
   CRIT-1: Rolling PBP direct diff injection (no fake component splitting)
@@ -1047,6 +1048,20 @@ def predict_nba_full(game: dict):
 
     # ═══ 9. Predict ═══
     X_s = bundle["scaler"].transform(X_slim)
+
+    # FIX REAUDIT CRIT-1: Neutralize phantom SHAP from missing-data features.
+    # When ref features are 0 (refs not assigned yet), the scaler transforms 0 to
+    # (0 - training_mean) / std ≈ -1.2, which produces +1.98 phantom home SHAP.
+    # Fix: set scaled value to 0 for any "missing = 0" feature, so contribution = 0.
+    _MISSING_WHEN_ZERO = {"ref_foul_proxy", "ref_home_whistle", "ref_ou_bias", "ref_pace_impact"}
+    _neutralized = []
+    for i, feat in enumerate(feature_cols):
+        if feat in _MISSING_WHEN_ZERO and abs(float(X_slim[feat].iloc[0])) < 1e-6:
+            X_s[0][i] = 0.0
+            _neutralized.append(feat)
+    if _neutralized:
+        print(f"  [NEUTRAL] {len(_neutralized)} missing-data features zeroed after scaling: {', '.join(_neutralized)}")
+
     reg = bundle.get("reg", bundle.get("model"))
     margin = float(reg.predict(X_s)[0])
     clf = bundle.get("clf")

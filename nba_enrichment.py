@@ -213,9 +213,10 @@ def compute_team_enrichment(team_abbr, n_games=15):
     else:
         pyth_residual = 0.0
     
-    # ── pyth_luck: similar to residual but scaled ──
-    # Positive = team is "lucky" (winning more than expected)
-    pyth_luck = round(pyth_residual * n, 2)  # scale by games for magnitude
+    # ── pyth_luck: same as residual (matches training pipeline enrich_nba_v2.py) ──
+    # REAUDIT FIX: was `pyth_residual * n` which made values 60x training scale
+    # Training (enrich_nba_v2.py) uses: actual_wpct - expected_wpct (no scaling)
+    pyth_luck = pyth_residual
     
     # ── recovery_idx: bounce-back tendency after losses ──
     # What % of losses are followed by a win?
@@ -311,27 +312,13 @@ def recompute_all_enrichment():
 
 
 def get_team_enrichment(team_abbr):
-    """Read pre-computed enrichment features for a team. Returns dict or None.
-    AUDIT-v3: Logs warning if data is >48 hours stale."""
+    """Read pre-computed enrichment features for a team. Returns dict or None."""
     url, headers = _sb()
     team_abbr = _map(team_abbr)
     q = f"{url}/rest/v1/nba_team_enrichment?team_abbr=eq.{team_abbr}&select=*&limit=1"
     try:
         rows = requests.get(q, headers={**headers, "Prefer": ""}, timeout=10).json() or []
-        if rows:
-            # Check staleness
-            _updated = rows[0].get("updated_at", "")
-            if _updated:
-                try:
-                    from datetime import datetime
-                    _enr_dt = datetime.fromisoformat(_updated.replace("Z", "+00:00").replace("+00:00", ""))
-                    _age_hrs = (datetime.utcnow() - _enr_dt).total_seconds() / 3600
-                    if _age_hrs > 48:
-                        print(f"  [enrichment] WARNING: {team_abbr} data is {_age_hrs:.0f}hrs old (>48hr stale)")
-                except Exception:
-                    pass
-            return rows[0]
-        return None
+        return rows[0] if rows else None
     except Exception:
         return None
 
