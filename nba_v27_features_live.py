@@ -52,7 +52,7 @@ FEATURES_69 = [
 TRAIN_RANGES = {
     "elo_diff": (-2.5, 2.5),
     "pyth_luck_diff": (-0.35, 0.35),
-    "pyth_residual_diff": (-0.25, 0.25),
+    "pyth_residual_diff": (-0.35, 0.35),
     "win_pct_diff": (-1.0, 1.0),
     "efg_diff": (-0.15, 0.15),
     "ftpct_diff": (-0.25, 0.25),
@@ -69,10 +69,10 @@ TRAIN_RANGES = {
     "consistency_diff": (-50, 50),
     "margin_accel_diff": (-60, 60),
     "score_kurtosis_diff": (-5, 5),
-    "bimodal_diff": (-1, 1),
+    "bimodal_diff": (-3, 3),
     "scoring_hhi_diff": (-0.5, 0.5),
     "scoring_entropy_diff": (-1, 1),
-    "pace_control_diff": (-0.5, 0.5),
+    "pace_control_diff": (-1.0, 1.0),
     "pace_leverage": (0, 2),
     "recovery_diff": (-2, 2),
     "ts_regression_diff": (-0.15, 0.15),
@@ -169,8 +169,8 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     f["net_rtg_diff"] = round(g("home_net_rtg",0)-g("away_net_rtg",0),2)
     # AUDIT-v3: opp_ppg_diff was in V27 training but MISSING from live builder
     f["opp_ppg_diff"] = round(g("home_opp_ppg",112)-g("away_opp_ppg",112),2)
-    # AUDIT-v3: matchup_to was in V27 training but MISSING — uses turnover rates
-    f["matchup_to"] = round(g("home_turnovers",14)/max(g("away_steals",7.5),1)-g("away_turnovers",14)/max(g("home_steals",7.5),1),4)
+    # AUDIT-v3: matchup_to — matches training builder: (home_net_rtg - away_net_rtg) * 0.02
+    f["matchup_to"] = round((g("home_net_rtg",0) - g("away_net_rtg",0)) * 0.02, 4)
     h3r=g("home_three_fg_rate",0) or h_enr("three_fg_rate",0)
     a3r=g("away_three_fg_rate",0) or a_enr("three_fg_rate",0)
     f["three_value_diff"] = round(h3r*(h3r-0.20)-a3r*(a3r-0.20),4)
