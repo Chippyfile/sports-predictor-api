@@ -229,7 +229,27 @@ def load_data(refresh=False):
     df["target_margin"] = df["actual_home_runs"] - df["actual_away_runs"]
 
     # Season
-    df["season"] = pd.to_datetime(df["game_date"]).dt.year
+    df["game_date_dt"] = pd.to_datetime(df["game_date"])
+    df["season"] = df["game_date_dt"].dt.year
+
+    # ── Filter: skip 2020 and 2021 (COVID seasons) ──
+    n_before = len(df)
+    df = df[~df["season"].isin([2020, 2021])].copy()
+    n_covid = n_before - len(df)
+    if n_covid > 0:
+        print(f"  Dropped {n_covid} games from 2020/2021 (COVID seasons)")
+
+    # ── Filter: skip games before April 15 of any season ──
+    # Early-season stats are unreliable (small sample, cold weather, roster flux)
+    n_before = len(df)
+    apr15_mask = ~((df["game_date_dt"].dt.month < 4) |
+                   ((df["game_date_dt"].dt.month == 4) & (df["game_date_dt"].dt.day < 15)))
+    df = df[apr15_mask].copy()
+    n_early = n_before - len(df)
+    if n_early > 0:
+        print(f"  Dropped {n_early} games before April 15 (early-season noise)")
+
+    df = df.drop(columns=["game_date_dt"])
 
     # Season weight
     if "season_weight" not in df.columns or df["season_weight"].isna().all():

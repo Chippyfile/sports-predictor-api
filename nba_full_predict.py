@@ -947,19 +947,6 @@ def predict_nba_full(game: dict):
         ov["elo_diff"] = round(float(np.clip(_raw / 200, -2, 2)), 4)
         _elo_source = f"raw_elo(h={h_elo},a={a_elo},norm={ov['elo_diff']:.3f})"
     print(f"  [AUDIT] elo_diff={ov['elo_diff']:.4f} source={_elo_source}")
-    # Temporarily expose in diagnostics for remote debugging
-    diag["_elo_debug"] = {
-        "source": _elo_source,
-        "row_home_form": row.get("home_form"),
-        "row_away_form": row.get("away_form"),
-        "espn_home_form_l5": espn.get("home_form_l5"),
-        "espn_away_form_l5": espn.get("away_form_l5"),
-        "row_home_form_l5": row.get("home_form_l5"),
-        "row_away_form_l5": row.get("away_form_l5"),
-        "h_elo": h_elo,
-        "a_elo": a_elo,
-        "raw_elo_diff": h_elo - a_elo,
-    }
 
     # ATS rolling
     ov["roll_ats_margin_gated"] = round(h_sr.get("ats_avg",0) - a_sr.get("ats_avg",0), 2)

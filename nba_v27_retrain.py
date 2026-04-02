@@ -44,6 +44,8 @@ FEATURES_55 = [
     "spread_juice_imbalance", "steals_to_diff", "three_pt_regression_diff",
     "three_value_diff", "threepct_diff", "ts_regression_diff",
     "turnovers_diff", "win_pct_diff",
+    # v28: 5 features previously computed at serve time but not in model
+    "net_rtg_diff", "opp_ppg_diff", "ml_implied_spread", "matchup_to", "rest_diff",
 ]
 
 MODEL_CONFIGS = {
@@ -352,8 +354,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("=" * 70)
-    print("  NBA v27 RETRAIN — 55 Features, 5-Model Ensemble (depth 6)")
+    print("  NBA v28 RETRAIN — 60 Features, 5-Model Ensemble")
     print("  Lasso + Ridge + CatBoost_d6_800 + LightGBM_300 + GBM_200")
+    print("  NEW: +net_rtg_diff, opp_ppg_diff, ml_implied_spread, matchup_to, rest_diff")
     print("=" * 70)
 
     X, y, spreads, df, feature_cols = load_and_prepare()
@@ -390,8 +393,8 @@ if __name__ == "__main__":
         "scaler": scaler,
         "calibrator": isotonic,
         "feature_cols": feature_cols,
-        "model_type": "ensemble_5_v27",
-        "architecture": "Lasso+Ridge+CatBoost_d6_800+LightGBM_300+GBM_200",
+        "model_type": "ensemble_5_v28",
+        "architecture": "Lasso+Ridge+CatBoost_d6_800+LightGBM_300+GBM_200+5new",
         "n_features": len(feature_cols),
         "n_games": len(X),
         "n_train": len(X),
