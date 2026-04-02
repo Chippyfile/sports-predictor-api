@@ -107,12 +107,17 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     f["vig_uncertainty"] = round(f["overround"]-0.045,4)
     mm=g("_ml_move",0)
     f["reverse_line_movement"] = 1 if (sm and mm and sm*mm>0) else 0
+    # AUDIT-v3: ml_implied_spread was in V27 training but MISSING from live builder
+    if f["implied_prob_home"] > 0.01 and f["implied_prob_home"] < 0.99:
+        f["ml_implied_spread"] = round(-8 * np.log10(f["implied_prob_home"] / (1 - f["implied_prob_home"] + 0.001) + 0.001), 2)
+    else:
+        f["ml_implied_spread"] = 0
 
     # === ESPN WP (2) ===
     f["espn_pregame_wp"] = g("espn_pregame_wp",0.5)
     f["espn_pregame_wp_pbp"] = g("espn_pregame_wp_pbp",0.5)
 
-    # === TEAM STATS (11) ===
+    # === TEAM STATS (11) + 3 MISSING V27 FEATURES ===
     f["efg_diff"] = round((h_fgpct+0.2*h_3pct)-(a_fgpct+0.2*a_3pct),4)
     f["ftpct_diff"] = round(h_ftpct-a_ftpct,4)
     f["threepct_diff"] = round(h_3pct-a_3pct,4)
@@ -122,6 +127,12 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     h_wp=h_wins/max(h_wins+h_losses,1); a_wp=a_wins/max(a_wins+a_losses,1)
     f["win_pct_diff"] = round(h_wp-a_wp,4)
     f["opp_suppression_diff"] = g("home_opp_suppression",0)-g("away_opp_suppression",0)
+    # AUDIT-v3: net_rtg_diff was in V27 training but MISSING from live builder (always 0!)
+    f["net_rtg_diff"] = round(g("home_net_rtg",0)-g("away_net_rtg",0),2)
+    # AUDIT-v3: opp_ppg_diff was in V27 training but MISSING from live builder
+    f["opp_ppg_diff"] = round(g("home_opp_ppg",112)-g("away_opp_ppg",112),2)
+    # AUDIT-v3: matchup_to was in V27 training but MISSING — uses turnover rates
+    f["matchup_to"] = round(g("home_turnovers",14)/max(g("away_steals",7.5),1)-g("away_turnovers",14)/max(g("home_steals",7.5),1),4)
     h3r=g("home_three_fg_rate",0) or h_enr("three_fg_rate",0)
     a3r=g("away_three_fg_rate",0) or a_enr("three_fg_rate",0)
     f["three_value_diff"] = round(h3r*(h3r-0.20)-a3r*(a3r-0.20),4)
@@ -138,22 +149,21 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     f["scoring_entropy_diff"] = h_enr("scoring_entropy",0)-a_enr("scoring_entropy",0)
 
     # === ELO (1) ===
-    # CRITICAL: Training uses home_form/away_form (range -1 to +2, diff -2 to +2)
-    # NOT raw Elo ratings (range 1200-1800, diff -400 to +400)
-    # home_form comes from ESPN form_l5 score or nbaSync.js formScore
+    # AUDIT-v3: Unified elo_diff computation with single fallback chain.
+    # Training uses home_form/away_form (range -1 to +2.5, diff -3 to +3).
+    # Priority: 1) ESPN form_l5 scores, 2) raw Elo normalized to form scale, 3) zero
     h_form = g("home_form", 0)
     a_form = g("away_form", 0)
-    # FIX HIGH-2: Detect raw Elo scale — form scores are -1 to +2.5, raw Elo is 1200-1800
+    # Detect if "form" is actually raw Elo (1200-1800 range) — normalize to form scale
     if abs(h_form) > 10 or abs(a_form) > 10:
-        # Raw Elo detected — normalize to form-score scale
         h_form = (h_form - 1500) / 200 + 1.0
         a_form = (a_form - 1500) / 200 + 1.0
     if h_form != 0 or a_form != 0:
         f["elo_diff"] = round(h_form - a_form, 4)
     else:
-        # Fallback: normalize raw elo_diff to training scale (-2 to +2)
+        # Last resort: raw elo_diff from Elo JSON, normalized to training scale
         raw_elo = g("elo_diff", 0) or (g("home_elo", 1500) - g("away_elo", 1500))
-        f["elo_diff"] = round(np.clip(raw_elo / 200, -2, 2), 4)
+        f["elo_diff"] = round(float(np.clip(raw_elo / 200, -2.5, 2.5)), 4)
 
     # === ENRICHMENT (16) ===
     f["ceiling_diff"] = h_enr("ceiling",0)-a_enr("ceiling",0)
@@ -203,6 +213,8 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     # === SCHEDULE (10) ===
     hb2b=1 if h_rest==0 else 0; ab2b=1 if a_rest==0 else 0
     f["b2b_diff"]=hb2b-ab2b; f["home_b2b"]=hb2b
+    # AUDIT-v3: rest_diff was in V27 training but MISSING from live builder
+    f["rest_diff"] = round(h_rest - a_rest, 1)
 
     # games_last_14_diff — ESPN lastFiveGames only returns 5, so games_14d caps at 5
     # Prefer games_14d (from ESPN schedule parser) over games_last_14 (from Supabase, often 0)
@@ -320,8 +332,16 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
         "roll_ft_trip_rate_diff": (-0.2, 0.2),
         "roll_three_fg_rate_diff": (-0.15, 0.15),
     }
+    # AUDIT-v3: Log when clamping fires (helps detect scale mismatches)
+    _clamped = []
     for feat, (lo, hi) in TRAIN_RANGES.items():
         if feat in f:
-            f[feat] = float(np.clip(f[feat], lo, hi))
+            raw = f[feat]
+            clamped = float(np.clip(raw, lo, hi))
+            if raw != clamped:
+                _clamped.append(f"{feat}:{raw:.4f}→{clamped:.4f}")
+            f[feat] = clamped
+    if _clamped:
+        print(f"  [CLAMP] {len(_clamped)} features clamped: {', '.join(_clamped[:5])}")
 
     return pd.DataFrame([f])

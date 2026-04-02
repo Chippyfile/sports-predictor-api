@@ -1,9 +1,12 @@
 """
-nba_full_predict.py — Server-side enriched NBA prediction (v27 Ensemble)
+nba_full_predict.py — Server-side enriched NBA prediction (v27 Lasso)
 
-ARCHITECTURE: Single ESPN summary call extracts ~50 features.
+ARCHITECTURE: Single ESPN summary call extracts ~50 raw values.
 Supabase supplements enrichment + rolling PBP stats. Elo from local file.
-Model: 5-model ensemble (Lasso+Ridge+CatBoost+LightGBM+GBM), 55 features.
+Model: Lasso (alpha=0.1) regressor, 38 features selected by L1 from 69 candidates.
+Feature builder (nba_v27_features_live.py) is the SINGLE SOURCE OF TRUTH for
+feature computation. This file only injects supplementary external data
+(rolling PBP diffs, enrichment diffs, ref profiles) AFTER the builder runs.
 
 AUDIT v2 FIXES:
   CRIT-1: Rolling PBP direct diff injection (no fake component splitting)
@@ -744,6 +747,16 @@ def predict_nba_full(game: dict):
                               f"team_abbr=eq.{abbr}&order=updated_at.desc&limit=1") or []
             if rows_enr:
                 enrichment[side] = rows_enr[0]
+                # AUDIT-v3: Check enrichment staleness
+                _updated = rows_enr[0].get("updated_at", "")
+                if _updated:
+                    try:
+                        _enr_dt = datetime.fromisoformat(_updated.replace("Z", "+00:00").replace("+00:00", ""))
+                        _age_hrs = (datetime.utcnow() - _enr_dt).total_seconds() / 3600
+                        if _age_hrs > 48:
+                            diag["warnings"].append(f"STALE enrichment for {abbr}: {_age_hrs:.0f}hrs old")
+                    except Exception:
+                        pass
         n_enr = sum(len(v) for v in enrichment.values())
         if n_enr:
             diag["sources"].append(f"Supabase enrichment ({n_enr} fields)")
@@ -827,13 +840,13 @@ def predict_nba_full(game: dict):
     overrides = {}
     # Market
     ov = overrides
-    # FIX: Only override ESPN WP if ESPN actually returned predictor data.
-    # Default 0 overwrites the builder's 0.5 default, making a top feature useless.
+    # FIX AUDIT-v3: Only override ESPN WP if ESPN actually returned predictor data.
+    # Use `is not None` check — 0.0 is a valid (if unlikely) win probability.
     _espn_wp = espn.get("espn_pregame_wp")
     _espn_wp_pbp = espn.get("espn_pregame_wp_pbp")
-    if _espn_wp and _espn_wp > 0:
+    if _espn_wp is not None and _espn_wp > 0.01:
         ov["espn_pregame_wp"] = _espn_wp
-    if _espn_wp_pbp and _espn_wp_pbp > 0:
+    if _espn_wp_pbp is not None and _espn_wp_pbp > 0.01:
         ov["espn_pregame_wp_pbp"] = _espn_wp_pbp
     ov["implied_prob_home"] = round(impl_h, 4) if home_ml else 0
     ov["overround"] = round(impl_h + impl_a - 1, 4) if (home_ml and away_ml) else 0
@@ -858,7 +871,14 @@ def predict_nba_full(game: dict):
     ov["sharp_spread_signal"] = round(sm, 2)  # spread movement (close - open)
     ov["sharp_ml_signal"] = round(mm, 4)      # ML prob movement (close - open)
 
-    # Context
+    # ── Team stat overrides REMOVED (AUDIT-v3) ──
+    # efg_diff, turnovers_diff, win_pct_diff, ftpct_diff, b2b_diff, games_last_14_diff,
+    # games_diff, home_after_loss, away_after_loss are ALL computed by the builder
+    # from the same row data. Recomputing here with different fallback defaults
+    # (0.471 vs 0.46, 14 vs builder's row-derived value) creates silent train/serve skew.
+    # The builder (nba_v27_features_live.py) is now the SINGLE SOURCE OF TRUTH.
+
+    # ── Schedule context (builder may not have these if date parse fails) ──
     try:
         dt = datetime.strptime(game_date, "%Y-%m-%d")
         ov["is_midweek"] = 1 if dt.weekday() in [1,2,3] else 0
@@ -868,93 +888,32 @@ def predict_nba_full(game: dict):
     cap = espn.get("_venue_cap", VENUE_CAPACITY.get(home_abbr, 19000))
     ov["crowd_pct"] = round(min(1.0, 18500/max(cap, 1)), 4)
 
-    # H2H
-    ov["h2h_total_games"] = espn.get("_h2h_n", 0)
+    # H2H (from ESPN season series — builder reads from row which has it)
+    _h2h_n = espn.get("_h2h_n", 0)
+    if _h2h_n:
+        ov["h2h_total_games"] = _h2h_n
 
-    # Star players
+    # Star players → lineup_value_diff (enrichment may be stale, ESPN stars are fresh)
     if h_star and a_star:
-        ov["star1_share_diff"] = round(h_star/max(h_ppg,80) - a_star/max(a_ppg,80), 4)
         ov["lineup_value_diff"] = round(h_star*h_fg*2 - a_star*a_fg*2, 2)
-    else:
-        # Fallback: approximate from team PPG differential (better teams = higher lineup value)
-        # Scale to match training range (~-100 to +100)
-        _h_ppg = float(row.get("home_ppg", 112))
-        _a_ppg = float(row.get("away_ppg", 112))
-        ov["lineup_value_diff"] = round((_h_ppg - _a_ppg) * 0.5, 2)
-    ov["star_minutes_fatigue_diff"] = round(h_mpg - a_mpg, 2)
 
     # ── Elo (FIXED: training uses home_form/away_form, not raw Elo) ──
+    # AUDIT-v3 diagnostic: log which elo source was used
     h_form = float(row.get("home_form", 0))
     a_form = float(row.get("away_form", 0))
+    _elo_source = "none"
     if h_form != 0 or a_form != 0:
         ov["elo_diff"] = round(h_form - a_form, 4)
+        _elo_source = f"form(h={h_form:.3f},a={a_form:.3f})"
     else:
         # Fallback: normalize raw elo to training scale (-2 to +2)
-        ov["elo_diff"] = round(float(np.clip((h_elo - a_elo) / 200, -2, 2)), 4)
-    # elo_market_residual: elo-implied prob minus spread-implied prob
-    elo_d = h_elo - a_elo
-    elo_prob = 1.0 / (1.0 + 10 ** (-elo_d / 400.0))
-    spread_prob = 1.0 / (1.0 + 10 ** (spread / 8.0)) if spread else 0.5
-    ov["elo_market_residual"] = round(elo_prob - spread_prob, 4)
-
-    # ── Team stat overrides (FIX: column name mismatches with v25 model) ──
-    h_fgpct = float(row.get("home_fgpct", 0.471)); a_fgpct = float(row.get("away_fgpct", 0.471))
-    h_3p = float(row.get("home_threepct", 0.365)); a_3p = float(row.get("away_threepct", 0.365))
-    # efg_diff: eFG% ≈ FG% + 0.2 * 3P% (NBA avg three_rate ~0.40)
-    ov["efg_diff"] = round((h_fgpct + 0.2 * h_3p) - (a_fgpct + 0.2 * a_3p), 4)
-    # turnovers_diff: model expects home_TO - away_TO (not to_margin_diff which is reversed)
-    ov["turnovers_diff"] = round(float(row.get("home_turnovers", 14)) - float(row.get("away_turnovers", 14)), 2)
-    # win_pct_diff: from standings wins/losses
-    hw = float(row.get("home_wins", 0)); hl = float(row.get("home_losses", 0))
-    aw = float(row.get("away_wins", 0)); al = float(row.get("away_losses", 0))
-    if (hw + hl) > 0 and (aw + al) > 0:
-        ov["win_pct_diff"] = round(hw / (hw + hl) - aw / (aw + al), 4)
-
-    # ── Schedule overrides (FIX: ESPN parser extracts data, but no diff computed) ──
-    h_b2b = int(row.get("home_is_b2b", 0) or 0)
-    a_b2b = int(row.get("away_is_b2b", 0) or 0)
-    ov["home_b2b"] = h_b2b
-    ov["b2b_diff"] = h_b2b - a_b2b
-    ov["games_last_14_diff"] = int(row.get("home_games_14d", 0) or 0) - int(row.get("away_games_14d", 0) or 0)
-    ov["streak_diff"] = int(row.get("home_streak", 0) or 0) - int(row.get("away_streak", 0) or 0)
-    ov["games_diff"] = int(hw + hl) - int(aw + al)
-
-    # games_last_14_diff — populated from schedule at line ~323
-    # if still 0, approximate from games_diff (teams play similar schedules)
-    g14h = int(row.get("home_games_14d", 0) or 0)
-    g14a = int(row.get("away_games_14d", 0) or 0)
-    if g14h or g14a:
-        ov["games_last_14_diff"] = g14h - g14a
-
-    # ── Additional stat overrides ──
-    # scoring_var_diff: ESPN parser computes {side}_scoring_var from last5 margins
-    h_sv = float(row.get("home_scoring_var", 0) or 0)
-    a_sv = float(row.get("away_scoring_var", 0) or 0)
-    if h_sv or a_sv:
-        ov["scoring_var_diff"] = round(h_sv - a_sv, 2)
-
-    # FIX HIGH-3: ftpct_diff — use TEAM FT% from season stats (already in row),
-    # not star player FT% (different distribution: ~85% vs ~77%)
-    h_ft = float(row.get("home_ftpct", 0) or 0)
-    a_ft = float(row.get("away_ftpct", 0) or 0)
-    if h_ft and a_ft:
-        # Normalize: season stats may return as decimal (0.78) or raw (78)
-        if h_ft > 1: h_ft /= 100
-        if a_ft > 1: a_ft /= 100
-        ov["ftpct_diff"] = round(h_ft - a_ft, 4)
-    # Only fall back to star FT% if team FT% truly unavailable
-    elif espn.get("home_ftpct_leader") and espn.get("away_ftpct_leader"):
-        ov["ftpct_diff"] = round(float(espn["home_ftpct_leader"]) - float(espn["away_ftpct_leader"]), 4)
-        diag["warnings"].append("ftpct_diff: using star player FT% fallback")
+        _raw = h_elo - a_elo
+        ov["elo_diff"] = round(float(np.clip(_raw / 200, -2, 2)), 4)
+        _elo_source = f"raw_elo(h={h_elo},a={a_elo},norm={ov['elo_diff']:.3f})"
+    print(f"  [AUDIT] elo_diff={ov['elo_diff']:.4f} source={_elo_source}")
 
     # ATS rolling
     ov["roll_ats_margin_gated"] = round(h_sr.get("ats_avg",0) - a_sr.get("ats_avg",0), 2)
-
-    # home_after_loss / away_after_loss — derive from last game result
-    h_streak = int(row.get("home_streak", 0) or 0)
-    a_streak = int(row.get("away_streak", 0) or 0)
-    ov["home_after_loss"] = 1 if h_streak < 0 else 0
-    ov["away_after_loss"] = 1 if a_streak < 0 else 0
 
     # ── FIX CRIT-1: Rolling PBP direct diff injection ──
     # Inject pre-computed diffs directly — no component splitting needed.
@@ -1077,6 +1036,9 @@ def predict_nba_full(game: dict):
     if coverage_pct < 0.50:
         diag["warnings"].append(
             f"LOW COVERAGE: {nz}/{len(feature_cols)} features non-zero ({coverage_pct:.0%})")
+    # AUDIT-v3: Always log feature coverage for monitoring
+    print(f"  [AUDIT] Features: {nz}/{len(feature_cols)} non-zero ({coverage_pct:.0%}), "
+          f"margin={margin:+.2f}, wp={wp:.4f}")
     mkt = float(row.get("market_spread_home", 0) or 0)
 
     # Debug: return all features if requested
@@ -1090,6 +1052,9 @@ def predict_nba_full(game: dict):
         ou_bundle = _load_ou_model()
         if ou_bundle and ou_bundle.get("reg") and ou_bundle.get("scaler"):
             ou_feature_cols = ou_bundle.get("ou_feature_cols", feature_cols)
+            # AUDIT-v3 CRIT-3: Warn if O/U model is using spread model features
+            if "ou_feature_cols" not in ou_bundle:
+                diag["warnings"].append("O/U model missing ou_feature_cols — using spread model features (may hurt accuracy)")
             available_ou = [f for f in ou_feature_cols if f in feature_cols or f in row]
             if len(available_ou) >= len(ou_feature_cols) * 0.7:
                 ou_vals = {}
