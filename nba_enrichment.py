@@ -124,8 +124,11 @@ def compute_team_enrichment(team_abbr, n_games=15):
         props = np.array([avg_bench, avg_paint, avg_fb, avg_sc]) / total_special
         props = props[props > 0]  # remove zeros for log
         scoring_entropy = round(float(-np.sum(props * np.log2(props))), 3)
+        # HHI: Herfindahl-Hirschman Index = sum of squared proportions (concentration)
+        scoring_hhi = round(float(np.sum(props ** 2)), 4)
     else:
         scoring_entropy = 1.5  # default moderate entropy
+        scoring_hhi = 0.25  # default (4 equal sources = 0.25)
     
     # ── def_stability: std of opponent implied scores ──
     # We don't have opponent scores directly, but margin = our_score - opp_score
@@ -246,10 +249,12 @@ def compute_team_enrichment(team_abbr, n_games=15):
         "bimodal": bimodal,
         "score_kurtosis": score_kurtosis,  # alias for bimodal
         "scoring_entropy": scoring_entropy,
+        "scoring_hhi": scoring_hhi,
         "def_stability": def_stability,
         "opp_suppression": opp_suppression,
         "three_value": three_value,
         "ts_regression": ts_regression,
+        "ts_pct": round(ts_proxy, 4),
         "three_pt_regression": three_pt_regression,
         "pace_leverage": pace_leverage,
         "pace_control": pace_control,
@@ -327,17 +332,19 @@ def get_enrichment_diffs(home_abbr, away_abbr):
     diffs = {}
     
     # Direct diff features (home - away)
-    for feat in ["scoring_var", "consistency", "ceiling", "bimodal",
-                 "score_kurtosis",  # alias for bimodal
-                 "scoring_entropy", "def_stability", "opp_suppression",
+    for feat in ["scoring_var", "consistency", "ceiling", "floor", "bimodal",
+                 "score_kurtosis", "scoring_entropy", "scoring_hhi",
+                 "def_stability", "opp_suppression",
                  "three_value", "ts_regression", "three_pt_regression",
                  "pace_control",
-                 # NEW: 6 features for 69-feature model
                  "margin_accel", "momentum_halflife", "win_aging",
                  "pyth_residual", "pyth_luck", "recovery_idx"]:
         h_val = float(h.get(feat, 0) or 0)
         a_val = float(a.get(feat, 0) or 0)
         diffs[f"{feat}_diff"] = round(h_val - a_val, 4)
+    
+    # Alias: model feature name = recovery_diff, enrichment key = recovery_idx_diff
+    diffs["recovery_diff"] = diffs.get("recovery_idx_diff", 0)
     
     # Map opp_suppression to row keys that feature builder reads
     diffs["home_opp_suppression"] = float(h.get("opp_suppression", 0) or 0)
