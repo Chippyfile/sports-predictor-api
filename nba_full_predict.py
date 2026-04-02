@@ -561,6 +561,21 @@ def _load_ou_model():
             rows = resp.json()
             if rows and rows[0].get("data"):
                 raw = _b64.b64decode(rows[0]["data"])
+                # FIX: OUBlendModel was pickled as __main__.OUBlendModel
+                # but __main__ on Railway is gunicorn, not nba_ou_train_v2.
+                # Inject the class so joblib can reconstruct it.
+                import sys as _sys
+                try:
+                    from nba_ou_train_v2 import OUBlendModel
+                    _sys.modules['__main__'].OUBlendModel = OUBlendModel
+                except ImportError:
+                    # Define inline as fallback
+                    class OUBlendModel:
+                        def __init__(self, primary, secondary, w_primary=0.7):
+                            self.primary = primary; self.secondary = secondary; self.w_primary = w_primary
+                        def predict(self, X):
+                            return self.w_primary * self.primary.predict(X) + (1 - self.w_primary) * self.secondary.predict(X)
+                    _sys.modules['__main__'].OUBlendModel = OUBlendModel
                 _ou_cache = _jl.load(_io.BytesIO(raw))
                 _ou_cache_time = _time.time()
                 return _ou_cache
