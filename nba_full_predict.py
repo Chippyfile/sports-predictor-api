@@ -549,7 +549,7 @@ def _load_ou_model():
     if _ou_cache and (_time.time() - _ou_cache_time) < 600:
         return _ou_cache
     try:
-        import requests as _req, base64 as _b64, io as _io, pickle as _pkl
+        import requests as _req, base64 as _b64, io as _io, joblib as _jl
         from config import SUPABASE_URL, SUPABASE_KEY
         headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
         resp = _req.get(
@@ -560,11 +560,16 @@ def _load_ou_model():
             rows = resp.json()
             if rows and rows[0].get("data"):
                 raw = _b64.b64decode(rows[0]["data"])
-                _ou_cache = _pkl.loads(raw)
+                _ou_cache = _jl.load(_io.BytesIO(raw))
                 _ou_cache_time = _time.time()
+                print(f"  [nba_ou] Loaded: {_ou_cache.get('model_type','?')}, {_ou_cache.get('n_features','?')} features")
                 return _ou_cache
+            else:
+                print("  [nba_ou] No nba_ou row in model_store")
+        else:
+            print(f"  [nba_ou] Supabase HTTP {resp.status_code}")
     except Exception as e:
-        print(f"  [nba_ou] load failed: {e}")
+        print(f"  [nba_ou] Load failed: {e}")
     return None
 
 def _find_game_id(home, away, date):
@@ -1104,7 +1109,9 @@ def predict_nba_full(game: dict):
     ou_pick = None
     try:
         ou_bundle = _load_ou_model()
-        if ou_bundle and ou_bundle.get("reg") and ou_bundle.get("scaler"):
+        if not ou_bundle:
+            diag["warnings"].append("O/U model not loaded (check nba_ou in model_store)")
+        elif ou_bundle.get("reg") and ou_bundle.get("scaler"):
             ou_feature_cols = ou_bundle.get("ou_feature_cols")
             if not ou_feature_cols:
                 diag["warnings"].append("O/U model missing ou_feature_cols — cannot predict")
@@ -1134,7 +1141,8 @@ def predict_nba_full(game: dict):
                         ou_pick = "OVER" if ou_edge > 0 else "UNDER"
                 diag["sources"].append(f"O/U model ({len(ou_feature_cols)} features)")
     except Exception as e:
-        diag["warnings"].append(f"ou_model: {e}")
+        diag["warnings"].append(f"ou_model: {type(e).__name__}: {e}")
+        print(f"  [nba_ou] Prediction error: {_tb.format_exc()}")
 
     return {
         "sport": "NBA", "game_id": game_id,
