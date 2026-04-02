@@ -901,6 +901,10 @@ def predict_nba_full(game: dict):
     # AUDIT-v3 diagnostic: log which elo source was used
     h_form = float(row.get("home_form", 0))
     a_form = float(row.get("away_form", 0))
+    # If home_form/away_form are 0, try ESPN L5 form scores directly
+    if h_form == 0 and a_form == 0:
+        h_form = float(espn.get("home_form_l5", 0) or row.get("home_form_l5", 0) or 0)
+        a_form = float(espn.get("away_form_l5", 0) or row.get("away_form_l5", 0) or 0)
     _elo_source = "none"
     if h_form != 0 or a_form != 0:
         ov["elo_diff"] = round(h_form - a_form, 4)
@@ -1004,6 +1008,20 @@ def predict_nba_full(game: dict):
                 pass
 
     # Build X from verified v27 feature set
+    # HOTFIX: Apply TRAIN_RANGES clamp AFTER overrides — enrichment diffs were bypassing builder clamp
+    from nba_v27_features_live import TRAIN_RANGES as _TRAIN_RANGES
+    _post_clamped = []
+    for feat, (lo, hi) in _TRAIN_RANGES.items():
+        if feat in feat_df.columns:
+            raw_val = float(feat_df[feat].iloc[0])
+            clamped = float(np.clip(raw_val, lo, hi))
+            if raw_val != clamped:
+                _post_clamped.append(f"{feat}:{raw_val:.4f}→{clamped:.4f}")
+                feat_df.at[feat_df.index[0], feat] = clamped
+    if _post_clamped:
+        print(f"  [POST-CLAMP] {len(_post_clamped)} features clamped after overrides: {', '.join(_post_clamped)}")
+        diag["warnings"].append(f"POST-CLAMP: {', '.join(_post_clamped)}")
+
     X_slim = feat_df[feature_cols]
 
     # ═══ 9. Predict ═══

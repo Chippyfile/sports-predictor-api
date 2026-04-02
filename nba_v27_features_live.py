@@ -47,6 +47,44 @@ FEATURES_69 = [
     "win_aging_diff", "win_pct_diff",
 ]
 
+# Training range clamps — clips features to prevent out-of-distribution nonsense.
+# Importable by nba_full_predict.py for post-override clamping.
+TRAIN_RANGES = {
+    "elo_diff": (-2.5, 2.5),
+    "pyth_luck_diff": (-0.35, 0.35),
+    "pyth_residual_diff": (-0.25, 0.25),
+    "win_pct_diff": (-1.0, 1.0),
+    "efg_diff": (-0.15, 0.15),
+    "ftpct_diff": (-0.25, 0.25),
+    "threepct_diff": (-0.15, 0.15),
+    "espn_pregame_wp": (0.01, 0.99),
+    "espn_pregame_wp_pbp": (0.01, 0.99),
+    "implied_prob_home": (0.0, 1.0),
+    "overround": (-0.05, 0.15),
+    "lineup_value_diff": (-100, 100),
+    "momentum_halflife_diff": (-70, 70),
+    "opp_suppression_diff": (-150, 150),
+    "ceiling_diff": (-50, 50),
+    "floor_diff": (-50, 50),
+    "consistency_diff": (-50, 50),
+    "margin_accel_diff": (-60, 60),
+    "score_kurtosis_diff": (-5, 5),
+    "bimodal_diff": (-1, 1),
+    "scoring_hhi_diff": (-0.5, 0.5),
+    "scoring_entropy_diff": (-1, 1),
+    "pace_control_diff": (-0.5, 0.5),
+    "pace_leverage": (0, 2),
+    "recovery_diff": (-2, 2),
+    "ts_regression_diff": (-0.15, 0.15),
+    "three_pt_regression_diff": (-0.15, 0.15),
+    "three_value_diff": (-0.15, 0.15),
+    "steals_to_diff": (-0.5, 0.5),
+    "roll_max_run_avg": (0, 15),
+    "roll_paint_fg_rate_diff": (-0.3, 0.3),
+    "roll_ft_trip_rate_diff": (-0.2, 0.2),
+    "roll_three_fg_rate_diff": (-0.15, 0.15),
+}
+
 
 def _safe(val, default=0):
     if val is None: return default
@@ -294,44 +332,7 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
         if feat not in f: f[feat]=0
 
     # === TRAINING RANGE CLAMP (safety net for scale mismatches) ===
-    # Clips features to training min/max to prevent nonsense predictions.
-    # Only features with known scale issues are clamped tightly;
-    # others get wide 3x range to allow natural variation.
-    TRAIN_RANGES = {
-        "elo_diff": (-2.5, 2.5),
-        "pyth_luck_diff": (-0.35, 0.35),
-        "pyth_residual_diff": (-0.25, 0.25),
-        "win_pct_diff": (-1.0, 1.0),
-        "efg_diff": (-0.15, 0.15),
-        "ftpct_diff": (-0.25, 0.25),
-        "threepct_diff": (-0.15, 0.15),
-        "espn_pregame_wp": (0.01, 0.99),
-        "espn_pregame_wp_pbp": (0.01, 0.99),
-        "implied_prob_home": (0.0, 1.0),
-        "overround": (-0.05, 0.15),
-        "lineup_value_diff": (-100, 100),
-        "momentum_halflife_diff": (-70, 70),
-        "opp_suppression_diff": (-150, 150),
-        "ceiling_diff": (-50, 50),
-        "floor_diff": (-50, 50),
-        "consistency_diff": (-50, 50),
-        "margin_accel_diff": (-60, 60),
-        "score_kurtosis_diff": (-5, 5),
-        "bimodal_diff": (-1, 1),
-        "scoring_hhi_diff": (-0.5, 0.5),
-        "scoring_entropy_diff": (-1, 1),
-        "pace_control_diff": (-0.5, 0.5),
-        "pace_leverage": (0, 2),
-        "recovery_diff": (-2, 2),
-        "ts_regression_diff": (-0.15, 0.15),
-        "three_pt_regression_diff": (-0.15, 0.15),
-        "three_value_diff": (-0.15, 0.15),
-        "steals_to_diff": (-0.5, 0.5),
-        "roll_max_run_avg": (0, 15),
-        "roll_paint_fg_rate_diff": (-0.3, 0.3),
-        "roll_ft_trip_rate_diff": (-0.2, 0.2),
-        "roll_three_fg_rate_diff": (-0.15, 0.15),
-    }
+    # Uses module-level TRAIN_RANGES (also imported by nba_full_predict.py for post-override clamp)
     # AUDIT-v3: Log when clamping fires (helps detect scale mismatches)
     _clamped = []
     for feat, (lo, hi) in TRAIN_RANGES.items():
