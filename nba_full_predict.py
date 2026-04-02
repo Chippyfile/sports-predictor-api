@@ -778,7 +778,7 @@ def predict_nba_full(game: dict):
             for k, v in scraped.items():
                 espn[f"_{k}"] = v  # _ref_1, _ref_2, _ref_3
             from db import sb_get
-            all_refs = sb_get("nba_ref_profiles", "select=ref_name,home_whistle,avg_home_margin,avg_foul_rate&limit=50") or []
+            all_refs = sb_get("nba_ref_profiles", "select=ref_name,home_whistle,avg_home_margin,avg_foul_rate,ou_bias,pace_impact&limit=100") or []
             ref_map = {r["ref_name"]: r for r in all_refs}
             matched = [ref_map[n] for n in scraped.values() if n in ref_map]
             if matched:
@@ -786,6 +786,9 @@ def predict_nba_full(game: dict):
                     "home_whistle": sum(r["home_whistle"] for r in matched) / len(matched),
                     # FIX CRIT-5: Use actual foul rate, not home_whistle copy
                     "foul_rate":    sum(r.get("avg_foul_rate", r["home_whistle"]) for r in matched) / len(matched),
+                    # Pass ou_bias + pace_impact so all 4 ref features populate
+                    "ou_bias":      sum(r.get("ou_bias", 0) for r in matched) / len(matched),
+                    "pace_impact":  sum(r.get("pace_impact", 0) for r in matched) / len(matched),
                 }
                 diag["sources"].append(f"Refs: {', '.join(scraped.values())} ({len(matched)} profiled)")
             else:
