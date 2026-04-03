@@ -1349,7 +1349,7 @@ def predict_ncaa_full(request_data):
     X = ncaa_build_features(df)
 
     # Align with model
-    feature_cols = bundle["feature_cols"]
+    feature_cols = bundle.get("feature_names") or bundle.get("feature_cols")
     for col in feature_cols:
         if col not in X.columns:
             X[col] = 0
@@ -1411,9 +1411,50 @@ def predict_ncaa_full(request_data):
         X.loc[:, "win_pct_diff"] = h_pct - a_pct
         print(f"  [full_predict] win_pct_diff patched: {h_w}/{h_w+h_l} - {a_w}/{a_w+a_l} = {h_pct - a_pct:.3f}")
 
-    # hca_pts: 0 for neutral is correct, but for non-neutral fill conference HCA
+    # ═══ Rolling HCA: compute from team's recent home/away margins ═══
+    # Query last 20 home + 20 away games from ncaa_historical
+    _rolling_hca_val = 0.0
+    if not neutral_site:
+        try:
+            _home_tid = str(game.get("home_team_id", ""))
+            if _home_tid:
+                _hca_rows = sb_get("ncaa_historical",
+                    f"home_team_id=eq.{_home_tid}&neutral_site=eq.false"
+                    f"&actual_home_score=not.is.null&select=actual_home_score,actual_away_score"
+                    f"&order=game_date.desc&limit=20")
+                _away_rows = sb_get("ncaa_historical",
+                    f"away_team_id=eq.{_home_tid}&neutral_site=eq.false"
+                    f"&actual_home_score=not.is.null&select=actual_home_score,actual_away_score"
+                    f"&order=game_date.desc&limit=20")
+                _home_margins = [float(r["actual_home_score"]) - float(r["actual_away_score"]) for r in _hca_rows if r.get("actual_home_score") is not None]
+                _away_margins = [float(r["actual_home_score"]) - float(r["actual_away_score"]) for r in _away_rows if r.get("actual_home_score") is not None]
+                if len(_home_margins) >= 5 and len(_away_margins) >= 5:
+                    import numpy as _np
+                    _rolling_hca_val = (_np.mean(_home_margins) - _np.mean([-m for m in _away_margins])) / 2
+                    print(f"  [full_predict] rolling_hca={_rolling_hca_val:.2f} (from {len(_home_margins)}H+{len(_away_margins)}A games)")
+                else:
+                    _rolling_hca_val = 6.6  # League-avg fallback
+                    print(f"  [full_predict] rolling_hca=6.6 (fallback, only {len(_home_margins)}H+{len(_away_margins)}A)")
+        except Exception as _e:
+            _rolling_hca_val = 6.6
+            print(f"  [full_predict] rolling_hca=6.6 (error: {_e})")
+
+    # Inject rolling_hca into feature matrix
+    if "rolling_hca" in X.columns:
+        X.loc[:, "rolling_hca"] = _rolling_hca_val
+    elif "rolling_hca" in feature_cols:
+        X["rolling_hca"] = _rolling_hca_val
+
+    # Fix neutral_em_diff: strip rolling_hca instead of old static HCA
+    if "neutral_em_diff" in X.columns:
+        _h_em = float(game.get("home_adj_em", 0) or 0)
+        _a_em = float(game.get("away_adj_em", 0) or 0)
+        _raw_em = _h_em - _a_em
+        X.loc[:, "neutral_em_diff"] = _raw_em - (0 if neutral_site else _rolling_hca_val)
+
+    # Legacy hca_pts: fill if still in feature list (old models)
     if "hca_pts" in X.columns and r["hca_pts"] == 0 and not neutral_site:
-        X.loc[:, "hca_pts"] = 3.0  # Default HCA
+        X.loc[:, "hca_pts"] = _rolling_hca_val
 
     # sos_diff: from ESPN record
     if "sos_diff" in X.columns and r["sos_diff"] == 0:
@@ -1497,8 +1538,9 @@ def predict_ncaa_full(request_data):
     # ═══ Consistency check: if classifier wildly disagrees with regressor, ═══
     # use sigma-converted margin as fallback probability.
     # Positive margin should mean >50% win prob, and vice versa.
-    SIGMA = 16.0
-    margin_prob = 1.0 / (1.0 + 10.0 ** (-margin / SIGMA))
+    SIGMA = 6.0  # Empirically calibrated (Brier-optimal)
+    import math as _math
+    margin_prob = 1.0 / (1.0 + _math.exp(-margin / SIGMA))
     margin_prob = max(0.05, min(0.95, margin_prob))
     classifier_disagrees = (margin > 2 and win_prob < 0.40) or (margin < -2 and win_prob > 0.60)
     # Dynamic blend: margin-based probability is more robust when features are missing;
@@ -1579,8 +1621,8 @@ def predict_ncaa_full(request_data):
             if mkt_spread != 0:
                 # margin_vs_spread: how much model thinks home beats the spread
                 margin_vs_spread = ats_predicted_margin - (-mkt_spread)  # espn_spread is negative when home favored
-                SIGMA_ATS = 10.0
-                ats_cover_prob = round(1.0 / (1.0 + 10.0 ** (-margin_vs_spread / SIGMA_ATS)), 4)
+                SIGMA_ATS = 6.0  # Empirically calibrated
+                ats_cover_prob = round(1.0 / (1.0 + _math.exp(-margin_vs_spread / SIGMA_ATS)), 4)
                 ats_cover_prob = max(0.05, min(0.95, ats_cover_prob))
                 ats_edge = round(margin_vs_spread, 1)
                 if abs(ats_edge) >= 4:
