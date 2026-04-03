@@ -1538,7 +1538,7 @@ def predict_ncaa_full(request_data):
     # ═══ Consistency check: if classifier wildly disagrees with regressor, ═══
     # use sigma-converted margin as fallback probability.
     # Positive margin should mean >50% win prob, and vice versa.
-    SIGMA = 6.0  # Empirically calibrated (Brier-optimal)
+    SIGMA = 6.5  # Empirically calibrated (Brier-optimal, Apr 2026 re-sweep)
     import math as _math
     margin_prob = 1.0 / (1.0 + _math.exp(-margin / SIGMA))
     margin_prob = max(0.05, min(0.95, margin_prob))
@@ -1621,7 +1621,7 @@ def predict_ncaa_full(request_data):
             if mkt_spread != 0:
                 # margin_vs_spread: how much model thinks home beats the spread
                 margin_vs_spread = ats_predicted_margin - (-mkt_spread)  # espn_spread is negative when home favored
-                SIGMA_ATS = 6.0  # Empirically calibrated
+                SIGMA_ATS = 6.5  # Empirically calibrated
                 ats_cover_prob = round(1.0 / (1.0 + _math.exp(-margin_vs_spread / SIGMA_ATS)), 4)
                 ats_cover_prob = max(0.05, min(0.95, ats_cover_prob))
                 ats_edge = round(margin_vs_spread, 1)
