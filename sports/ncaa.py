@@ -26,17 +26,21 @@ except ImportError:
 
 # Conference HCA mapping — used by ncaa_build_features R1 fix and _ncaa_backfill_heuristic
 _NCAA_CONF_HCA = {
-    "Big 12": 3.8, "Southeastern Conference": 3.7, "SEC": 3.7,
-    "Big Ten": 3.6, "Big Ten Conference": 3.6,
-    "Atlantic Coast Conference": 3.4, "ACC": 3.4,
-    "Big East": 3.3, "Big East Conference": 3.3,
-    "Pac-12": 3.0, "Pac-12 Conference": 3.0,
-    "Mountain West Conference": 3.2, "Mountain West": 3.2,
-    "American Athletic Conference": 3.0, "AAC": 3.0,
-    "West Coast Conference": 2.8, "WCC": 2.8,
-    "Atlantic 10 Conference": 2.7, "A-10": 2.7,
-    "Missouri Valley Conference": 2.9, "MVC": 2.9,
+    # Empirically validated via paired home/away analysis (Apr 2026)
+    # Old values were guesses (2.7-3.8); real HCA is 2x higher
+    # These are FALLBACK values — rolling_hca per-team is preferred at serve time
+    "Big 12": 7.3, "Southeastern Conference": 7.3, "SEC": 7.3,
+    "Big Ten": 6.2, "Big Ten Conference": 6.2,
+    "Atlantic Coast Conference": 5.8, "ACC": 5.8,
+    "Big East": 4.6, "Big East Conference": 4.6,
+    "Pac-12": 4.2, "Pac-12 Conference": 4.2,
+    "Mountain West Conference": 5.0, "Mountain West": 5.0,
+    "American Athletic Conference": 5.2, "AAC": 5.2,
+    "West Coast Conference": 10.6, "WCC": 10.6,
+    "Atlantic 10 Conference": 6.4, "A-10": 6.4,
+    "Missouri Valley Conference": 6.1, "MVC": 6.1,
 }
+_DEFAULT_HCA = 6.6  # League-wide average HCA
 
 
 def ncaa_build_features(df):
@@ -266,12 +270,13 @@ def ncaa_build_features(df):
     # The raw adj_em_diff contains HCA baked in (from home PPG). Separate them
     # so the ML can learn their independent weights instead of double-counting.
     raw_em_diff = df["home_adj_em"].fillna(0) - df["away_adj_em"].fillna(0)
-    # Estimate HCA component: conference-based HCA / tempo * 100 gives per-100-poss effect
+    # Estimate HCA component: conference-based HCA as fallback
+    # At serve time, rolling_hca from recent games overrides this
     hca_component = df.apply(
         lambda r: 0 if r.get("neutral_site", False) else _NCAA_CONF_HCA.get(
-            r.get("home_conference", ""), 3.0
-        ) * 0.5, axis=1  # HCA split across both teams, so ~0.5 on each side
-    ) if "home_conference" in df.columns else pd.Series(1.5, index=df.index)
+            r.get("home_conference", ""), _DEFAULT_HCA
+        ), axis=1
+    ) if "home_conference" in df.columns else pd.Series(_DEFAULT_HCA, index=df.index)
     df["neutral_em_diff"] = raw_em_diff - hca_component  # R1: HCA-stripped efficiency gap
     df["hca_pts"]         = hca_component                  # R1: separate HCA signal
     df["neutral"]         = df["neutral_site"].fillna(False).astype(int)
