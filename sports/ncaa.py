@@ -354,15 +354,9 @@ def ncaa_build_features(df):
     # ppg_x_sos, em_x_conf had VIF > 10 with component features.
     # Keeping components only reduces multicollinearity.
 
-    # ── v18 P1-INJ: Injury features ──
-    df["home_injury_penalty"] = pd.to_numeric(df["home_injury_penalty"], errors="coerce").fillna(0)
-    df["away_injury_penalty"] = pd.to_numeric(df["away_injury_penalty"], errors="coerce").fillna(0)
-    df["injury_diff"] = df["home_injury_penalty"] - df["away_injury_penalty"]
-    df["home_missing_starters"] = pd.to_numeric(df["home_missing_starters"], errors="coerce").fillna(0)
-    df["away_missing_starters"] = pd.to_numeric(df["away_missing_starters"], errors="coerce").fillna(0)
-    df["starters_diff"] = df["home_missing_starters"] - df["away_missing_starters"]
-    df["any_injury_flag"] = ((df["home_missing_starters"] > 0) | (df["away_missing_starters"] > 0)).astype(int)
-    # injury_x_em REMOVED (AUDIT P4) — correlated with injury_diff and neutral_em_diff
+    # ── DEAD: Injury features (always zero — data never populated) ──
+    # Kept as zero defaults in backfill dict for compatibility
+    # injury_x_em REMOVED (AUDIT P4)
 
     # ── v18 P1-CTX: Tournament context features ──
     for _bc in ["is_conference_tournament", "is_ncaa_tournament", "is_bubble_game", "is_early_season"]:
@@ -559,32 +553,22 @@ def ncaa_build_features(df):
     df["minutes_hhi_diff"] = df["home_minutes_hhi"] - df["away_minutes_hhi"]
     df["bench_pts_share_diff"] = df["home_bench_pts_share"] - df["away_bench_pts_share"]
     df["players_used_diff"] = df["home_players_used"] - df["away_players_used"]
-    df["starter_mins_diff"] = df["home_starter_mins"] - df["away_starter_mins"]
+    # starter_mins_diff DEAD (home_starter_mins/away_starter_mins always 150 default)
 
     # ── Win Probability Features ──
     df["halftime_wp_edge"] = df["halftime_home_win_prob"] - 0.5
 
     # ═══════════════════════════════════════════════════════════════
-    # v21: VENUE FEATURES (pre-game facts, zero leakage)
+    # v21: VENUE FEATURES — attendance/venue_capacity DEAD (never populated)
+    # crowd_shock_diff replaces all crowd features (precomputed from rolling avg)
     # ═══════════════════════════════════════════════════════════════
+    df["crowd_pct"] = 0.0
+    df["has_crowd_data"] = 0
 
-    # Crowd factor: attendance as % of venue capacity (proxy for crowd energy)
-    # High values (>0.90) = packed arena = stronger HCA; low (<0.50) = weak crowd
-    _att = df["attendance"]
-    _has_att = (_att > 0).astype(int)
-    # Normalize attendance by league median (~2400) since venue_capacity is 0% populated
-    # Result: 0.5 = small crowd, 1.0 = typical, 2.0+ = packed major arena
-    df["crowd_pct"] = (_att / 2400).clip(0, 5.0) * _has_att
-    df["has_crowd_data"] = _has_att
-
-    # crowd_shock_diff: precomputed by compute_crowd_shock() from rolling attendance
-    # If not precomputed (e.g., single-game prediction), default to 0
     if "crowd_shock_diff" not in df.columns:
         df["crowd_shock_diff"] = 0.0
 
-    # Venue capacity tier: small gym (<5K) vs mid (5-10K) vs large (>10K)
-    # Normalized so model can learn venue size effect on HCA
-    df["venue_size_norm"] = (df["venue_capacity"].clip(lower=1000) / 15000).clip(0, 2.0)
+    df["venue_size_norm"] = 0.0
 
     # ═══════════════════════════════════════════════════════════════
     # v21: ROLLING TEAM TENDENCY FEATURES (from prior games, no leakage)
@@ -682,15 +666,8 @@ def ncaa_build_features(df):
     df["sos_trajectory_diff"] = df["home_sos_trajectory"] - df["away_sos_trajectory"]
     df["anti_fragility_diff"] = df["home_anti_fragility"] - df["away_anti_fragility"]
     df["clutch_over_exp_diff"] = df["home_clutch_over_exp"] - df["away_clutch_over_exp"]
-    # ESPN moneyline edge: convert to implied prob delta vs model
-    _espn_ml_h = pd.to_numeric(df["espn_ml_home"], errors="coerce").fillna(0)
-    _espn_ml_a = pd.to_numeric(df["espn_ml_away"], errors="coerce").fillna(0)
-    _has_espn_ml = (_espn_ml_h != 0).astype(float)
-    _espn_imp_h = np.where(_espn_ml_h > 0, 100 / (_espn_ml_h + 100), -_espn_ml_h / (-_espn_ml_h + 100))
-    _espn_imp_a = np.where(_espn_ml_a > 0, 100 / (_espn_ml_a + 100), -_espn_ml_a / (-_espn_ml_a + 100))
-    _espn_vig_total = _espn_imp_h + _espn_imp_a
-    _espn_true_h = np.where(_espn_vig_total > 0, _espn_imp_h / _espn_vig_total, 0.5)
-    df["espn_ml_edge"] = np.where(_has_espn_ml, _espn_true_h - 0.5, 0.0)  # deviation from 50%
+    # ── ESPN ML edge: DEAD (espn_ml_home/away always 0) ──
+    df["espn_ml_edge"] = 0.0
 
 
     # ── Spread movement (sharp money signal) ──
@@ -843,7 +820,7 @@ def ncaa_build_features(df):
         # is_lookahead REMOVED (v25 audit: 5%, too sparse to learn from)
         # v25 AUDIT: Added situational context features
         "is_early",                  # early season flag (35%, stable, real signal)
-        "is_ncaa_tourney",           # NCAA tournament flag (2%, meaningful single-elimination context)
+        # is_ncaa_tourney REMOVED (2% coverage, Lasso always drops it)
         # ═══ v19→v20: ESPN Win Prob edges (unique signal beyond spread) ═══
         "market_wp_edge",           # v25: replaces espn_wp_edge (was bad data)
         # ═══ v26: crowd_shock_diff (replaces crowd_pct — rolling attendance ratio, no leakage) ═══

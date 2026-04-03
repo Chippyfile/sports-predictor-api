@@ -22,6 +22,8 @@ jobs:
           echo "=== Grading ==="
           curl -s --max-time 300 "https://sports-predictor-api-production.up.railway.app/cron/ncaa-daily?mode=grade" | python3 -m json.tool 2>/dev/null || true
           if [ "$MODE" = "predict" ]; then
+            echo "=== Backfilling missing games ==="
+            curl -s --max-time 300 "https://sports-predictor-api-production.up.railway.app/cron/ncaa-backfill" | python3 -m json.tool 2>/dev/null || true
             echo "=== Predicting ==="
             curl -s --max-time 300 "https://sports-predictor-api-production.up.railway.app/cron/ncaa-daily?mode=predict" | python3 -m json.tool 2>/dev/null || true
           fi
