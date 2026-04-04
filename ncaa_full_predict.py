@@ -490,13 +490,18 @@ def _compute_common_opponents(home_sched, away_sched):
 # ═══════════════════════════════════════════════════════════════
 
 def _fetch_supabase_team_data(team_id, team_name):
-    """Fetch rolling features, Elo, advanced stats from Supabase ncaa_historical."""
+    """Fetch rolling features, Elo, advanced stats from Supabase ncaa_historical.
+
+    Robust: tries full column set first; if Supabase rejects any column (400),
+    falls back to a minimal core set so we still get Elo/form/SOS/tempo.
+    """
     cache_key = f"sb_team_{team_id}"
     cached = _cache_get(cache_key, CACHE_TTL_LONG)
     if cached:
         return cached
 
-    _COLS = (
+    # ── Core columns (always exist in ncaa_historical) ──
+    _CORE_COLS = (
         "elo,pyth_residual,adj_oe,adj_de,"
         "efg_pct,twopt_pct,three_rate,assist_rate,drb_pct,ppp,"
         "opp_efg_pct,opp_to_rate,opp_fta_rate,opp_orb_pct,"
@@ -520,11 +525,15 @@ def _fetch_supabase_team_data(team_id, team_name):
         "margin_autocorr,blowout_asym,clutch_over_exp,ft_pressure,"
         "fg_divergence,def_improvement,rhythm_disruption,"
         "fouls,close_win_rate,games_last_7,"
-        "pts_off_to,"
+        "pts_off_to"
+    )
+
+    # ── Optional columns (may not exist in all table versions) ──
+    _OPTIONAL_COLS = (
         "roll_star1_share,roll_top3_share,roll_bench_share,"
         "roll_bench_pts,roll_largest_run,roll_drought_rate,"
         "roll_lead_changes,roll_time_with_lead_pct,"
-        "roll_players_used,roll_hhi,roll_minutes_hhi,"
+        "roll_players_used,roll_hhi,"
         "roll_clutch_ft_pct,roll_garbage_pct,"
         "roll_ats_pct,roll_ats_n,roll_ats_margin,"
         "player_rating_sum,weakest_starter,starter_variance,"
@@ -532,13 +541,10 @@ def _fetch_supabase_team_data(team_id, team_name):
         "starter_ids"
     )
 
-    try:
-        # Query BOTH home and away appearances, take the most recent
-        home_select = ",".join([f"game_date,home_{c}" for c in _COLS.split(",")])
-        away_select = ",".join([f"game_date,away_{c}" for c in _COLS.split(",")])
-        # Deduplicate game_date in select
-        home_select = "game_date," + ",".join([f"home_{c}" for c in _COLS.split(",")])
-        away_select = "game_date," + ",".join([f"away_{c}" for c in _COLS.split(",")])
+    def _run_query(cols_str):
+        cols_list = [c.strip() for c in cols_str.split(",") if c.strip()]
+        home_select = "game_date," + ",".join([f"home_{c}" for c in cols_list])
+        away_select = "game_date," + ",".join([f"away_{c}" for c in cols_list])
 
         home_rows = sb_get(
             "ncaa_historical",
@@ -549,12 +555,10 @@ def _fetch_supabase_team_data(team_id, team_name):
             f"away_team_id=eq.{team_id}&order=game_date.desc&limit=1&select={away_select}"
         )
 
-        # Pick the more recent one
         home_date = (home_rows[0].get("game_date", "") or "") if home_rows else ""
         away_date = (away_rows[0].get("game_date", "") or "") if away_rows else ""
 
         if away_date > home_date and away_rows:
-            # Most recent game was as away — rename away_ to home_
             row = away_rows[0]
             result = {}
             for k, v in row.items():
@@ -562,14 +566,31 @@ def _fetch_supabase_team_data(team_id, team_name):
                     continue
                 new_key = k.replace("away_", "home_") if k.startswith("away_") else k
                 result[new_key] = v
+            return result
         elif home_rows:
-            result = {k: v for k, v in home_rows[0].items() if k != "game_date"}
-        else:
-            _cache_set(cache_key, {})
-            return {}
+            return {k: v for k, v in home_rows[0].items() if k != "game_date"}
+        return None
 
-        _cache_set(cache_key, result)
-        return result
+    try:
+        # Try full query first (core + optional)
+        full_cols = _CORE_COLS + "," + _OPTIONAL_COLS
+        result = _run_query(full_cols)
+        if result is not None:
+            print(f"  [full_predict] Supabase {team_id}: {len(result)} columns (full query)")
+            _cache_set(cache_key, result)
+            return result
+
+        # Full query returned no rows — try core-only (column might not exist)
+        print(f"  [full_predict] Full query empty for {team_id}, trying core-only...")
+        result = _run_query(_CORE_COLS)
+        if result is not None:
+            print(f"  [full_predict] Supabase {team_id}: {len(result)} columns (core-only)")
+            _cache_set(cache_key, result)
+            return result
+
+        print(f"  [full_predict] Supabase {team_id}: no rows found in ncaa_historical")
+        _cache_set(cache_key, {})
+        return {}
     except Exception as e:
         print(f"  [full_predict] Supabase team data error for {team_id}: {e}")
         return {}
@@ -630,6 +651,144 @@ def _fetch_spread_movement(game_id):
 
 
 # ═══════════════════════════════════════════════════════════════
+# SERVE-TIME FEATURE COMPUTATION (when Supabase returns defaults)
+# ═══════════════════════════════════════════════════════════════
+
+def _compute_elo_from_schedule(sched, adj_em, sos):
+    """Compute approximate Elo from schedule data when Supabase Elo is NULL.
+
+    Uses wins, losses, margin, SOS, and adj_em to estimate Elo.
+    Calibrated to match training Elo range: ~1200-1800.
+    """
+    wins = sched.get("wins", 0)
+    losses = sched.get("losses", 0)
+    total = wins + losses
+    if total < 3:
+        return 1500  # Not enough data
+
+    win_pct = wins / total
+
+    # Primary signal: adj_em (efficiency margin) — maps almost linearly to Elo
+    # Training data shows Elo ≈ 1500 + adj_em * 12 (rough calibration)
+    if adj_em and adj_em != 0:
+        elo_from_em = 1500 + adj_em * 12
+    else:
+        # Fallback: Elo from win_pct + SOS
+        sos_adj = max(0, (sos or 0.5) - 0.4) * 2  # 0-1.2 range
+        elo_from_em = 1500 + 400 * (win_pct - 0.5) * (1 + sos_adj)
+
+    # Add margin signal from schedule (average margin weighted by recency)
+    opps = sched.get("opponents", [])
+    if len(opps) >= 5:
+        recent = opps[-10:]  # Last 10 games
+        margins = [o.get("margin", 0) for o in recent if o.get("completed")]
+        if margins:
+            avg_margin = sum(margins) / len(margins)
+            # Blend: 80% adj_em-derived, 20% recent margin
+            elo_from_em = 0.8 * elo_from_em + 0.2 * (1500 + avg_margin * 15)
+
+    return max(1200, min(1850, round(elo_from_em, 1)))
+
+
+def _compute_rolling_ats(team_id, game_date):
+    """Compute rolling ATS stats from ncaa_predictions table.
+
+    Returns: {"ats_pct": float, "ats_n": int, "ats_margin": float}
+    """
+    cache_key = f"rolling_ats_{team_id}_{game_date}"
+    cached = _cache_get(cache_key, CACHE_TTL_LONG)
+    if cached:
+        return cached
+
+    result = {"ats_pct": 0.5, "ats_n": 0, "ats_margin": 0.0}
+    try:
+        # Get last 15 graded predictions where this team played
+        home_rows = sb_get(
+            "ncaa_predictions",
+            f"home_team_id=eq.{team_id}&result_entered=eq.true"
+            f"&game_date=lt.{game_date}&rl_correct=not.is.null"
+            f"&select=rl_correct,market_spread_home,actual_home_score,actual_away_score"
+            f"&order=game_date.desc&limit=15"
+        ) or []
+        away_rows = sb_get(
+            "ncaa_predictions",
+            f"away_team_id=eq.{team_id}&result_entered=eq.true"
+            f"&game_date=lt.{game_date}&rl_correct=not.is.null"
+            f"&select=rl_correct,market_spread_home,actual_home_score,actual_away_score"
+            f"&order=game_date.desc&limit=15"
+        ) or []
+
+        ats_results = []
+        ats_margins = []
+        for r in home_rows:
+            if r.get("rl_correct") is not None:
+                ats_results.append(1 if r["rl_correct"] else 0)
+                # ATS margin: how much team beat the spread
+                hs = float(r.get("actual_home_score", 0) or 0)
+                aws = float(r.get("actual_away_score", 0) or 0)
+                sp = float(r.get("market_spread_home", 0) or 0)
+                ats_margins.append((hs - aws) + sp)
+        for r in away_rows:
+            if r.get("rl_correct") is not None:
+                # Away team: rl_correct is from home perspective, flip
+                ats_results.append(0 if r["rl_correct"] else 1)
+                hs = float(r.get("actual_home_score", 0) or 0)
+                aws = float(r.get("actual_away_score", 0) or 0)
+                sp = float(r.get("market_spread_home", 0) or 0)
+                ats_margins.append(-((hs - aws) + sp))
+
+        if len(ats_results) >= 3:
+            result["ats_pct"] = round(sum(ats_results) / len(ats_results), 4)
+            result["ats_n"] = len(ats_results)
+            result["ats_margin"] = round(sum(ats_margins) / len(ats_margins), 2) if ats_margins else 0.0
+            print(f"  [full_predict] Rolling ATS for {team_id}: {result['ats_pct']:.0%} ({result['ats_n']} games), margin={result['ats_margin']:+.1f}")
+
+        _cache_set(cache_key, result)
+        return result
+    except Exception as e:
+        print(f"  [full_predict] Rolling ATS error for {team_id}: {e}")
+        return result
+
+
+def _compute_advanced_from_schedule(sched, sb_fn):
+    """Compute advanced metrics from schedule history when Supabase values are NULL.
+
+    Returns dict of {feature: value} for features that can be derived from schedule data.
+    """
+    result = {}
+    opps = [o for o in sched.get("opponents", []) if o.get("completed")]
+    if len(opps) < 5:
+        return result
+
+    margins = [o["margin"] for o in opps]
+    recent = margins[-10:]
+
+    # blowout_asym: (wins by 15+) / (losses by 15+) ratio
+    big_wins = sum(1 for m in margins if m >= 15)
+    big_losses = sum(1 for m in margins if m <= -15)
+    result["blowout_asym"] = round((big_wins - big_losses) / max(len(margins), 1), 4)
+
+    # momentum_halflife: recency-weighted form (more recent = more weight)
+    import math
+    weighted = sum(m * math.exp(-0.1 * (len(recent) - 1 - i)) for i, m in enumerate(recent))
+    weight_sum = sum(math.exp(-0.1 * (len(recent) - 1 - i)) for i in range(len(recent)))
+    result["momentum_halflife"] = round(weighted / max(weight_sum, 1), 4)
+
+    # overreaction: volatility of margin changes (game-to-game)
+    if len(margins) >= 3:
+        diffs = [margins[i] - margins[i-1] for i in range(1, len(margins))]
+        import numpy as _np
+        result["overreaction"] = round(float(_np.std(diffs)), 4)
+
+    # opp_suppression: avg margin against ranked opponents
+    ranked_games = [o for o in opps if (o.get("opp_rank") or 200) <= 50]
+    if len(ranked_games) >= 3:
+        result["opp_suppression"] = round(sum(o["margin"] for o in ranked_games) / len(ranked_games), 4)
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN PREDICTION FUNCTION
 # ═══════════════════════════════════════════════════════════════
 
@@ -673,6 +832,8 @@ def predict_ncaa_full(request_data):
         fut_away_sched = executor.submit(_fetch_team_schedule_data, away_team_id, game_date, request_data.get("home_rank", 200))
         fut_home_info = executor.submit(_fetch_espn_team_info, home_team_id)
         fut_away_info = executor.submit(_fetch_espn_team_info, away_team_id)
+        fut_home_ats = executor.submit(_compute_rolling_ats, home_team_id, game_date)
+        fut_away_ats = executor.submit(_compute_rolling_ats, away_team_id, game_date)
 
     home_stats = fut_home_stats.result() or {}
     away_stats = fut_away_stats.result() or {}
@@ -686,6 +847,8 @@ def predict_ncaa_full(request_data):
     away_sched = fut_away_sched.result()
     home_info = fut_home_info.result()
     away_info = fut_away_info.result()
+    home_ats = fut_home_ats.result()
+    away_ats = fut_away_ats.result()
 
     # Rest days extracted from consolidated schedule data
     home_rest = home_sched.get("rest_days", 3)
@@ -764,6 +927,8 @@ def predict_ncaa_full(request_data):
         # Identity
         "game_id": game_id,
         "game_date": game_date,
+        "home_team_id": home_team_id,
+        "away_team_id": away_team_id,
         "home_team_name": home_team_name,
         "away_team_name": away_team_name,
         "neutral_site": neutral_site,
@@ -1044,6 +1209,70 @@ def predict_ncaa_full(request_data):
         game["away_wins"] = away_sched["wins"]
         game["away_losses"] = away_sched["losses"]
     print(f"  [full_predict] Record: home={game['home_wins']}-{game['home_losses']}, away={game['away_wins']}-{game['away_losses']} (sched_h={home_sched.get('wins')}-{home_sched.get('losses')}, espn_h={home_record['wins']}-{home_record['losses']})")
+
+    # ═══ v29: SERVE-TIME FEATURE FILLS (fix 25 zero features) ═══
+
+    # 1a. Elo: compute from schedule/adj_em when Supabase returned default 1500
+    if game["home_elo"] == 1500 or game["away_elo"] == 1500:
+        h_adj_em = float(game.get("home_adj_em", 0) or 0)
+        a_adj_em = float(game.get("away_adj_em", 0) or 0)
+        if game["home_elo"] == 1500:
+            game["home_elo"] = _compute_elo_from_schedule(
+                home_sched, h_adj_em, game.get("home_sos", 0.5))
+        if game["away_elo"] == 1500:
+            game["away_elo"] = _compute_elo_from_schedule(
+                away_sched, a_adj_em, game.get("away_sos", 0.5))
+        print(f"  [full_predict] Elo computed: home={game['home_elo']:.0f}, away={game['away_elo']:.0f}")
+
+    # 1b. Rolling ATS: override from ncaa_predictions when Supabase returned defaults
+    if game["home_roll_ats_n"] == 0 and home_ats["ats_n"] >= 3:
+        game["home_roll_ats_pct"] = home_ats["ats_pct"]
+        game["home_roll_ats_n"] = home_ats["ats_n"]
+        game["home_roll_ats_margin"] = home_ats["ats_margin"]
+    if game["away_roll_ats_n"] == 0 and away_ats["ats_n"] >= 3:
+        game["away_roll_ats_pct"] = away_ats["ats_pct"]
+        game["away_roll_ats_n"] = away_ats["ats_n"]
+        game["away_roll_ats_margin"] = away_ats["ats_margin"]
+
+    # 1c. Advanced metrics: compute from schedule when Supabase returned 0
+    for side, sched, sb_fn in [("home", home_sched, sb), ("away", away_sched, sb_away)]:
+        computed = _compute_advanced_from_schedule(sched, sb_fn)
+        for feat, val in computed.items():
+            key = f"{side}_{feat}"
+            if game.get(key, 0) == 0 and val != 0:
+                game[key] = val
+
+    # 1d. Player quality proxy: use adj_em when starter_ids unavailable
+    for side, adj_em_key in [("home", "home_adj_em"), ("away", "away_adj_em")]:
+        if game.get(f"{side}_player_rating_sum", 0) == 0:
+            em = float(game.get(adj_em_key, 0) or 0)
+            if em != 0:
+                # adj_em ≈ 0-40 range for good teams. Scale to player_rating_sum range.
+                # Training data: player_rating_sum mean ≈ 3.5, adj_em mean ≈ 15
+                # Use ratio: player_rating ≈ adj_em * 0.23
+                game[f"{side}_player_rating_sum"] = round(em * 0.23, 4)
+                game[f"{side}_weakest_starter"] = round(em * 0.03, 4)
+                game[f"{side}_starter_variance"] = round(abs(em * 0.015), 4)
+                print(f"  [full_predict] {side} player rating proxied from adj_em={em:.1f}: sum={game[f'{side}_player_rating_sum']:.3f}")
+
+    # 1e. Rolling tendencies: estimate from schedule when Supabase returned defaults
+    for side, sched in [("home", home_sched), ("away", away_sched)]:
+        opps = [o for o in sched.get("opponents", []) if o.get("completed")]
+        if len(opps) >= 5:
+            margins = [o["margin"] for o in opps[-10:]]
+            wins_last10 = sum(1 for m in margins if m > 0)
+            # roll_time_with_lead_pct: estimate from win rate
+            if game.get(f"{side}_roll_time_with_lead_pct", 0.5) == 0.5 and len(margins) >= 5:
+                game[f"{side}_roll_time_with_lead_pct"] = round(wins_last10 / len(margins), 4)
+            # roll_largest_run: estimate from avg win margin
+            if game.get(f"{side}_roll_largest_run", 8.0) == 8.0 and len(margins) >= 5:
+                avg_margin = sum(margins) / len(margins)
+                game[f"{side}_roll_largest_run"] = max(5, round(8 + avg_margin * 0.3, 1))
+            # roll_players_used: estimate from consistency
+            consistency = float(game.get(f"{side}_consistency", 15) or 15)
+            if game.get(f"{side}_roll_players_used", 8.0) == 8.0 and consistency != 15:
+                # Lower consistency = more players needed
+                game[f"{side}_roll_players_used"] = round(8 + (consistency - 15) * 0.05, 1)
 
     # 2. Conference strength diff + cross-conference flag
     _CONF_STRENGTH = {
