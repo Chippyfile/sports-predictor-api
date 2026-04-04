@@ -1949,13 +1949,16 @@ def predict_ncaa(game: dict):
     win_prob = max(0.05, min(0.95, win_prob))
 
     shap_vals = bundle["explainer"].shap_values(X_s) if "explainer" in bundle else None
-    if isinstance(shap_vals, list):
-        shap_vals = shap_vals[0]
-    shap_out = [
-        {"feature": f, "shap": round(float(v), 4), "value": round(float(X_built[f].iloc[0]), 3)}
-        for f, v in zip(bundle.get("feature_cols", bundle.get("feature_names", [])), shap_vals[0])
-    ]
-    shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+    if shap_vals is not None:
+        if isinstance(shap_vals, list):
+            shap_vals = shap_vals[0]
+        shap_out = [
+            {"feature": f, "shap": round(float(v), 4), "value": round(float(X_built[f].iloc[0]), 3)}
+            for f, v in zip(bundle.get("feature_cols", bundle.get("feature_names", [])), shap_vals[0])
+        ]
+        shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+    else:
+        shap_out = []
 
     return {
         "sport": "NCAAB",
