@@ -976,9 +976,21 @@ def route_ncaa_daily():
                         if espn_ou is not None:
                             row["market_ou_total"] = espn_ou
 
-                        # O/U prediction (v26)
+                        # O/U prediction (v26 direct + v4 triple agreement)
                         if pred.get("ou_predicted_total") is not None:
                             row["ou_total"] = pred["ou_predicted_total"]
+                        if pred.get("ou_pick") is not None:
+                            row["ou_pick"] = pred["ou_pick"]
+                        if pred.get("ou_tier") is not None:
+                            row["ou_tier"] = pred["ou_tier"]
+                        if pred.get("ou_res_avg") is not None:
+                            row["ou_res_avg"] = pred["ou_res_avg"]
+                        if pred.get("ou_cls_avg") is not None:
+                            row["ou_cls_avg"] = pred["ou_cls_avg"]
+                        if pred.get("ou_ats_total") is not None:
+                            row["ou_ats_total"] = pred["ou_ats_total"]
+                        if pred.get("ou_edge") is not None:
+                            row["ou_edge"] = pred["ou_edge"]
 
                         # ATS pick (v27)
                         if row.get("spread_home") is not None and row.get("market_spread_home") is not None:
