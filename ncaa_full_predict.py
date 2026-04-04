@@ -1524,13 +1524,20 @@ def predict_ncaa_full(request_data):
 
     X_s = bundle["scaler"].transform(X)
 
-    # Regression
-    raw_margin = float(bundle["reg"].predict(X_s)[0])
+    # Regression — support both old (reg) and new (models list) formats
+    if "reg" in bundle:
+        raw_margin = float(bundle["reg"].predict(X_s)[0])
+    else:
+        _models = bundle.get("models", [])
+        raw_margin = float(sum(m.predict(X_s)[0] for m in _models) / max(len(_models), 1))
     bias = bundle.get("bias_correction", 0.0)
     margin = raw_margin - bias
 
-    # Classification + isotonic
-    raw_win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
+    # Classification + isotonic — fallback to sigmoid if no classifier
+    if "clf" in bundle:
+        raw_win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
+    else:
+        raw_win_prob = float(1.0 / (1.0 + __import__("math").exp(-raw_margin / 6.5)))
     isotonic = bundle.get("isotonic")
     win_prob = float(isotonic.predict([raw_win_prob])[0]) if isotonic else raw_win_prob
     win_prob = max(0.05, min(0.95, win_prob))
@@ -1755,10 +1762,10 @@ def predict_ncaa_full(request_data):
             "crowd_shock": bool(game.get("crowd_shock_diff", 0) != 0),
         },
         "model_meta": {
-            "n_train": bundle["n_train"],
-            "mae_cv": bundle["mae_cv"],
+            "n_train": bundle.get("n_train", 0),
+            "mae_cv": bundle.get("mae_cv", 0),
             "model_type": bundle.get("model_type", "unknown"),
-            "trained_at": bundle["trained_at"],
+            "trained_at": bundle.get("trained_at", "unknown"),
         },
         # v25: Audit fields for ncaaSync to save to predictions table
         "audit_data": {
