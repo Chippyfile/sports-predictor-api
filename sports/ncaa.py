@@ -1948,7 +1948,7 @@ def predict_ncaa(game: dict):
     # 0.95 → ML -1900, 0.05 → ML +1900 (capped at ±800 for display).
     win_prob = max(0.05, min(0.95, win_prob))
 
-    shap_vals = bundle["explainer"].shap_values(X_s)
+    shap_vals = bundle["explainer"].shap_values(X_s) if "explainer" in bundle else None
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[0]
     shap_out = [
@@ -1966,9 +1966,9 @@ def predict_ncaa(game: dict):
         "ml_win_prob_raw": round(raw_win_prob, 4),  # before isotonic
         "bias_correction_applied": round(bias, 3),
         "shap": shap_out,
-        "model_meta": {"n_train": bundle["n_train"], "mae_cv": bundle["mae_cv"],
+        "model_meta": {"n_train": bundle.get("n_train", 0), "mae_cv": bundle.get("mae_cv", 0),
                        "model_type": bundle.get("model_type", "unknown"),
-                       "trained_at": bundle["trained_at"]},
+                       "trained_at": bundle.get("trained_at", "unknown")},
     }
 
 # ═══════════════════════════════════════════════════════════════
