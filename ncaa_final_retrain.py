@@ -698,16 +698,22 @@ if __name__ == "__main__":
             lasso_final.fit(X_scaled, y)
         lgbm_final.fit(X_scaled, y, sample_weight=weights)
         
+        # SHAP explainer (from LGBM model)
+        import shap
+        explainer = shap.TreeExplainer(lgbm_final)
+        
         bundle = {
             "scaler": scaler,
             "models": [lasso_final, lgbm_final],
             "feature_names": avail_new,
+            "feature_cols": avail_new,  # alias for compatibility
             "model_type": "Lasso_LGBM_v31_HCA",
             "mae_cv": mae2,
             "sigma": SIGMA,
             "trained_at": datetime.utcnow().isoformat(),
             "n_train": len(y),
             "n_features": len(avail_new),
+            "explainer": explainer,
         }
         
         print(f"  {len(avail_new)} features, {len(y):,} training games")

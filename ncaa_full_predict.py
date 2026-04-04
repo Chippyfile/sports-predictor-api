@@ -1726,7 +1726,7 @@ def predict_ncaa_full(request_data):
             shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
     except Exception as e:
         print(f"  [full_predict] SHAP error: {e}")
-        shap_out = []
+        shap_out = [{"feature": "SHAP_ERROR", "shap": 0, "value": 0, "error": str(e)}]
 
     return {
         "sport": "NCAAB",
