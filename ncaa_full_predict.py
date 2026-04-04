@@ -997,7 +997,7 @@ def predict_ncaa_full(request_data):
         # Supabase-only advanced stats (no ESPN equivalent)
         "home_pyth_residual": sb("home_pyth_residual"), "away_pyth_residual": sb_away("home_pyth_residual"),
         "home_opp_efg_pct": sb("home_opp_efg_pct", 0.50), "away_opp_efg_pct": sb_away("home_opp_efg_pct", 0.50),
-        "home_opp_to_rate": sb("home_opp_to_rate", 0.18), "away_opp_to_rate": sb_away("home_opp_to_rate", 0.18),
+        "home_opp_to_rate": sb("home_opp_to_rate") or (away_stats.get("turnovers", 12) / max(away_stats.get("tempo", 68), 1)), "away_opp_to_rate": sb_away("home_opp_to_rate", 0.18),
         "home_opp_fta_rate": sb("home_opp_fta_rate", 0.30), "away_opp_fta_rate": sb_away("home_opp_fta_rate", 0.30),
         "home_opp_orb_pct": sb("home_opp_orb_pct", 0.28), "away_opp_orb_pct": sb_away("home_opp_orb_pct", 0.28),
 
