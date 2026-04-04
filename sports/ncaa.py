@@ -1914,10 +1914,10 @@ def predict_ncaa(game: dict):
     X_built = ncaa_build_features(row)
 
     # Ensure feature alignment with trained model
-    for col in bundle["feature_cols"]:
+    for col in bundle.get("feature_cols", bundle.get("feature_names", [])):
         if col not in X_built.columns:
             X_built[col] = 0
-    X_built = X_built[bundle["feature_cols"]]
+    X_built = X_built[bundle.get("feature_cols", bundle.get("feature_names", []))]
 
     X_s      = bundle["scaler"].transform(X_built)
     raw_margin = float(bundle["reg"].predict(X_s)[0])
@@ -1948,7 +1948,7 @@ def predict_ncaa(game: dict):
         shap_vals = shap_vals[0]
     shap_out = [
         {"feature": f, "shap": round(float(v), 4), "value": round(float(X_built[f].iloc[0]), 3)}
-        for f, v in zip(bundle["feature_cols"], shap_vals[0])
+        for f, v in zip(bundle.get("feature_cols", bundle.get("feature_names", [])), shap_vals[0])
     ]
     shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
 
