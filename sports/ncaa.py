@@ -1926,7 +1926,7 @@ def predict_ncaa(game: dict):
     else:
         _models = bundle.get("models", [])
         raw_margin = float(np.mean([m.predict(X_s)[0] for m in _models]))
-    raw_win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
+    raw_win_prob = float(bundle["clf"].predict_proba(X_s)[0][1]) if "clf" in bundle else float(1.0 / (1.0 + np.exp(-raw_margin / 6.5)))
 
     # R6 FIX: Apply bias correction to margin prediction
     bias = bundle.get("bias_correction", 0.0)
