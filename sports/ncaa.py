@@ -1920,7 +1920,12 @@ def predict_ncaa(game: dict):
     X_built = X_built[bundle.get("feature_cols", bundle.get("feature_names", []))]
 
     X_s      = bundle["scaler"].transform(X_built)
-    raw_margin = float(bundle["reg"].predict(X_s)[0])
+    # Support both old (reg/clf) and new (models list) bundle formats
+    if "reg" in bundle:
+        raw_margin = float(bundle["reg"].predict(X_s)[0])
+    else:
+        _models = bundle.get("models", [])
+        raw_margin = float(np.mean([m.predict(X_s)[0] for m in _models]))
     raw_win_prob = float(bundle["clf"].predict_proba(X_s)[0][1])
 
     # R6 FIX: Apply bias correction to margin prediction
