@@ -1960,6 +1960,67 @@ def predict_ncaa(game: dict):
     else:
         shap_out = []
 
+    # ═══ O/U v4: Triple Agreement (residual + classifier + ATS scores) ═══
+    ou_pick = None
+    ou_tier = 0
+    ou_res_avg = None
+    ou_cls_avg = None
+    ou_ats_total = None
+    ou_edge = None
+    try:
+        ou_bundle = load_model("ncaa_ou")
+        if ou_bundle and ou_bundle.get("res_models"):
+            # V4 bundle detected
+            res_feats = ou_bundle["res_feature_cols"]
+            cls_feats = ou_bundle["cls_feature_cols"]
+            ats_feats = ou_bundle["ats_feature_cols"]
+
+            # Build feature vectors from X_built
+            def _get_feat(f):
+                if f in X_built.columns:
+                    return float(X_built[f].iloc[0])
+                return 0.0
+
+            res_vals = np.array([[_get_feat(f) for f in res_feats]])
+            cls_vals = np.array([[_get_feat(f) for f in cls_feats]])
+            ats_vals = np.array([[_get_feat(f) for f in ats_feats]])
+
+            res_scaled = ou_bundle["res_scaler"].transform(res_vals)
+            cls_scaled = ou_bundle["cls_scaler"].transform(cls_vals)
+            ats_scaled = ou_bundle["ats_scaler"].transform(ats_vals)
+
+            # 3 residual models averaged
+            ou_res_avg = float(np.mean([m.predict(res_scaled)[0] for m in ou_bundle["res_models"]]))
+            # 2 classifiers averaged → P(under)
+            ou_cls_avg = float(np.mean([m.predict_proba(cls_scaled)[0, 1] for m in ou_bundle["cls_models"]]))
+            # ATS home + away → implied total
+            h_preds = [m.predict(ats_scaled)[0] for m in ou_bundle["ats_home_models"]]
+            a_preds = [m.predict(ats_scaled)[0] for m in ou_bundle["ats_away_models"]]
+            ou_ats_total = float(np.mean(h_preds) + np.mean(a_preds))
+
+            mkt_ou = float(game.get("market_ou_total", 0) or game.get("espn_over_under", 0) or 0)
+            ats_edge_val = ou_ats_total - mkt_ou if mkt_ou > 0 else 0
+            ou_edge = round(ou_res_avg, 2)
+
+            if mkt_ou > 0:
+                # Check UNDER tiers (highest first)
+                for t in sorted(ou_bundle.get("under_tiers", {}).keys(), reverse=True):
+                    th = ou_bundle["under_tiers"][t]
+                    if ou_res_avg <= th["res_avg"] and ou_cls_avg >= th["cls_avg"] and ats_edge_val <= th["ats_edge"]:
+                        ou_pick = "UNDER"
+                        ou_tier = t
+                        break
+                # If no UNDER, check OVER
+                if ou_pick is None:
+                    for t in sorted(ou_bundle.get("over_tiers", {}).keys(), reverse=True):
+                        th = ou_bundle["over_tiers"][t]
+                        if ou_res_avg >= th["res_avg"] and ou_cls_avg <= th["cls_avg"] and ats_edge_val >= th["ats_edge"]:
+                            ou_pick = "OVER"
+                            ou_tier = t
+                            break
+    except Exception as e:
+        print(f"  [predict_ncaa] O/U v4 error: {e}")
+
     return {
         "sport": "NCAAB",
         "ml_margin": round(margin, 2),
@@ -1969,6 +2030,12 @@ def predict_ncaa(game: dict):
         "ml_win_prob_raw": round(raw_win_prob, 4),  # before isotonic
         "bias_correction_applied": round(bias, 3),
         "shap": shap_out,
+        "ou_pick": ou_pick,
+        "ou_tier": ou_tier,
+        "ou_edge": ou_edge,
+        "ou_res_avg": round(ou_res_avg, 2) if ou_res_avg is not None else None,
+        "ou_cls_avg": round(ou_cls_avg, 4) if ou_cls_avg is not None else None,
+        "ou_ats_total": round(ou_ats_total, 1) if ou_ats_total is not None else None,
         "model_meta": {"n_train": bundle.get("n_train", 0), "mae_cv": bundle.get("mae_cv", 0),
                        "model_type": bundle.get("model_type", "unknown"),
                        "trained_at": bundle.get("trained_at", "unknown")},
