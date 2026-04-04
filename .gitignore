@@ -148,3 +148,26 @@ nba_v27_features.parquet
 nba_model_local.pkl
 models/nba.pkl
 models/nba_v26*
+# Caches
+ncaa_raw_summary_cache.*
+ncaa_extract_cache.json
+ncaa_boxscore_cache.json
+ncaa_hhi_players_cache.json
+nba_pbp_v2_checkpoint.json
+clutch_ft_cache.json
+
+# Large data files
+teamstats.csv
+pitching.csv
+true_walkforward_results.csv
+gameinfo.csv
+ncaa_historical_export.csv
+ncaa_training_data.parquet
+nba_walkforward_results.csv
+nba_training_data.parquet
+allplayers.csv
+rolling_player_avg_w10.csv
+walk_forward_results.csv
+
+# Venv
+.venv/
