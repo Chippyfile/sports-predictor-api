@@ -30,7 +30,7 @@ from dump_training_data import dump, load_cached
 from build_crowd_shock import compute_crowd_shock
 from compute_h2h_conf_form import compute_missing_features
 
-SEED = 42; N_FOLDS = 30; SIGMA = 6.5
+SEED = 42; N_FOLDS = 30; SIGMA = 6.0  # Brier-optimal (Apr 2026 sweep on backfilled data)
 TEAM_LOCATIONS_FILE = "ncaa_team_locations.json"
 
 # ── Current 43 features ──

@@ -192,7 +192,7 @@ for s, d in [("home_record_wins","home_wins"),("away_record_wins","away_wins"),
     if s in df.columns and d not in df.columns: df[d] = df[s]
 
 seasons = pd.to_numeric(df["season"], errors="coerce").values
-weights = np.array([{2026:1.0,2025:0.9,2024:0.75,2023:0.6}.get(s, 0.5) for s in seasons])
+weights = np.array([{2026:1.0,2025:1.0,2024:0.5,2023:0.25}.get(s, 0.1) for s in seasons])  # "recent" scheme: best MAE/Brier for O/U
 
 print("  Heuristic backfill + features...")
 df = _ncaa_backfill_heuristic(df)

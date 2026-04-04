@@ -152,6 +152,12 @@ def _incremental_sync():
         df_merged = df_merged.sort_values(["season", "game_date"]).reset_index(drop=True)
 
     # Save
+    if "game_id" in df_merged.columns: df_merged["game_id"] = df_merged["game_id"].astype(str)
+
+    # Fix mixed types before parquet save (int/str mix causes ArrowInvalid)
+    for _col in ['game_id', 'home_team_id', 'away_team_id']:
+        if _col in df_merged.columns:
+            df_merged[_col] = df_merged[_col].astype(str)
     df_merged.to_parquet(PARQUET_PATH, index=False)
     size_mb = os.path.getsize(PARQUET_PATH) / (1024 * 1024)
     _save_timestamp(len(df_merged), len(df_merged.columns), size_mb)
@@ -191,6 +197,12 @@ def _full_dump():
     print(f"  Seasons: {sorted(df['season'].dropna().unique().tolist())}")
 
     # Save parquet
+    if "game_id" in df.columns: df["game_id"] = df["game_id"].astype(str)
+
+    # Fix mixed types before parquet save
+    for _col in ['game_id', 'home_team_id', 'away_team_id']:
+        if _col in df.columns:
+            df[_col] = df[_col].astype(str)
     df.to_parquet(PARQUET_PATH, index=False)
     size_mb = os.path.getsize(PARQUET_PATH) / (1024 * 1024)
     _save_timestamp(len(rows), len(df.columns), size_mb)
