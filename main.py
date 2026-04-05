@@ -1320,13 +1320,24 @@ def route_ncaa_backfill():
             return jsonify({"status": "ok", "message": "No NULL rows to backfill", "duration_sec": round(_time.time() - start, 1)})
 
         # 2. Pull ALL season games for chronological computation (paginated, 1000/page)
+        # Use game_date range (indexed) instead of season filter (slow)
+        _season_ranges = {
+            "2026": ("2025-11-01", "2026-04-30"),
+            "2025": ("2024-11-01", "2025-04-30"),
+            "2024": ("2023-11-01", "2024-04-30"),
+            "2023": ("2022-11-01", "2023-04-30"),
+            "2022": ("2021-11-01", "2022-04-30"),
+        }
+        _date_start, _date_end = _season_ranges.get(season, (f"{int(season)-1}-11-01", f"{season}-04-30"))
+
         def _paginated_get(base_url):
             all_data, offset = [], 0
             while True:
                 rr = _req.get(f"{base_url}&limit=1000&offset={offset}",
                     headers=headers, timeout=60)
-                page = rr.json() if rr.ok else []
-                if not page: break
+                if not rr.ok: break
+                page = rr.json()
+                if not isinstance(page, list) or not page: break
                 all_data.extend(page)
                 if len(page) < 1000: break
                 offset += 1000
@@ -1334,13 +1345,13 @@ def route_ncaa_backfill():
             return all_data
 
         all_games = _paginated_get(
-            f"{SUPABASE_URL}/rest/v1/ncaa_historical?season=eq.{season}&actual_home_score=not.is.null"
-            f"&select={_sel}&order=game_date.asc")
+            f"{SUPABASE_URL}/rest/v1/ncaa_historical?game_date=gte.{_date_start}&game_date=lte.{_date_end}"
+            f"&actual_home_score=not.is.null&select={_sel}&order=game_date.asc")
 
         # Also pull turnovers/steals for opp_to_rate
         stats_rows = _paginated_get(
-            f"{SUPABASE_URL}/rest/v1/ncaa_historical?season=eq.{season}&actual_home_score=not.is.null"
-            f"&select=id,home_turnovers,away_turnovers,home_steals,away_steals,home_tempo,away_tempo"
+            f"{SUPABASE_URL}/rest/v1/ncaa_historical?game_date=gte.{_date_start}&game_date=lte.{_date_end}"
+            f"&actual_home_score=not.is.null&select=id,home_turnovers,away_turnovers,home_steals,away_steals,home_tempo,away_tempo"
             f"&order=game_date.asc")
         stats_map = {sr["id"]: sr for sr in stats_rows}
 
