@@ -1090,7 +1090,8 @@ def predict_nba_full(game: dict):
     if clf:
         raw_p = float(clf.predict_proba(X_s)[0][1])
     else:
-        raw_p = 1.0 / (1.0 + np.exp(-margin / 8.0))
+        # HIGH-1 FIX: σ=7.0 validated via walk-forward Brier sweep (0.2065 vs 0.2068 at σ=8.0)
+        raw_p = 1.0 / (1.0 + np.exp(-margin / 7.0))
     cal = bundle.get("calibrator") or bundle.get("isotonic")
     wp = float(cal.predict([raw_p])[0]) if cal else raw_p
 
