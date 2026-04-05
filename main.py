@@ -1319,20 +1319,30 @@ def route_ncaa_backfill():
         if not null_rows:
             return jsonify({"status": "ok", "message": "No NULL rows to backfill", "duration_sec": round(_time.time() - start, 1)})
 
-        # 2. Pull ALL season games for chronological computation
-        r2 = _req.get(
+        # 2. Pull ALL season games for chronological computation (paginated, 1000/page)
+        def _paginated_get(base_url):
+            all_data, offset = [], 0
+            while True:
+                rr = _req.get(f"{base_url}&limit=1000&offset={offset}",
+                    headers=headers, timeout=60)
+                page = rr.json() if rr.ok else []
+                if not page: break
+                all_data.extend(page)
+                if len(page) < 1000: break
+                offset += 1000
+                _time.sleep(0.5)
+            return all_data
+
+        all_games = _paginated_get(
             f"{SUPABASE_URL}/rest/v1/ncaa_historical?season=eq.{season}&actual_home_score=not.is.null"
-            f"&select={_sel}&order=game_date.asc&limit=10000",
-            headers=headers, timeout=60)
-        all_games = r2.json() if r2.ok else []
+            f"&select={_sel}&order=game_date.asc")
 
         # Also pull turnovers/steals for opp_to_rate
-        r3 = _req.get(
+        stats_rows = _paginated_get(
             f"{SUPABASE_URL}/rest/v1/ncaa_historical?season=eq.{season}&actual_home_score=not.is.null"
             f"&select=id,home_turnovers,away_turnovers,home_steals,away_steals,home_tempo,away_tempo"
-            f"&order=game_date.asc&limit=10000",
-            headers=headers, timeout=60)
-        stats_map = {sr["id"]: sr for sr in (r3.json() if r3.ok else [])}
+            f"&order=game_date.asc")
+        stats_map = {sr["id"]: sr for sr in stats_rows}
 
         target_ids = set(r["id"] for r in null_rows)
 
