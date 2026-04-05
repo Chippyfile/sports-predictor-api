@@ -909,8 +909,20 @@ def predict_nba_full(game: dict):
         ov["post_trade_deadline"] = 1 if dt >= datetime(dt.year, 2, 10) else 0
     except: pass
     ov["away_is_public_team"] = 1 if away_abbr in PUBLIC_TEAMS else 0
+    # FIX CRIT-2: crowd_pct was always ~0.97 (18500/capacity).
+    # Training used real attendance/capacity which varies 0.80-1.05.
+    # Pre-game: attendance is unknown, so use team-specific avg fill rates as proxy.
+    # These are approximate 2024-25 season averages from ESPN attendance data.
+    _TEAM_FILL_RATE = {
+        "BOS":1.00,"GSW":1.00,"DAL":1.00,"NYK":1.00,"PHX":1.00,"MIL":1.00,
+        "LAL":0.99,"DEN":0.99,"CLE":0.99,"MEM":0.98,"SAC":0.98,"PHI":0.98,
+        "MIA":0.97,"MIN":0.97,"IND":0.97,"OKC":0.99,"CHI":0.95,"ATL":0.93,
+        "TOR":0.95,"HOU":0.95,"SAS":0.97,"ORL":0.96,"LAC":0.93,"BKN":0.90,
+        "NOP":0.91,"POR":0.93,"UTA":0.94,"CHA":0.88,"WAS":0.85,"DET":0.82,
+    }
+    _fill = _TEAM_FILL_RATE.get(home_abbr, 0.94)
     cap = espn.get("_venue_cap", VENUE_CAPACITY.get(home_abbr, 19000))
-    ov["crowd_pct"] = round(min(1.0, 18500/max(cap, 1)), 4)
+    ov["crowd_pct"] = round(min(1.05, _fill), 4)
 
     # H2H (from ESPN season series — builder reads from row which has it)
     _h2h_n = espn.get("_h2h_n", 0)

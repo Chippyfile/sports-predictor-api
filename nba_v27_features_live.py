@@ -25,26 +25,29 @@ NBA_CONFERENCES = {
 
 FEATURES_69 = [
     "after_loss_either", "altitude_factor", "ato_ratio_diff",
-    "away_is_public_team", "b2b_diff", "bimodal_diff", "ceiling_diff",
-    "conference_game", "consistency_diff", "days_since_loss_diff",
-    "efg_diff", "elo_diff", "espn_pregame_wp", "espn_pregame_wp_pbp",
-    "floor_diff", "ftpct_diff", "games_diff", "games_last_14_diff",
-    "h2h_avg_margin", "h2h_total_games", "home_b2b", "home_fav",
-    "implied_prob_home", "is_early_season", "is_friday_sat",
-    "is_revenge_home", "lineup_value_diff", "margin_accel_diff",
-    "market_spread", "matchup_efg", "matchup_ft", "matchup_orb",
-    "momentum_halflife_diff", "opp_suppression_diff", "ou_gap",
-    "overround", "pace_control_diff", "pace_leverage", "post_allstar",
+    "away_after_loss", "away_is_public_team", "b2b_diff", "bimodal_diff",
+    "ceiling_diff", "conference_game", "consistency_diff", "crowd_pct",
+    "days_since_loss_diff", "efg_diff", "elo_diff", "espn_pregame_wp",
+    "espn_pregame_wp_pbp", "floor_diff", "ftpct_diff", "games_diff",
+    "games_last_14_diff", "h2h_avg_margin", "h2h_total_games",
+    "home_after_loss", "home_b2b", "home_fav", "implied_prob_home",
+    "is_early_season", "is_friday_sat", "is_revenge_home",
+    "lineup_value_diff", "margin_accel_diff", "market_spread",
+    "matchup_efg", "matchup_ft", "matchup_orb", "matchup_to",
+    "ml_implied_spread", "momentum_halflife_diff", "net_rtg_diff",
+    "opp_ppg_diff", "opp_suppression_diff", "ou_gap", "overround",
+    "pace_control_diff", "pace_leverage", "post_allstar",
     "post_trade_deadline", "pyth_luck_diff", "pyth_residual_diff",
     "recovery_diff", "ref_foul_proxy", "ref_home_whistle", "ref_ou_bias",
-    "ref_pace_impact", "reverse_line_movement", "roll_bench_pts_diff",
-    "roll_ft_trip_rate_diff", "roll_max_run_avg", "roll_paint_fg_rate_diff",
-    "roll_paint_pts_diff", "roll_q4_diff", "roll_three_fg_rate_diff",
-    "score_kurtosis_diff", "scoring_entropy_diff", "scoring_hhi_diff",
-    "sharp_spread_signal", "spread_juice_imbalance", "steals_to_diff",
-    "three_pt_regression_diff", "three_value_diff", "threepct_diff",
-    "ts_regression_diff", "turnovers_diff", "vig_uncertainty",
-    "win_aging_diff", "win_pct_diff",
+    "ref_pace_impact", "rest_diff", "reverse_line_movement",
+    "roll_bench_pts_diff", "roll_dreb_diff", "roll_fast_break_diff",
+    "roll_ft_trip_rate_diff", "roll_max_run_avg",
+    "roll_paint_fg_rate_diff", "roll_paint_pts_diff", "roll_q4_diff",
+    "roll_three_fg_rate_diff", "score_kurtosis_diff",
+    "scoring_entropy_diff", "scoring_hhi_diff", "sharp_spread_signal",
+    "spread_juice_imbalance", "steals_to_diff", "three_pt_regression_diff",
+    "three_value_diff", "threepct_diff", "ts_regression_diff",
+    "turnovers_diff", "vig_uncertainty", "win_aging_diff", "win_pct_diff",
 ]
 
 # Training range clamps — clips features to prevent out-of-distribution nonsense.
@@ -241,6 +244,9 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
     f["roll_ft_trip_rate_diff"] = _roll("home_roll_ft_trip_rate", "away_roll_ft_trip_rate", "roll_ft_trip_rate_diff")
     f["roll_three_fg_rate_diff"] = _roll("home_roll_three_fg_rate", "away_roll_three_fg_rate", "roll_three_fg_rate_diff")
     f["roll_paint_fg_rate_diff"] = _roll("home_roll_paint_fg_rate", "away_roll_paint_fg_rate", "roll_paint_fg_rate_diff")
+    # FIX: roll_dreb_diff and roll_fast_break_diff were in V27 training but missing from live builder
+    f["roll_dreb_diff"] = _roll("home_roll_dreb", "away_roll_dreb", "roll_dreb_diff")
+    f["roll_fast_break_diff"] = _roll("home_roll_fast_break_pts", "away_roll_fast_break_pts", "roll_fast_break_pts_diff")
     # Fallback: derive from already-computed roll_paint_pts_diff / avg_ppg
     # (nba_game_stats has no paint_fg_rate column, so derive from paint_pts)
     if f["roll_paint_fg_rate_diff"] == 0 and f.get("roll_paint_pts_diff", 0) != 0:
@@ -295,6 +301,16 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
         f["is_friday_sat"]=0; f["post_allstar"]=0; f["post_trade_deadline"]=0
     f["altitude_factor"]=1 if str(home_abbr).upper()=="DEN" else 0
 
+    # FIX CRIT-2: crowd_pct — use team-specific avg fill rates (training uses real attendance)
+    _TEAM_FILL = {
+        "BOS":1.00,"GSW":1.00,"DAL":1.00,"NYK":1.00,"PHX":1.00,"MIL":1.00,
+        "LAL":0.99,"DEN":0.99,"CLE":0.99,"MEM":0.98,"SAC":0.98,"PHI":0.98,
+        "MIA":0.97,"MIN":0.97,"IND":0.97,"OKC":0.99,"CHI":0.95,"ATL":0.93,
+        "TOR":0.95,"HOU":0.95,"SAS":0.97,"ORL":0.96,"LAC":0.93,"BKN":0.90,
+        "NOP":0.91,"POR":0.93,"UTA":0.94,"CHA":0.88,"WAS":0.85,"DET":0.82,
+    }
+    f["crowd_pct"] = _TEAM_FILL.get(str(home_abbr).upper(), 0.94)
+
     # === H2H (4) ===
     f["h2h_total_games"]=g("h2h_total_games",0) or g("_h2h_n",0)
     f["h2h_avg_margin"]=g("h2h_avg_margin",0)
@@ -314,6 +330,8 @@ def build_v27_features(game, enrichment=None, ref_profile=None, league_avg_ts=0.
         if isinstance(asr,str) and asr.startswith("L"): aal=1
         elif g("away_last_result",0)==-1: aal=1
         elif g("away_streak",0)<0: aal=1
+    f["home_after_loss"] = hal
+    f["away_after_loss"] = aal
     f["after_loss_either"]=1 if (hal or aal) else g("after_loss_either",0)
     f["away_is_public_team"]=1 if str(away_abbr).upper() in PUBLIC_TEAMS else 0
 
