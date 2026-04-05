@@ -91,6 +91,7 @@ def index():
             "POST /compute/ncaa-efficiency",
             "GET  /ratings/ncaa",
             "GET  /cron/ncaa-daily?mode=predict|refresh|grade|auto",
+            "GET  /cron/ncaa-backfill?season=2026  (backfill elo/form/etc.)",
             "GET  /cron/nba-daily?mode=predict|grade|auto",
             "GET  /cron/mlb-daily?mode=predict|grade|auto",
             "GET  /cron/ncaa-ats-record",
@@ -1282,6 +1283,204 @@ def route_ncaa_daily():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
     finally:
         _ncaa_cron_lock = False
+
+
+# ═══════════════════════════════════════════════════════════════
+# NCAA BACKFILL — compute advanced features for new games
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/cron/ncaa-backfill", methods=["GET", "POST"])
+def route_ncaa_backfill():
+    """Compute elo/form/pit_sos/etc. for ncaa_historical rows with NULLs.
+
+    Runs the same logic as backfill_advanced_features.py but limited to
+    recent NULL rows to stay within Railway's 5-minute timeout.
+    """
+    import time as _time, math
+    import requests as _req
+    import numpy as _np
+    from collections import defaultdict, deque
+    start = _time.time()
+
+    WINDOW = 20; ELO_K = 32; FORM_DECAY = 0.1
+    season = request.args.get("season", "2026")
+
+    try:
+        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+
+        # 1. Find rows needing backfill
+        _sel = "id,game_date,home_team_id,away_team_id,actual_home_score,actual_away_score,home_rank,away_rank,neutral_site"
+        r = _req.get(
+            f"{SUPABASE_URL}/rest/v1/ncaa_historical?season=eq.{season}&actual_home_score=not.is.null&home_form=is.null"
+            f"&select={_sel}&order=game_date.asc&limit=500",
+            headers=headers, timeout=30)
+        null_rows = r.json() if r.ok else []
+
+        if not null_rows:
+            return jsonify({"status": "ok", "message": "No NULL rows to backfill", "duration_sec": round(_time.time() - start, 1)})
+
+        # 2. Pull ALL season games for chronological computation
+        r2 = _req.get(
+            f"{SUPABASE_URL}/rest/v1/ncaa_historical?season=eq.{season}&actual_home_score=not.is.null"
+            f"&select={_sel}&order=game_date.asc&limit=10000",
+            headers=headers, timeout=60)
+        all_games = r2.json() if r2.ok else []
+
+        # Also pull turnovers/steals for opp_to_rate
+        r3 = _req.get(
+            f"{SUPABASE_URL}/rest/v1/ncaa_historical?season=eq.{season}&actual_home_score=not.is.null"
+            f"&select=id,home_turnovers,away_turnovers,home_steals,away_steals,home_tempo,away_tempo"
+            f"&order=game_date.asc&limit=10000",
+            headers=headers, timeout=60)
+        stats_map = {sr["id"]: sr for sr in (r3.json() if r3.ok else [])}
+
+        target_ids = set(r["id"] for r in null_rows)
+
+        # 3. Process chronologically
+        team_games = defaultdict(list)
+        team_elo = defaultdict(lambda: 1500.0)
+        team_home_m = defaultdict(lambda: deque(maxlen=WINDOW))
+        team_away_m = defaultdict(lambda: deque(maxlen=WINDOW))
+        team_opp_elos = defaultdict(lambda: deque(maxlen=WINDOW))
+        updates = []
+
+        for g in all_games:
+            gid = g.get("id")
+            hid = str(g.get("home_team_id", ""))
+            aid = str(g.get("away_team_id", ""))
+            hs = g.get("actual_home_score")
+            aws = g.get("actual_away_score")
+            if not hid or not aid or hs is None or aws is None:
+                continue
+
+            hs, aws = float(hs), float(aws)
+            margin = hs - aws
+            date = g.get("game_date", "")
+            neutral = g.get("neutral_site", False)
+            h_rank = int(g.get("home_rank") or 200)
+            a_rank = int(g.get("away_rank") or 200)
+
+            if gid in target_ids:
+                patch = {}
+
+                # Elo
+                patch["home_elo"] = round(team_elo[hid], 1)
+                patch["away_elo"] = round(team_elo[aid], 1)
+
+                # Form
+                for side, tid in [("home", hid), ("away", aid)]:
+                    games = team_games[tid]
+                    if games:
+                        form = sum((1 if gm > 0 else -1) * math.exp(-FORM_DECAY * (len(games) - 1 - i))
+                                   for i, gm in enumerate(games))
+                        patch[f"{side}_form"] = round(form, 4)
+
+                    # Momentum halflife
+                    recent = games[-10:]
+                    if len(recent) >= 3:
+                        w = sum(m * math.exp(-FORM_DECAY * (len(recent) - 1 - i)) for i, m in enumerate(recent))
+                        ws = sum(math.exp(-FORM_DECAY * (len(recent) - 1 - i)) for i in range(len(recent)))
+                        patch[f"{side}_momentum_halflife"] = round(w / max(ws, 1), 4)
+
+                    # Blowout asym
+                    if games:
+                        bw = sum(1 for m in games if m >= 15)
+                        bl = sum(1 for m in games if m <= -15)
+                        patch[f"{side}_blowout_asym"] = round((bw - bl) / max(len(games), 1), 4)
+
+                    # Overreaction
+                    if len(games) >= 3:
+                        diffs = [games[j] - games[j-1] for j in range(1, len(games))]
+                        patch[f"{side}_overreaction"] = round(float(_np.std(diffs)), 4)
+
+                    # Pit SOS
+                    opp_elos = list(team_opp_elos[tid])
+                    if len(opp_elos) >= 3:
+                        patch[f"{side}_pit_sos"] = round(sum(opp_elos) / len(opp_elos), 1)
+
+                    # Opp suppression
+                    ranked = [gm for gm, rk in zip(games, [200]*len(games)) if True]  # simplified
+                    # Use team_games metadata for ranked opponents — simplified for cron
+
+                # Home/away margins
+                hm = list(team_home_m[hid])
+                am = list(team_away_m[hid])
+                if len(hm) >= 3:
+                    patch["home_home_margin"] = round(sum(hm) / len(hm), 4)
+                if len(am) >= 3:
+                    patch["home_away_margin"] = round(sum(am) / len(am), 4)
+                hm_a = list(team_home_m[aid])
+                am_a = list(team_away_m[aid])
+                if len(hm_a) >= 3:
+                    patch["away_home_margin"] = round(sum(hm_a) / len(hm_a), 4)
+                if len(am_a) >= 3:
+                    patch["away_away_margin"] = round(sum(am_a) / len(am_a), 4)
+
+                # Opp PPG
+                h_opp_scores = [float(gg["opp_score"]) for gg in team_games.get(f"{hid}_full", []) if gg.get("opp_score")]
+                a_opp_scores = [float(gg["opp_score"]) for gg in team_games.get(f"{aid}_full", []) if gg.get("opp_score")]
+                if len(h_opp_scores) >= 3:
+                    patch["home_opp_ppg"] = round(sum(h_opp_scores) / len(h_opp_scores), 1)
+                if len(a_opp_scores) >= 3:
+                    patch["away_opp_ppg"] = round(sum(a_opp_scores) / len(a_opp_scores), 1)
+
+                # opp_to_rate and to_conversion from stats
+                st = stats_map.get(gid, {})
+                a_to = st.get("away_turnovers"); h_to = st.get("home_turnovers")
+                a_tempo = st.get("away_tempo"); h_tempo = st.get("home_tempo")
+                h_steals = st.get("home_steals"); a_steals = st.get("away_steals")
+                if a_to and a_tempo and float(a_tempo) > 0:
+                    patch["home_opp_to_rate"] = round(float(a_to) / float(a_tempo), 4)
+                if h_to and h_tempo and float(h_tempo) > 0:
+                    patch["away_opp_to_rate"] = round(float(h_to) / float(h_tempo), 4)
+                if h_steals and a_to and float(a_to) > 0:
+                    patch["home_to_conversion"] = round(float(h_steals) / float(a_to), 4)
+                if a_steals and h_to and float(h_to) > 0:
+                    patch["away_to_conversion"] = round(float(a_steals) / float(h_to), 4)
+
+                if patch:
+                    updates.append((gid, patch))
+
+            # Update accumulators AFTER (no leakage)
+            h_elo, a_elo = team_elo[hid], team_elo[aid]
+            exp_h = 1.0 / (1.0 + 10 ** ((a_elo - h_elo) / 400))
+            act_h = 1.0 if margin > 0 else 0.0 if margin < 0 else 0.5
+            team_elo[hid] += ELO_K * (act_h - exp_h)
+            team_elo[aid] += ELO_K * ((1 - act_h) - (1 - exp_h))
+            team_opp_elos[hid].append(a_elo)
+            team_opp_elos[aid].append(h_elo)
+
+            team_games[hid].append(margin)
+            team_games[aid].append(-margin)
+            team_games[f"{hid}_full"].append({"margin": margin, "opp_score": aws})
+            team_games[f"{aid}_full"].append({"margin": -margin, "opp_score": hs})
+
+            if not neutral:
+                team_home_m[hid].append(margin)
+                team_away_m[aid].append(-margin)
+
+        # 4. Write updates
+        success = 0
+        for row_id, patch in updates:
+            rr = _req.patch(
+                f"{SUPABASE_URL}/rest/v1/ncaa_historical?id=eq.{row_id}",
+                headers={**headers, "Content-Type": "application/json", "Prefer": "return=minimal"},
+                json=patch, timeout=15)
+            if rr.ok:
+                success += 1
+
+        duration = _time.time() - start
+        return jsonify({
+            "status": "ok",
+            "null_rows_found": len(null_rows),
+            "total_season_games": len(all_games),
+            "updates_written": success,
+            "duration_sec": round(duration, 1),
+        })
+
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 
