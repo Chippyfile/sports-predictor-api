@@ -1395,6 +1395,8 @@ def route_ncaa_backfill():
                         form = sum((1 if gm > 0 else -1) * math.exp(-FORM_DECAY * (len(games) - 1 - i))
                                    for i, gm in enumerate(games))
                         patch[f"{side}_form"] = round(form, 4)
+                    else:
+                        patch[f"{side}_form"] = 0.0
 
                     # Momentum halflife
                     recent = games[-10:]
