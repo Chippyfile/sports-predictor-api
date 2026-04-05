@@ -1812,6 +1812,46 @@ def predict_ncaa_full(request_data):
             # Build feature vectors from the already-computed X DataFrame
             features_dict = {f: float(X[f].iloc[0]) if f in X.columns else 0.0 for f in set(res_feats + cls_feats + ats_feats)}
 
+            # ── Add O/U-specific features (v5: sums + interactions) ──
+            _h_tempo = float(game.get("home_tempo", 0) or 68)
+            _a_tempo = float(game.get("away_tempo", 0) or 68)
+            _h_oe = float(game.get("home_adj_oe", 0) or 100)
+            _a_oe = float(game.get("away_adj_oe", 0) or 100)
+            _h_de = float(game.get("home_adj_de", 0) or 100)
+            _a_de = float(game.get("away_adj_de", 0) or 100)
+            _h_ppg = float(game.get("home_ppg", 0) or 74)
+            _a_ppg = float(game.get("away_ppg", 0) or 74)
+            _h_opp = float(game.get("home_opp_ppg", 0) or 72)
+            _a_opp = float(game.get("away_opp_ppg", 0) or 72)
+            _h_3p = float(game.get("home_threepct", 0) or 0.34)
+            _a_3p = float(game.get("away_threepct", 0) or 0.34)
+            _h_fg = float(game.get("home_fgpct", 0) or 0.44)
+            _a_fg = float(game.get("away_fgpct", 0) or 0.44)
+            _h_orb = float(game.get("home_orb_pct", 0) or 0.28)
+            _a_orb = float(game.get("away_orb_pct", 0) or 0.28)
+            _tempo_avg = (_h_tempo + _a_tempo) / 2.0
+
+            _ou_extras = {
+                "tempo_min": min(_h_tempo, _a_tempo),
+                "tempo_max": max(_h_tempo, _a_tempo),
+                "tempo_product": _h_tempo * _a_tempo / (68.0 ** 2),
+                "pace_mismatch": abs(_h_tempo - _a_tempo),
+                "oe_sum": _h_oe + _a_oe,
+                "de_sum": _h_de + _a_de,
+                "efficiency_total": (_h_oe - _h_de) + (_a_oe - _a_de),
+                "pace_x_oe_sum": _tempo_avg * (_h_oe + _a_oe) / 200.0,
+                "pace_x_de_sum": _tempo_avg * (_h_de + _a_de) / 200.0,
+                "ppg_sum": _h_ppg + _a_ppg,
+                "opp_ppg_sum": _h_opp + _a_opp,
+                "scoring_environment": (_h_ppg + _a_ppg + _h_opp + _a_opp) / 4,
+                "threepct_sum": _h_3p + _a_3p,
+                "fgpct_sum": _h_fg + _a_fg,
+                "orb_pct_sum": _h_orb + _a_orb,
+                "days_to_march": max(-30, min(150, (pd.Timestamp(int(game_date[:4]), 3, 15) - pd.Timestamp(game_date)).days)) if len(game_date) >= 4 else 0,
+                "is_tourney_time": 1 if (len(game_date) >= 7 and ((game_date[5:7] == "03" and int(game_date[8:10]) >= 10) or game_date[5:7] == "04")) else 0,
+            }
+            features_dict.update(_ou_extras)
+
             res_vals = _np.array([[features_dict.get(f, 0) for f in res_feats]])
             cls_vals = _np.array([[features_dict.get(f, 0) for f in cls_feats]])
             ats_vals = _np.array([[features_dict.get(f, 0) for f in ats_feats]])
@@ -1863,9 +1903,11 @@ def predict_ncaa_full(request_data):
                     over_tiers = ou_bundle.get("over_tiers", {})
                     for t in sorted(over_tiers.keys(), reverse=True):
                         th = over_tiers[t]
-                        if (ou_res_avg >= th["res_avg"] and
-                            ou_cls_avg <= th["cls_avg"] and
-                            ats_edge_val >= th["ats_edge"]):
+                        # OVER tiers may or may not require classifier (v5 asymmetric)
+                        res_ok = ou_res_avg >= th["res_avg"]
+                        ats_ok = ats_edge_val >= th["ats_edge"]
+                        cls_ok = ou_cls_avg <= th["cls_avg"] if "cls_avg" in th else True
+                        if res_ok and ats_ok and cls_ok:
                             ou_pick = "OVER"
                             ou_tier = t
                             break
