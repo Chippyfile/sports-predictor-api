@@ -1795,6 +1795,8 @@ def predict_ncaa_full(request_data):
     ou_res_avg = None
     ou_cls_avg = None
     ou_ats_total = None
+    kenpom_total = None
+    residual_total = None
     ou_debug = "start"
     try:
         ou_bundle = load_model("ncaa_ou")
@@ -1835,7 +1837,31 @@ def predict_ncaa_full(request_data):
 
             # Market O/U total
             mkt_ou = float(game.get("espn_over_under", 0) or game.get("market_ou_total", 0) or 0)
-            ou_predicted_total = ou_ats_total  # ATS-implied total as display value
+
+            # ── Compute KenPom-style formula total ──
+            _h_tempo = float(game.get("home_tempo", 0) or 68)
+            _a_tempo = float(game.get("away_tempo", 0) or 68)
+            _h_oe = float(game.get("home_adj_oe", 0) or 105)
+            _a_oe = float(game.get("away_adj_oe", 0) or 105)
+            _h_de = float(game.get("home_adj_de", 0) or 105)
+            _a_de = float(game.get("away_adj_de", 0) or 105)
+            _poss = (_h_tempo + _a_tempo) / 2.0
+            _lg_avg = 100.0  # KenPom convention: points per 100 possessions
+            _kp_home = _poss * _h_oe * _a_de / (_lg_avg ** 2)
+            _kp_away = _poss * _a_oe * _h_de / (_lg_avg ** 2)
+            kenpom_total = _kp_home + _kp_away
+
+            # ── Blended display total: 50% residual + 30% KenPom + 20% ATS ──
+            residual_total = (mkt_ou + ou_res_avg) if mkt_ou > 0 else ou_ats_total
+            # Only use KenPom if it produces a reasonable value
+            kenpom_valid = 100 < kenpom_total < 220
+            if mkt_ou > 0 and kenpom_valid:
+                ou_predicted_total = 0.50 * residual_total + 0.30 * kenpom_total + 0.20 * ou_ats_total
+            elif mkt_ou > 0:
+                ou_predicted_total = 0.65 * residual_total + 0.35 * ou_ats_total
+            else:
+                ou_predicted_total = ou_ats_total
+
             ats_edge_val = ou_ats_total - mkt_ou if mkt_ou > 0 else 0
 
             if mkt_ou > 0:
@@ -1975,6 +2001,8 @@ def predict_ncaa_full(request_data):
         "ou_res_avg": round(ou_res_avg, 2) if ou_res_avg is not None else None,
         "ou_cls_avg": round(ou_cls_avg, 4) if ou_cls_avg is not None else None,
         "ou_ats_total": round(ou_ats_total, 1) if ou_ats_total is not None else None,
+        "ou_kenpom_total": round(kenpom_total, 1) if kenpom_total is not None else None,
+        "ou_residual_total": round(residual_total, 1) if residual_total is not None else None,
         "ats_predicted_margin": round(ats_predicted_margin, 2) if ats_predicted_margin is not None else None,
         "ats_cover_prob": ats_cover_prob,
         "ats_edge": ats_edge,
