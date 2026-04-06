@@ -931,16 +931,22 @@ def route_ncaa_daily():
 
                         espn_spread = None
                         espn_ou = None
+                        espn_home_ml = None
+                        espn_away_ml = None
                         for pc in pickcenter:
                             if pc.get("homeTeamOdds", {}).get("spreadOdds"):
                                 espn_spread = pc.get("spread")
                                 espn_ou = pc.get("overUnder")
+                                espn_home_ml = pc.get("homeTeamOdds", {}).get("moneyLine")
+                                espn_away_ml = pc.get("awayTeamOdds", {}).get("moneyLine")
                                 break
                         if espn_spread is None:
                             for pc in pickcenter:
                                 if pc.get("spread") is not None:
                                     espn_spread = pc.get("spread")
                                     espn_ou = pc.get("overUnder")
+                                    espn_home_ml = pc.get("homeTeamOdds", {}).get("moneyLine")
+                                    espn_away_ml = pc.get("awayTeamOdds", {}).get("moneyLine")
                                     break
 
                         margin = pred["ml_margin"]
@@ -1015,6 +1021,20 @@ def route_ncaa_daily():
                             row["market_spread_home"] = espn_spread
                         if espn_ou is not None:
                             row["market_ou_total"] = espn_ou
+
+                        # ML odds + edge (stored for single source of truth)
+                        if espn_home_ml is not None:
+                            row["market_home_ml"] = espn_home_ml
+                        if espn_away_ml is not None:
+                            row["market_away_ml"] = espn_away_ml
+                        if espn_home_ml and espn_away_ml:
+                            h_imp = abs(espn_home_ml) / (abs(espn_home_ml) + 100) if espn_home_ml < 0 else 100 / (espn_home_ml + 100)
+                            a_imp = abs(espn_away_ml) / (abs(espn_away_ml) + 100) if espn_away_ml < 0 else 100 / (espn_away_ml + 100)
+                            vig_total = h_imp + a_imp
+                            h_true = h_imp / vig_total if vig_total > 0 else 0.5
+                            ml_edge = win_prob - h_true
+                            row["ml_edge_pct"] = round(abs(ml_edge) * 100, 2)
+                            row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
 
                         # O/U prediction (v26 direct + v4 triple agreement)
                         if pred.get("ou_predicted_total") is not None:
@@ -1665,6 +1685,34 @@ def route_nba_daily():
                         if mkt_sp: row["market_spread_home"] = mkt_sp
                         if mkt_tot: row["market_ou_total"] = mkt_tot; row["ou_total"] = mkt_tot
                         if mkt_sp: row["ats_disagree"] = round(abs(margin - (-mkt_sp)), 2)
+
+                        # ML odds from ESPN summary
+                        nba_home_ml = None
+                        nba_away_ml = None
+                        try:
+                            summ = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={g['game_id']}", timeout=8)
+                            if summ.ok:
+                                for pc in summ.json().get("pickcenter", []):
+                                    hto = pc.get("homeTeamOdds", {})
+                                    ato = pc.get("awayTeamOdds", {})
+                                    if hto.get("moneyLine"):
+                                        nba_home_ml = hto["moneyLine"]
+                                        nba_away_ml = ato.get("moneyLine")
+                                        break
+                        except:
+                            pass
+                        if nba_home_ml is not None:
+                            row["market_home_ml"] = nba_home_ml
+                        if nba_away_ml is not None:
+                            row["market_away_ml"] = nba_away_ml
+                        if nba_home_ml and nba_away_ml:
+                            h_imp = abs(nba_home_ml) / (abs(nba_home_ml) + 100) if nba_home_ml < 0 else 100 / (nba_home_ml + 100)
+                            a_imp = abs(nba_away_ml) / (abs(nba_away_ml) + 100) if nba_away_ml < 0 else 100 / (nba_away_ml + 100)
+                            vig_t = h_imp + a_imp
+                            h_true = h_imp / vig_t if vig_t > 0 else 0.5
+                            ml_edge = wp - h_true
+                            row["ml_edge_pct"] = round(abs(ml_edge) * 100, 2)
+                            row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
                         # O/U v2 fields
                         for fld in ["ou_predicted_total","ou_edge","ou_pick","ou_tier","ou_res_avg"]:
                             if pred.get(fld) is not None: row[fld] = pred[fld]
@@ -1884,6 +1932,34 @@ def route_mlb_daily():
                                         "ou_total": round(pt, 1) if pt else 9.0,
                                         "ml_ou_pred_total": round(pt, 2) if pt else None,
                                     }
+                                    # Market odds from ESPN
+                                    try:
+                                        espn_s = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event={gpk}", timeout=8)
+                                        if espn_s.ok:
+                                            for pc in espn_s.json().get("pickcenter", []):
+                                                hto = pc.get("homeTeamOdds", {})
+                                                ato = pc.get("awayTeamOdds", {})
+                                                if hto.get("moneyLine"):
+                                                    row["market_home_ml"] = hto["moneyLine"]
+                                                    row["market_away_ml"] = ato.get("moneyLine")
+                                                    if pc.get("spread") is not None:
+                                                        row["market_spread_home"] = pc["spread"]
+                                                    if pc.get("overUnder") is not None:
+                                                        row["market_ou_total"] = pc["overUnder"]
+                                                    break
+                                    except:
+                                        pass
+                                    # Compute ML edge
+                                    hml = row.get("market_home_ml")
+                                    aml = row.get("market_away_ml")
+                                    if hml and aml:
+                                        h_imp = abs(hml) / (abs(hml) + 100) if hml < 0 else 100 / (hml + 100)
+                                        a_imp = abs(aml) / (abs(aml) + 100) if aml < 0 else 100 / (aml + 100)
+                                        vig_t = h_imp + a_imp
+                                        h_true = h_imp / vig_t if vig_t > 0 else 0.5
+                                        ml_edge = wp - h_true
+                                        row["ml_edge_pct"] = round(abs(ml_edge) * 100, 2)
+                                        row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
                                     sv = _req.post(f"{SUPABASE_URL}/rest/v1/mlb_predictions",
                                         headers={**headers, "Content-Type": "application/json",
                                                  "Prefer": "return=representation"}, json=row, timeout=15)
