@@ -1121,34 +1121,122 @@ def predict_nba_full(game: dict):
     # Debug: return all features if requested
     debug = game.get("debug", False)
 
-    # ═══ O/U TOTAL MODEL (dedicated combined features) ═══
+    # ═══ O/U MODEL (v2: triple agreement, v1: direct total) ═══
     ou_predicted_total = None
     ou_edge = None
     ou_pick = None
+    ou_tier = 0
+    ou_res_avg = None
+    ou_cls_avg = None
+    ou_ats_total = None
     try:
         ou_bundle = _load_ou_model()
         if not ou_bundle:
             _err = getattr(_load_ou_model, '_last_error', 'unknown')
             diag["warnings"].append(f"O/U model not loaded: {_err}")
+
+        elif ou_bundle.get("res_models"):
+            # ── V2: Triple agreement system ──
+            mkt_ou = float(row.get("market_ou_total", 0) or 0)
+            if mkt_ou < 100:
+                diag["warnings"].append("O/U v2: no market total available")
+            else:
+                # Build feature dicts from row + feat_df (ATS features already computed)
+                all_ou_feats = set(
+                    (ou_bundle.get("res_feature_cols_lasso") or []) +
+                    (ou_bundle.get("res_feature_cols_trees") or ou_bundle.get("res_feature_cols", [])) +
+                    (ou_bundle.get("cls_feature_cols") or []) +
+                    (ou_bundle.get("ats_feature_cols") or [])
+                )
+                features_dict = {}
+                for f in all_ou_feats:
+                    if f in feat_df.columns:
+                        features_dict[f] = float(feat_df[f].iloc[0])
+                    elif f in row:
+                        features_dict[f] = float(row.get(f, 0) or 0)
+                    else:
+                        features_dict[f] = 0.0
+
+                # Residual models (dual feature sets: Lasso tight + Trees loose)
+                res_feats_lasso = ou_bundle.get("res_feature_cols_lasso", ou_bundle.get("res_feature_cols", []))
+                res_feats_trees = ou_bundle.get("res_feature_cols_trees", ou_bundle.get("res_feature_cols", []))
+                sc_lasso = ou_bundle.get("res_scaler_lasso", ou_bundle.get("res_scaler"))
+                sc_trees = ou_bundle.get("res_scaler_trees", ou_bundle.get("res_scaler"))
+
+                res_vals_l = np.array([[features_dict.get(f, 0) for f in res_feats_lasso]])
+                res_vals_t = np.array([[features_dict.get(f, 0) for f in res_feats_trees]])
+                res_scaled_l = sc_lasso.transform(res_vals_l)
+                res_scaled_t = sc_trees.transform(res_vals_t)
+
+                res_preds = []
+                for i, m in enumerate(ou_bundle["res_models"]):
+                    # Model 0 = Lasso (tight features), rest = trees (loose features)
+                    if i == 0:
+                        res_preds.append(float(m.predict(res_scaled_l)[0]))
+                    else:
+                        res_preds.append(float(m.predict(res_scaled_t)[0]))
+                ou_res_avg = float(np.mean(res_preds))
+
+                # Classifier models → P(under)
+                cls_feats = ou_bundle.get("cls_feature_cols", [])
+                cls_vals = np.array([[features_dict.get(f, 0) for f in cls_feats]])
+                cls_scaled = ou_bundle["cls_scaler"].transform(cls_vals)
+                cls_preds = [float(m.predict_proba(cls_scaled)[0, 1]) for m in ou_bundle["cls_models"]]
+                ou_cls_avg = float(np.mean(cls_preds))
+
+                # ATS score models → implied total
+                ats_feats = ou_bundle.get("ats_feature_cols", [])
+                ats_vals = np.array([[features_dict.get(f, 0) for f in ats_feats]])
+                ats_scaled = ou_bundle["ats_scaler"].transform(ats_vals)
+                home_preds = [float(m.predict(ats_scaled)[0]) for m in ou_bundle["ats_home_models"]]
+                away_preds = [float(m.predict(ats_scaled)[0]) for m in ou_bundle["ats_away_models"]]
+                ou_ats_total = float(np.mean(home_preds) + np.mean(away_preds))
+                ats_edge = ou_ats_total - mkt_ou
+
+                # Predicted total = market + residual
+                ou_predicted_total = round(mkt_ou + ou_res_avg, 1)
+                ou_edge = round(ou_res_avg, 1)
+
+                # Triple agreement → tier
+                under_tiers = ou_bundle.get("under_tiers", {})
+                over_tiers = ou_bundle.get("over_tiers", {})
+
+                for t in sorted(under_tiers.keys(), reverse=True):
+                    thresh = under_tiers[t]
+                    if (ou_res_avg <= thresh["res_avg"] and
+                        ou_cls_avg >= thresh["cls_avg"] and
+                        ats_edge <= thresh["ats_edge"]):
+                        ou_pick = "UNDER"
+                        ou_tier = t
+                        break
+
+                if not ou_pick:
+                    for t in sorted(over_tiers.keys(), reverse=True):
+                        thresh = over_tiers[t]
+                        if (ou_res_avg >= thresh["res_avg"] and
+                            ou_cls_avg <= thresh["cls_avg"] and
+                            ats_edge >= thresh["ats_edge"]):
+                            ou_pick = "OVER"
+                            ou_tier = t
+                            break
+
+                n_res = len(ou_bundle.get("res_feature_cols_lasso", [])) + len(ou_bundle.get("res_feature_cols_trees", []))
+                diag["sources"].append(f"O/U v2 triple ({n_res} res + {len(cls_feats)} cls + {len(ats_feats)} ats features)")
+                print(f"  [O/U v2] res={ou_res_avg:+.2f}, cls={ou_cls_avg:.3f}, ats_edge={ats_edge:+.1f} → {ou_pick or 'NO PICK'} {ou_tier}u")
+
         elif ou_bundle.get("reg") and ou_bundle.get("scaler"):
+            # ── V1 fallback: direct total prediction ──
             ou_feature_cols = ou_bundle.get("ou_feature_cols")
             if not ou_feature_cols:
                 diag["warnings"].append("O/U model missing ou_feature_cols — cannot predict")
             else:
-                # Build combined O/U features from row dict
                 try:
                     from nba_ou_train_v2 import build_ou_features_live
                     X_ou = build_ou_features_live(row, ou_feature_cols)
                 except ImportError:
-                    # Fallback: build features manually from row
-                    ou_vals = {}
-                    for f in ou_feature_cols:
-                        if f in row:
-                            ou_vals[f] = float(row.get(f, 0) or 0)
-                        else:
-                            ou_vals[f] = 0.0
+                    ou_vals = {f: float(row.get(f, 0) or 0) for f in ou_feature_cols}
                     X_ou = pd.DataFrame([ou_vals])[ou_feature_cols]
-                
+
                 X_ou_s = ou_bundle["scaler"].transform(X_ou)
                 ou_predicted_total = float(ou_bundle["reg"].predict(X_ou_s)[0])
                 ou_bias = ou_bundle.get("bias_correction", 0)
@@ -1158,7 +1246,7 @@ def predict_nba_full(game: dict):
                     ou_edge = round(ou_predicted_total - mkt_ou, 1)
                     if abs(ou_edge) >= 3:
                         ou_pick = "OVER" if ou_edge > 0 else "UNDER"
-                diag["sources"].append(f"O/U model ({len(ou_feature_cols)} features)")
+                diag["sources"].append(f"O/U v1 ({len(ou_feature_cols)} features)")
     except Exception as e:
         diag["warnings"].append(f"ou_model: {type(e).__name__}: {e}")
         print(f"  [nba_ou] Prediction error: {_tb.format_exc()}")
@@ -1183,4 +1271,8 @@ def predict_nba_full(game: dict):
         "ou_predicted_total": round(ou_predicted_total, 1) if ou_predicted_total else None,
         "ou_edge": ou_edge,
         "ou_pick": ou_pick,
+        "ou_tier": ou_tier,
+        "ou_res_avg": round(ou_res_avg, 3) if ou_res_avg is not None else None,
+        "ou_cls_avg": round(ou_cls_avg, 3) if ou_cls_avg is not None else None,
+        "ou_ats_total": round(ou_ats_total, 1) if ou_ats_total is not None else None,
     }
