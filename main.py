@@ -1032,15 +1032,15 @@ def route_ncaa_daily():
                         if pred.get("ou_edge") is not None:
                             row["ou_edge"] = pred["ou_edge"]
 
-                        # ATS pick (v27) — with data quality gate
+                        # ATS pick (v27) — with data quality gate + direction flip
                         if row.get("spread_home") is not None and row.get("market_spread_home") is not None:
                             model_margin = row["spread_home"]
                             mkt_implied = -row["market_spread_home"]
                             disagree = abs(model_margin - mkt_implied)
+                            direction_flip = (model_margin > 0) != (mkt_implied > 0)  # model & market disagree on winner
                             row["ats_disagree"] = round(disagree, 2)
 
-                            # DATA QUALITY GATE: suppress bets when model has insufficient data
-                            # If key features are null, the model is guessing — don't bet on guesses
+                            # DATA QUALITY GATE
                             fc_str = pred.get("feature_coverage", "0/1")
                             try:
                                 fc_num, fc_den = fc_str.split("/")
@@ -1053,13 +1053,18 @@ def route_ncaa_daily():
                             )
                             data_quality_ok = fc_pct >= 0.50 or has_key_stats
 
-                            if disagree >= 4 and data_quality_ok:
+                            # Direction flip at 3+ pts, same direction at 4+ pts
+                            ats_threshold = 3 if direction_flip else 4
+                            if disagree >= ats_threshold and data_quality_ok:
                                 row["ats_side"] = "HOME" if model_margin > mkt_implied else "AWAY"
-                                row["ats_units"] = 3 if disagree >= 10 else 2 if disagree >= 7 else 1
+                                if direction_flip:
+                                    row["ats_units"] = 3 if disagree >= 7 else (2 if disagree >= 5 else 1)
+                                else:
+                                    row["ats_units"] = 3 if disagree >= 10 else (2 if disagree >= 7 else 1)
                                 row["ats_pick_spread"] = row["market_spread_home"]
                             else:
                                 row["ats_units"] = 0
-                                if not data_quality_ok and disagree >= 4:
+                                if not data_quality_ok and disagree >= ats_threshold:
                                     print(f"  [cron/ncaa] ⚠ {home_abbr}v{away_abbr}: {disagree:.1f}pt edge SUPPRESSED — low data ({fc_str}, adj_em={'yes' if audit.get('home_adj_em') else 'no'})")
 
                         # Upsert to Supabase
@@ -1663,22 +1668,30 @@ def route_nba_daily():
                         # O/U v2 fields
                         for fld in ["ou_predicted_total","ou_edge","ou_pick","ou_tier","ou_res_avg"]:
                             if pred.get(fld) is not None: row[fld] = pred[fld]
-                        # ATS signals — with data quality gate
-                        disagree = abs(margin - (-(mkt_sp or 0)))
+                        # ATS signals — with data quality gate + direction flip
+                        mkt_implied = -(mkt_sp or 0)
+                        disagree = abs(margin - mkt_implied)
+                        direction_flip = (margin > 0) != (mkt_implied > 0) and mkt_sp  # model & market disagree on winner
                         fc_str = pred.get("feature_coverage", "0/1")
                         try:
                             fc_num, fc_den = str(fc_str).split("/")
                             fc_pct = int(fc_num) / max(int(fc_den), 1)
                         except (ValueError, AttributeError):
-                            fc_pct = 1.0  # if no coverage string, assume OK
+                            fc_pct = 1.0
                         data_ok = fc_pct >= 0.50
-                        if disagree >= 2 and mkt_sp and data_ok:
-                            row["ats_side"] = "HOME" if margin > -(mkt_sp) else "AWAY"
+                        # Direction flip at 3+ pts (64.5% ATS, +23.1% ROI validated)
+                        # Same direction at 4+ pts (62.8% ATS, +19.9% ROI validated)
+                        ats_threshold = 3 if direction_flip else 4
+                        if disagree >= ats_threshold and mkt_sp and data_ok:
+                            row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
                             row["ats_pick_spread"] = mkt_sp
-                            row["ats_units"] = 3 if disagree >= 7 else (2 if disagree >= 4 else 1)
+                            if direction_flip:
+                                row["ats_units"] = 3 if disagree >= 7 else (2 if disagree >= 5 else 1)
+                            else:
+                                row["ats_units"] = 3 if disagree >= 10 else (2 if disagree >= 7 else 1)
                         else:
-                            row["ats_units"] = 0  # always set — null means "never computed"
-                            if disagree >= 2 and mkt_sp and not data_ok:
+                            row["ats_units"] = 0
+                            if disagree >= ats_threshold and mkt_sp and not data_ok:
                                 print(f"  [cron/nba] ⚠ {g['away_abbr']}@{g['home_abbr']}: {disagree:.1f}pt edge SUPPRESSED — low data ({fc_str})")
 
                         # Save: PATCH existing, POST new
