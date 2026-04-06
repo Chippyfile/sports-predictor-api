@@ -1522,7 +1522,7 @@ def route_nba_daily():
         mode = request.args.get("mode", "auto")
         now_utc = datetime.now(timezone.utc)
         now_est = now_utc - timedelta(hours=5)
-        today_est = now_est.strftime("%Y-%m-%d")
+        today_est = request.args.get("date") or now_est.strftime("%Y-%m-%d")
         hour_est = now_est.hour
         if mode == "auto":
             mode = "predict" if hour_est < 17 else "grade"
@@ -1544,9 +1544,14 @@ def route_nba_daily():
             existing_ids = {r["game_id"] for r in (existing.json() if existing.ok else [])}
             results["existing"] = len(existing_ids)
             predicted, errors = 0, 0
+
+            # Collect games to predict
+            games_to_predict = []
             for event in events:
                 comp = event.get("competitions", [{}])[0]
                 if comp.get("status", {}).get("type", {}).get("completed"): continue
+                state = comp.get("status", {}).get("type", {}).get("state", "")
+                if state == "in": continue  # skip Live games
                 game_id = str(event.get("id", ""))
                 if game_id in existing_ids: continue
                 competitors = comp.get("competitors", [])
@@ -1557,27 +1562,63 @@ def route_nba_daily():
                 away_abbr = _m(away_c.get("team", {}).get("abbreviation", ""))
                 home_name = home_c.get("team", {}).get("displayName", "")
                 away_name = away_c.get("team", {}).get("displayName", "")
+                games_to_predict.append({
+                    "game_id": game_id, "home_abbr": home_abbr, "away_abbr": away_abbr,
+                    "home_name": home_name, "away_name": away_name, "game_date": today_est,
+                })
+            results["games_to_predict"] = len(games_to_predict)
+
+            def _predict_one(g):
                 try:
-                    pr = _req.post(f"http://localhost:{os.environ.get('PORT', 5000)}/predict/nba/full",
-                        json={"game_id": game_id, "home_team": home_abbr, "away_team": away_abbr, "game_date": today_est}, timeout=30)
-                    pred = pr.json() if pr.ok else None
+                    pred = predict_nba_full({
+                        "game_id": g["game_id"], "home_team": g["home_abbr"],
+                        "away_team": g["away_abbr"], "game_date": g["game_date"],
+                    })
                     if pred and not pred.get("error") and pred.get("ml_win_prob_home") is not None:
                         margin = pred["ml_margin"]; wp = pred["ml_win_prob_home"]
                         mkt_sp = pred.get("market_spread", 0); mkt_tot = pred.get("market_total", 0)
-                        row = {"game_date": today_est, "game_id": game_id, "home_team": home_abbr, "away_team": away_abbr,
-                               "home_team_name": home_name, "away_team_name": away_name,
-                               "spread_home": round(margin, 1), "win_pct_home": round(wp, 4), "ml_win_prob_home": round(wp, 4),
-                               "pred_home_score": pred.get("pred_home_score"), "pred_away_score": pred.get("pred_away_score"),
-                               "result_entered": False}
+                        row = {
+                            "game_date": g["game_date"], "game_id": g["game_id"],
+                            "home_team": g["home_abbr"], "away_team": g["away_abbr"],
+                            "home_team_name": g["home_name"], "away_team_name": g["away_name"],
+                            "spread_home": round(margin, 1), "win_pct_home": round(wp, 4),
+                            "ml_win_prob_home": round(wp, 4),
+                            "pred_home_score": pred.get("pred_home_score"),
+                            "pred_away_score": pred.get("pred_away_score"),
+                            "result_entered": False,
+                            "ml_feature_coverage": pred.get("feature_coverage"),
+                            "ml_model_type": pred.get("model_meta", {}).get("model_type"),
+                        }
                         if mkt_sp: row["market_spread_home"] = mkt_sp
                         if mkt_tot: row["market_ou_total"] = mkt_tot; row["ou_total"] = mkt_tot
                         if mkt_sp: row["ats_disagree"] = round(abs(margin - (-mkt_sp)), 2)
+                        # O/U v2 fields
+                        for fld in ["ou_predicted_total","ou_edge","ou_pick","ou_tier","ou_res_avg"]:
+                            if pred.get(fld) is not None: row[fld] = pred[fld]
+                        # ATS signals
+                        disagree = abs(margin - (-(mkt_sp or 0)))
+                        if disagree >= 2 and mkt_sp:
+                            row["ats_side"] = "HOME" if margin > -(mkt_sp) else "AWAY"
+                            row["ats_pick_spread"] = mkt_sp
+                            row["ats_units"] = 3 if disagree >= 7 else (2 if disagree >= 4 else 1)
                         _req.post(f"{SUPABASE_URL}/rest/v1/nba_predictions",
                             headers={**headers, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"},
                             json=row, timeout=15)
-                        predicted += 1
+                        print(f"  [cron/nba] ✅ {g['away_abbr']}@{g['home_abbr']}: margin={margin:+.1f}, wp={wp:.3f}")
+                        return "ok"
+                    return "empty"
                 except Exception as e:
-                    errors += 1; print(f"  [cron/nba] predict error {game_id}: {e}")
+                    print(f"  [cron/nba] ❌ {g['game_id']}: {e}")
+                    return "error"
+
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures = {pool.submit(_predict_one, g): g for g in games_to_predict}
+                for f in as_completed(futures):
+                    r = f.result()
+                    if r == "ok": predicted += 1
+                    elif r == "error": errors += 1
+
             results["predicted"] = predicted; results["errors"] = errors
 
         elif mode == "grade":
