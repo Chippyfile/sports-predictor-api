@@ -967,6 +967,8 @@ def route_ncaa_daily():
                             "away_sos": audit.get("away_sos"),
                             "home_opp_fgpct": audit.get("home_opp_fgpct"),
                             "away_opp_fgpct": audit.get("away_opp_fgpct"),
+                            "home_opp_threepct": audit.get("home_opp_threepct"),
+                            "away_opp_threepct": audit.get("away_opp_threepct"),
                             "home_conference": audit.get("home_conference"),
                             "away_conference": audit.get("away_conference"),
                             # v19: All display stats from expanded audit
