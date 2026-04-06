@@ -993,18 +993,35 @@ def route_ncaa_daily():
                         if pred.get("ou_edge") is not None:
                             row["ou_edge"] = pred["ou_edge"]
 
-                        # ATS pick (v27)
+                        # ATS pick (v27) — with data quality gate
                         if row.get("spread_home") is not None and row.get("market_spread_home") is not None:
                             model_margin = row["spread_home"]
                             mkt_implied = -row["market_spread_home"]
                             disagree = abs(model_margin - mkt_implied)
                             row["ats_disagree"] = round(disagree, 2)
-                            if disagree >= 4:
+
+                            # DATA QUALITY GATE: suppress bets when model has insufficient data
+                            # If key features are null, the model is guessing — don't bet on guesses
+                            fc_str = pred.get("feature_coverage", "0/1")
+                            try:
+                                fc_num, fc_den = fc_str.split("/")
+                                fc_pct = int(fc_num) / max(int(fc_den), 1)
+                            except (ValueError, AttributeError):
+                                fc_pct = 0
+                            has_key_stats = (
+                                audit.get("home_adj_em") is not None and
+                                pred.get("pred_home_score") is not None
+                            )
+                            data_quality_ok = fc_pct >= 0.50 or has_key_stats
+
+                            if disagree >= 4 and data_quality_ok:
                                 row["ats_side"] = "HOME" if model_margin > mkt_implied else "AWAY"
                                 row["ats_units"] = 3 if disagree >= 10 else 2 if disagree >= 7 else 1
                                 row["ats_pick_spread"] = row["market_spread_home"]
                             else:
                                 row["ats_units"] = 0
+                                if not data_quality_ok and disagree >= 4:
+                                    print(f"  [cron/ncaa] ⚠ {home_abbr}v{away_abbr}: {disagree:.1f}pt edge SUPPRESSED — low data ({fc_str}, adj_em={'yes' if audit.get('home_adj_em') else 'no'})")
 
                         # Upsert to Supabase
                         upsert_resp = _req.post(
@@ -1595,12 +1612,22 @@ def route_nba_daily():
                         # O/U v2 fields
                         for fld in ["ou_predicted_total","ou_edge","ou_pick","ou_tier","ou_res_avg"]:
                             if pred.get(fld) is not None: row[fld] = pred[fld]
-                        # ATS signals
+                        # ATS signals — with data quality gate
                         disagree = abs(margin - (-(mkt_sp or 0)))
-                        if disagree >= 2 and mkt_sp:
+                        fc_str = pred.get("feature_coverage", "0/1")
+                        try:
+                            fc_num, fc_den = str(fc_str).split("/")
+                            fc_pct = int(fc_num) / max(int(fc_den), 1)
+                        except (ValueError, AttributeError):
+                            fc_pct = 1.0  # if no coverage string, assume OK
+                        data_ok = fc_pct >= 0.50
+                        if disagree >= 2 and mkt_sp and data_ok:
                             row["ats_side"] = "HOME" if margin > -(mkt_sp) else "AWAY"
                             row["ats_pick_spread"] = mkt_sp
                             row["ats_units"] = 3 if disagree >= 7 else (2 if disagree >= 4 else 1)
+                        elif disagree >= 2 and mkt_sp and not data_ok:
+                            row["ats_units"] = 0
+                            print(f"  [cron/nba] ⚠ {g['away_abbr']}@{g['home_abbr']}: {disagree:.1f}pt edge SUPPRESSED — low data ({fc_str})")
                         _req.post(f"{SUPABASE_URL}/rest/v1/nba_predictions",
                             headers={**headers, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"},
                             json=row, timeout=15)
