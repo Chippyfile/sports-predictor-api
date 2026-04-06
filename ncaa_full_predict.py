@@ -2005,6 +2005,13 @@ def predict_ncaa_full(request_data):
         print(f"  [full_predict] SHAP error: {e}")
         shap_out = []
 
+        # v19: Compute predicted scores from margin + team PPG
+        h_ppg = float(game.get("home_ppg", 0) or 0)
+        a_ppg = float(game.get("away_ppg", 0) or 0)
+        avg_total = h_ppg + a_ppg if (h_ppg > 0 and a_ppg > 0) else 140
+        pred_home_score = round((avg_total + margin) / 2, 1)
+        pred_away_score = round((avg_total - margin) / 2, 1)
+
     return {
         "sport": "NCAAB",
         "ml_margin": round(margin, 2),
@@ -2016,6 +2023,8 @@ def predict_ncaa_full(request_data):
         "classifier_overridden": classifier_disagrees,
         "margin_weight": round(margin_weight, 3),
         "bias_correction_applied": round(bias, 3),
+        "pred_home_score": pred_home_score,
+        "pred_away_score": pred_away_score,
         "ou_predicted_total": round(ou_predicted_total, 1) if ou_predicted_total else None,
         "ou_edge": ou_edge,
         "ou_pick": ou_pick,
@@ -2046,8 +2055,10 @@ def predict_ncaa_full(request_data):
             "model_type": bundle.get("model_type", "unknown"),
             "trained_at": bundle.get("trained_at", "unknown"),
         },
-        # v25: Audit fields for ncaaSync to save to predictions table
+        # v19: Expanded audit — includes ALL fields the cron saves to Supabase
         "audit_data": {
+            "home_adj_em": game.get("home_adj_em"),
+            "away_adj_em": game.get("away_adj_em"),
             "home_sos": game.get("home_sos"),
             "away_sos": game.get("away_sos"),
             "home_opp_fgpct": game.get("home_opp_fgpct"),
@@ -2056,5 +2067,39 @@ def predict_ncaa_full(request_data):
             "away_opp_threepct": game.get("away_opp_threepct"),
             "home_conference": game.get("home_conference"),
             "away_conference": game.get("away_conference"),
+            "home_ppg": game.get("home_ppg"),
+            "away_ppg": game.get("away_ppg"),
+            "home_opp_ppg": game.get("home_opp_ppg"),
+            "away_opp_ppg": game.get("away_opp_ppg"),
+            "home_fgpct": game.get("home_fgpct"),
+            "away_fgpct": game.get("away_fgpct"),
+            "home_threepct": game.get("home_threepct"),
+            "away_threepct": game.get("away_threepct"),
+            "home_ftpct": game.get("home_ftpct"),
+            "away_ftpct": game.get("away_ftpct"),
+            "home_tempo": game.get("home_tempo"),
+            "away_tempo": game.get("away_tempo"),
+            "home_wins": game.get("home_wins"),
+            "away_wins": game.get("away_wins"),
+            "home_losses": game.get("home_losses"),
+            "away_losses": game.get("away_losses"),
+            "home_assists": game.get("home_assists"),
+            "away_assists": game.get("away_assists"),
+            "home_turnovers": game.get("home_turnovers"),
+            "away_turnovers": game.get("away_turnovers"),
+            "home_steals": game.get("home_steals"),
+            "away_steals": game.get("away_steals"),
+            "home_blocks": game.get("home_blocks"),
+            "away_blocks": game.get("away_blocks"),
+            "home_orb_pct": game.get("home_orb_pct"),
+            "away_orb_pct": game.get("away_orb_pct"),
+            "home_fta_rate": game.get("home_fta_rate"),
+            "away_fta_rate": game.get("away_fta_rate"),
+            "home_ato_ratio": game.get("home_ato_ratio"),
+            "away_ato_ratio": game.get("away_ato_ratio"),
+            "home_form": game.get("home_form"),
+            "away_form": game.get("away_form"),
+            "home_rank": game.get("home_rank"),
+            "away_rank": game.get("away_rank"),
         },
     }
