@@ -1141,7 +1141,47 @@ def predict_nba_full(game: dict):
             if mkt_ou < 100:
                 diag["warnings"].append("O/U v2: no market total available")
             else:
-                # Build feature dicts from row + feat_df (ATS features already computed)
+                # Compute O/U combined features from row (sums/averages, not diffs)
+                _g = lambda k, d=0: float(row.get(k, d) or d)
+                ou_combined = {}
+                ou_combined["market_total"] = mkt_ou
+                h_ppg = _g("home_ppg", 112); a_ppg = _g("away_ppg", 112)
+                ou_combined["ppg_combined"] = h_ppg + a_ppg
+                ou_combined["opp_ppg_combined"] = _g("home_opp_ppg", 112) + _g("away_opp_ppg", 112)
+                ou_combined["ou_gap"] = ou_combined["ppg_combined"] - mkt_ou
+                h_tempo = _g("home_tempo", 100); a_tempo = _g("away_tempo", 100)
+                ou_combined["tempo_combined"] = h_tempo + a_tempo
+                ou_combined["pace_min"] = min(h_tempo, a_tempo)
+                h_fg = _g("home_fgpct", 0.46); a_fg = _g("away_fgpct", 0.46)
+                h_3p = _g("home_threepct", 0.36); a_3p = _g("away_threepct", 0.36)
+                h_ft = _g("home_ftpct", 0.77); a_ft = _g("away_ftpct", 0.77)
+                ou_combined["fgpct_avg"] = (h_fg + a_fg) / 2
+                ou_combined["threepct_avg"] = (h_3p + a_3p) / 2
+                ou_combined["ftpct_avg"] = (h_ft + a_ft) / 2
+                ou_combined["efg_avg"] = ((h_fg + 0.2 * h_3p) + (a_fg + 0.2 * a_3p)) / 2
+                ou_combined["turnovers_combined"] = _g("home_turnovers", 14) + _g("away_turnovers", 14)
+                ou_combined["steals_combined"] = _g("home_steals", 7.5) + _g("away_steals", 7.5)
+                ou_combined["oreb_combined"] = _g("home_orb_pct", 0.25) + _g("away_orb_pct", 0.25)
+                hw = _g("home_wins", 20); hl = _g("home_losses", 20)
+                aw = _g("away_wins", 20); al = _g("away_losses", 20)
+                ou_combined["blowout_risk"] = abs(hw / max(hw + hl, 1) - aw / max(aw + al, 1))
+                h_rest = _g("home_days_rest", 2); a_rest = _g("away_days_rest", 2)
+                ou_combined["rest_combined"] = h_rest + a_rest
+                ou_combined["b2b_either"] = 1 if (h_rest == 0 or a_rest == 0) else 0
+                ou_combined["roll_paint_combined"] = _g("home_roll_paint_pts", 0) + _g("away_roll_paint_pts", 0)
+                ou_combined["roll_fast_break_combined"] = _g("home_roll_fast_break_pts", 0) + _g("away_roll_fast_break_pts", 0)
+                ou_combined["roll_bench_combined"] = _g("home_roll_bench_pts", 0) + _g("away_roll_bench_pts", 0)
+                # Enrichment combined
+                he = enrichment.get("home", {}); ae = enrichment.get("away", {})
+                ou_combined["ceiling_combined"] = float(he.get("ceiling", 0) or 0) + float(ae.get("ceiling", 0) or 0)
+                ou_combined["floor_combined"] = float(he.get("floor", 0) or 0) + float(ae.get("floor", 0) or 0)
+                ou_combined["scoring_var_combined"] = float(he.get("scoring_var", 0) or 0) + float(ae.get("scoring_var", 0) or 0)
+                ou_combined["altitude_factor"] = 1 if home_abbr == "DEN" else 0
+                ou_combined["ref_ou_bias"] = float(ref_profile.get("ou_bias", 0) or 0)
+                ou_combined["ref_pace_impact"] = float(ref_profile.get("pace_impact", 0) or 0)
+                ou_combined["overround"] = float(ov.get("overround", 0) or 0)
+
+                # Build feature dicts: V27 diffs (from feat_df) + combined (computed above) + row
                 all_ou_feats = set(
                     (ou_bundle.get("res_feature_cols_lasso") or []) +
                     (ou_bundle.get("res_feature_cols_trees") or ou_bundle.get("res_feature_cols", [])) +
@@ -1150,7 +1190,9 @@ def predict_nba_full(game: dict):
                 )
                 features_dict = {}
                 for f in all_ou_feats:
-                    if f in feat_df.columns:
+                    if f in ou_combined:
+                        features_dict[f] = ou_combined[f]
+                    elif f in feat_df.columns:
                         features_dict[f] = float(feat_df[f].iloc[0])
                     elif f in row:
                         features_dict[f] = float(row.get(f, 0) or 0)
