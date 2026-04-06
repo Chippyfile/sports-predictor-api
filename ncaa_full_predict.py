@@ -2005,12 +2005,12 @@ def predict_ncaa_full(request_data):
         print(f"  [full_predict] SHAP error: {e}")
         shap_out = []
 
-        # v19: Compute predicted scores from margin + team PPG
-        h_ppg = float(game.get("home_ppg", 0) or 0)
-        a_ppg = float(game.get("away_ppg", 0) or 0)
-        avg_total = h_ppg + a_ppg if (h_ppg > 0 and a_ppg > 0) else 140
-        pred_home_score = round((avg_total + margin) / 2, 1)
-        pred_away_score = round((avg_total - margin) / 2, 1)
+    # v19: Compute predicted scores from margin + team PPG
+    h_ppg = float(game.get("home_ppg", 0) or 0)
+    a_ppg = float(game.get("away_ppg", 0) or 0)
+    avg_total = h_ppg + a_ppg if (h_ppg > 0 and a_ppg > 0) else 140
+    pred_home_score = round((avg_total + margin) / 2, 1)
+    pred_away_score = round((avg_total - margin) / 2, 1)
 
     return {
         "sport": "NCAAB",
