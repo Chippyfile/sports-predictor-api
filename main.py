@@ -1063,12 +1063,24 @@ def route_ncaa_daily():
                                     print(f"  [cron/ncaa] ⚠ {home_abbr}v{away_abbr}: {disagree:.1f}pt edge SUPPRESSED — low data ({fc_str}, adj_em={'yes' if audit.get('home_adj_em') else 'no'})")
 
                         # Upsert to Supabase
-                        upsert_resp = _req.post(
-                            f"{SUPABASE_URL}/rest/v1/ncaa_predictions",
-                            headers={**headers, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"},
-                            json=row,
-                            timeout=30
-                        )
+                        if mode == "refresh":
+                            # PATCH existing row (refresh = update, not insert)
+                            upsert_resp = _req.patch(
+                                f"{SUPABASE_URL}/rest/v1/ncaa_predictions?game_id=eq.{game_id}",
+                                headers={**headers, "Content-Type": "application/json"},
+                                json=row,
+                                timeout=30
+                            )
+                        else:
+                            # POST new row with merge-duplicates
+                            upsert_resp = _req.post(
+                                f"{SUPABASE_URL}/rest/v1/ncaa_predictions",
+                                headers={**headers, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"},
+                                json=row,
+                                timeout=30
+                            )
+                        if upsert_resp.status_code >= 400:
+                            print(f"  [cron/ncaa] ⚠ Supabase save failed {game_id}: {upsert_resp.status_code} {upsert_resp.text[:200]}")
 
                         if mode == "predict":
                             predicted += 1
@@ -1664,12 +1676,20 @@ def route_nba_daily():
                             row["ats_side"] = "HOME" if margin > -(mkt_sp) else "AWAY"
                             row["ats_pick_spread"] = mkt_sp
                             row["ats_units"] = 3 if disagree >= 7 else (2 if disagree >= 4 else 1)
-                        elif disagree >= 2 and mkt_sp and not data_ok:
-                            row["ats_units"] = 0
-                            print(f"  [cron/nba] ⚠ {g['away_abbr']}@{g['home_abbr']}: {disagree:.1f}pt edge SUPPRESSED — low data ({fc_str})")
-                        _req.post(f"{SUPABASE_URL}/rest/v1/nba_predictions",
-                            headers={**headers, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"},
-                            json=row, timeout=15)
+                        else:
+                            row["ats_units"] = 0  # always set — null means "never computed"
+                            if disagree >= 2 and mkt_sp and not data_ok:
+                                print(f"  [cron/nba] ⚠ {g['away_abbr']}@{g['home_abbr']}: {disagree:.1f}pt edge SUPPRESSED — low data ({fc_str})")
+
+                        # Save: PATCH existing, POST new
+                        if g["game_id"] in existing_ids:
+                            _req.patch(f"{SUPABASE_URL}/rest/v1/nba_predictions?game_id=eq.{g['game_id']}",
+                                headers={**headers, "Content-Type": "application/json"},
+                                json=row, timeout=15)
+                        else:
+                            _req.post(f"{SUPABASE_URL}/rest/v1/nba_predictions",
+                                headers={**headers, "Content-Type": "application/json"},
+                                json=row, timeout=15)
                         print(f"  [cron/nba] ✅ {g['away_abbr']}@{g['home_abbr']}: margin={margin:+.1f}, wp={wp:.3f}")
                         return "ok"
                     return "empty"
