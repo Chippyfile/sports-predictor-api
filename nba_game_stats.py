@@ -123,6 +123,9 @@ def _fetch_boxscore_stats(game_id):
             "second_chance_pts": 0,  # ESPN doesn't provide this in team boxscore
             "largest_lead": stats.get("largestLead", 0) or 0,
             "oreb": stats.get("offensiveRebounds", 0) or 0,
+            "dreb": stats.get("defensiveRebounds", 0) or (
+                (stats.get("totalRebounds", 0) or 0) - (stats.get("offensiveRebounds", 0) or 0)
+            ),
             # New fields from ESPN boxscore
             "turnover_pts": stats.get("turnoverPoints", 0) or 0,
             "lead_changes": stats.get("leadChanges", 0) or 0,
@@ -281,6 +284,7 @@ def _save_game_stats(game_id, game_date, team_abbr, stats, actual_margin, market
         "ft_trip_rate": stats.get("ft_trip_rate", 0),
         "actual_margin": actual_margin,
         "oreb": stats.get("oreb", 0),
+        "dreb": stats.get("dreb", 0),
         "ref_1": stats.get("ref_1", ""),
         "ref_2": stats.get("ref_2", ""),
         "ref_3": stats.get("ref_3", ""),
@@ -311,7 +315,7 @@ def _recompute_rolling(team_abbr, as_of_date=None):
          f"?team_abbr=eq.{team_abbr}{date_filter}"
          f"&order=game_date.desc&limit=10"
          f"&select=game_date,bench_pts,paint_pts,fast_break_pts,second_chance_pts,"
-         f"largest_lead,q4_scoring,max_run,three_fg_rate,ft_trip_rate,actual_margin,oreb")
+         f"largest_lead,q4_scoring,max_run,three_fg_rate,ft_trip_rate,actual_margin,oreb,dreb")
     try:
         rows = requests.get(q, headers=headers, timeout=10).json() or []
     except Exception:
@@ -341,6 +345,7 @@ def _recompute_rolling(team_abbr, as_of_date=None):
         "roll_ft_trip_rate": avg("ft_trip_rate"),
         "roll_margin_avg": avg("actual_margin"),
         "roll_oreb": avg("oreb"),
+        "roll_dreb": avg("dreb"),
     }
 
     # ATS margin (need market spread — compute from actual_margin)
@@ -480,7 +485,8 @@ def get_rolling_diffs(home_abbr, away_abbr):
 
     diffs = {}
     for stat in ["bench_pts", "paint_pts", "fast_break_pts", "second_chance_pts",
-                 "largest_lead", "q4_scoring", "max_run", "three_fg_rate", "ft_trip_rate"]:
+                 "largest_lead", "q4_scoring", "max_run", "three_fg_rate", "ft_trip_rate",
+                 "dreb", "oreb"]:
         h_val = h.get(f"roll_{stat}", 0) or 0
         a_val = a.get(f"roll_{stat}", 0) or 0
         diffs[f"roll_{stat}_diff"] = round(h_val - a_val, 3)
