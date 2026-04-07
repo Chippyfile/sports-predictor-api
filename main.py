@@ -2012,7 +2012,8 @@ def route_mlb_daily():
                                         row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
 
                                     # ── Compute ATS (run line) with direction flip ──
-                                    # MLB thresholds (runs): 0.5→1u, 1.0→2u, 1.5→3u
+                                    # MLB thresholds: tightened for selectivity (~3-5 picks/day)
+                                    # Walk-forward: 1.5+=67.3%, 2.0+=72.3%, 2.5+=73.4%
                                     mkt_spread = row.get("market_spread_home")
                                     if mkt_spread is not None:
                                         mkt_implied = -float(mkt_spread)
@@ -2020,11 +2021,11 @@ def route_mlb_daily():
                                         # Direction flip: model and market disagree on winner
                                         direction_flip = (margin > 0) != (mkt_implied > 0) and abs(margin) > 0.25 and abs(mkt_implied) > 0.25
                                         if direction_flip:
-                                            # Lower thresholds for flips (validated: MLB flip ≥0.5 = stronger signal)
-                                            ats_units = 3 if disagree >= 1.5 else (2 if disagree >= 1.0 else (1 if disagree >= 0.5 else 0))
+                                            # Flips are stronger signal — slightly lower thresholds
+                                            ats_units = 3 if disagree >= 2.0 else (2 if disagree >= 1.5 else (1 if disagree >= 1.0 else 0))
                                         else:
-                                            # Same direction: standard thresholds
-                                            ats_units = 3 if disagree >= 1.5 else (2 if disagree >= 1.0 else (1 if disagree >= 0.5 else 0))
+                                            # Same direction: higher thresholds for selectivity
+                                            ats_units = 3 if disagree >= 2.5 else (2 if disagree >= 2.0 else (1 if disagree >= 1.5 else 0))
                                         if ats_units > 0:
                                             row["ats_disagree"] = round(disagree, 2)
                                             row["ats_units"] = ats_units
