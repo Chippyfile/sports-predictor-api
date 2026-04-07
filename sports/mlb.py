@@ -946,6 +946,14 @@ def predict_mlb_ou(game: dict):
     if not bundle:
         return {"error": "MLB O/U model not trained — run mlb_ou_retrain.py --upload"}
 
+    # ── V2: SP Form residual model (detects _v2_sp_form flag in bundle) ──
+    if bundle.get("_v2_sp_form"):
+        try:
+            from mlb_ou_v2_serve import predict_mlb_ou_v2
+            return predict_mlb_ou_v2(game, bundle)
+        except Exception as e:
+            print(f"  [ou_v2] Error: {e} — falling back to v1")
+
     def _f(v, d=0.0):
         return float(v) if v is not None else d
 

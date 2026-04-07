@@ -375,6 +375,9 @@ def predict_mlb_full(input_data):
         # Market data — filled below if available
         "market_spread_home": 0,
         "market_ou_total": 0,
+        # Starter IDs for O/U v2 (sp_form from game logs)
+        "home_starter_id": h_starter_id,
+        "away_starter_id": a_starter_id,
     }
 
     # ── Step 5: Call both models ──
