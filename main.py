@@ -2031,28 +2031,15 @@ def route_mlb_daily():
                                             row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
                                             row["ats_direction_flip"] = direction_flip
 
-                                    # ── O/U pick from v2 model (sp_form residual) ──
-                                    # Always store pred_total and sp_form from predict result
-                                    if pt:
-                                        row["pred_total"] = round(pt, 2)
-                                    if res.get("sp_form_combined") is not None:
-                                        row["sp_form_combined"] = res.get("sp_form_combined")
-                                    if res.get("ou_edge") is not None:
-                                        row["ou_edge"] = res.get("ou_edge")
-                                    # Read O/U pick directly from predict result (v2 computes its own thresholds)
-                                    if res.get("ou_pick"):
-                                        row["ou_pick"] = res["ou_pick"]
-                                        row["ou_tier"] = res.get("ou_tier")
-                                        row["ou_units"] = res.get("ou_units")
-                                        row["ou_edge"] = res.get("ou_edge")
-                                        row["pred_total"] = res.get("pred_total")
-                                        row["sp_form_combined"] = res.get("sp_form_combined")
-                                    elif row.get("market_ou_total") and pt:
-                                        # Fallback: simple edge if v2 didn't fire
-                                        mkt_ou = row["market_ou_total"]
-                                        ou_edge = pt - float(mkt_ou)
-                                        row["ou_edge"] = round(ou_edge, 2)
-                                        row["pred_total"] = round(pt, 2) if pt else None
+                                    # ── O/U from v2 model result ──
+                                    # Always store these from predict result
+                                    row["pred_total"] = round(pt, 2) if pt else None
+                                    row["sp_form_combined"] = res.get("sp_form_combined")
+                                    row["ou_edge"] = res.get("ou_edge")
+                                    row["ou_pick"] = res.get("ou_pick")     # None clears stale picks
+                                    row["ou_tier"] = res.get("ou_tier")
+                                    row["ou_units"] = res.get("ou_units")
+                                    row["market_ou_total"] = res.get("market_ou_total") or row.get("market_ou_total")
 
                                     # ── Save: PATCH existing or POST new ──
                                     if existing_info:

@@ -447,6 +447,9 @@ def predict_mlb_full(input_data):
         "ou_edge": ou_result.get("ou_edge"),
         "ou_pick": ou_result.get("ou_pick"),
         "ou_units": ou_result.get("ou_units"),
+        "ou_tier": ou_result.get("ou_tier"),
+        "sp_form_combined": ou_result.get("sp_form_combined", payload.get("sp_form_combined")),
+        "market_ou_total": payload.get("market_ou_total"),
         # Raw inputs for debugging
         "data_sources": {
             "home_woba": payload["home_woba"],
