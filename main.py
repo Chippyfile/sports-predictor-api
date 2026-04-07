@@ -2024,6 +2024,7 @@ def route_mlb_daily():
                                     # ── Compute ATS (run line) with direction flip ──
                                     # MLB thresholds: tightened for selectivity (~3-5 picks/day)
                                     # Walk-forward: 1.5+=67.3%, 2.0+=72.3%, 2.5+=73.4%
+                                    row["ats_units"] = 0  # default: evaluated, no edge (prevents stale data + frontend fallback)
                                     mkt_spread = row.get("market_spread_home")
                                     if mkt_spread is not None:
                                         mkt_implied = -float(mkt_spread)
@@ -2041,6 +2042,9 @@ def route_mlb_daily():
                                             row["ats_units"] = ats_units
                                             row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
                                             row["ats_direction_flip"] = direction_flip
+                                        else:
+                                            # Mark as evaluated — prevents frontend from recomputing with looser thresholds
+                                            row["ats_units"] = 0
 
                                     # ── O/U from v2 model result ──
                                     # Always store these from predict result
