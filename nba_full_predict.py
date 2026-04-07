@@ -1317,4 +1317,19 @@ def predict_nba_full(game: dict):
         "ou_res_avg": round(ou_res_avg, 3) if ou_res_avg is not None else None,
         "ou_cls_avg": round(ou_cls_avg, 3) if ou_cls_avg is not None else None,
         "ou_ats_total": round(ou_ats_total, 1) if ou_ats_total is not None else None,
+        # v19: Display stats for Supabase storage (same pattern as NCAA audit_data)
+        "audit_data": {
+            "home_ppg": row.get("home_ppg"),
+            "away_ppg": row.get("away_ppg"),
+            "home_opp_ppg": row.get("home_opp_ppg"),
+            "away_opp_ppg": row.get("away_opp_ppg"),
+            "home_net_rtg": row.get("home_net_rtg"),
+            "away_net_rtg": row.get("away_net_rtg"),
+            "home_pace": row.get("home_tempo"),
+            "away_pace": row.get("away_tempo"),
+            "home_wins": row.get("home_wins"),
+            "away_wins": row.get("away_wins"),
+            "home_losses": row.get("home_losses"),
+            "away_losses": row.get("away_losses"),
+        },
     }
