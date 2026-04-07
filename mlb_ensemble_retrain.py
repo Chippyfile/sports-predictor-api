@@ -42,6 +42,8 @@ FEATURE_COLS = [
     "first_inn_rate_diff", "clutch_divergence_diff", "opp_adj_form_diff",
     "ump_run_env", "series_game_num",
     "scoring_entropy_combined", "first_inn_rate_combined",
+    # v8: Pitcher recent form (r=-0.170 ATS, r=-0.199 margin)
+    "sp_form_combined",
 ]
 
 SEED = 42

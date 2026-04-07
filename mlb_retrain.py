@@ -52,6 +52,8 @@ FEATURE_COLS = [
     "ump_run_env", "series_game_num",
     "scoring_entropy_combined", "first_inn_rate_combined",
     "sp_relative_fip_diff", "temp_x_park",
+    # ── v8: Pitcher recent form (r=-0.170 ATS, r=+0.178 O/U) ──
+    "sp_form_combined",
 ]
 
 def build_features(df):
@@ -182,6 +184,13 @@ def build_features(df):
             (df.get("away_sp_fip", pd.Series(4.25)) - df.get("away_fip", pd.Series(4.25)))
         ).fillna(0)
 
+    # sp_form_combined: rolling pitcher deterioration (last 3 starts ERA - season FIP)
+    # Pre-computed in parquet by mlb_feature_backfill.py
+    if "sp_form_combined" in df.columns:
+        df["sp_form_combined"] = pd.to_numeric(df["sp_form_combined"], errors="coerce").fillna(0)
+    else:
+        df["sp_form_combined"] = 0.0
+
     # temp × park interaction
     if "temp_x_park" in df.columns:
         df["temp_x_park"] = pd.to_numeric(df["temp_x_park"], errors="coerce").fillna(0)
@@ -232,12 +241,12 @@ def load_data(refresh=False):
     df["game_date_dt"] = pd.to_datetime(df["game_date"])
     df["season"] = df["game_date_dt"].dt.year
 
-    # ── Filter: skip 2020 and 2021 (COVID seasons) ──
+    # ── Filter: skip 2020 (60-game COVID season) ──
     n_before = len(df)
-    df = df[~df["season"].isin([2020, 2021])].copy()
+    df = df[df["season"] != 2020].copy()
     n_covid = n_before - len(df)
     if n_covid > 0:
-        print(f"  Dropped {n_covid} games from 2020/2021 (COVID seasons)")
+        print(f"  Dropped {n_covid} games from 2020 (COVID shortened season)")
 
     # ── Filter: skip games before April 15 of any season ──
     # Early-season stats are unreliable (small sample, cold weather, roster flux)
