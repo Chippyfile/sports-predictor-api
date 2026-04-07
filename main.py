@@ -1907,18 +1907,26 @@ def route_mlb_daily():
 
         # ── PREDICT: Create server-side predictions for today ──
         predicted = 0
+        patched = 0
         if mode in ("predict", "auto"):
             try:
                 from mlb_full_predict import predict_mlb_full
                 sched = _req.get(
                     f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today_est}"
                     f"&hydrate=probablePitcher,teams,venue,linescore,officials", timeout=15)
-                existing = _req.get(
-                    f"{SUPABASE_URL}/rest/v1/mlb_predictions?game_date=eq.{today_est}&select=game_pk",
+                # Fetch existing predictions WITH id for PATCH support
+                existing_resp = _req.get(
+                    f"{SUPABASE_URL}/rest/v1/mlb_predictions?game_date=eq.{today_est}"
+                    f"&select=id,game_pk,ats_units",
                     headers=headers, timeout=15)
-                existing_pks = set()
-                if existing.ok:
-                    existing_pks = {str(r.get("game_pk")) for r in existing.json() if r.get("game_pk")}
+                existing_map = {}  # game_pk → {id, has_ats}
+                if existing_resp.ok:
+                    for r in existing_resp.json():
+                        if r.get("game_pk"):
+                            existing_map[str(r["game_pk"])] = {
+                                "id": r["id"],
+                                "has_ats": r.get("ats_units") is not None,
+                            }
 
                 if sched.ok:
                     for dt in sched.json().get("dates", []):
@@ -1927,7 +1935,9 @@ def route_mlb_daily():
                             if status in ("Final", "Live"):
                                 continue
                             gpk = g.get("gamePk")
-                            if str(gpk) in existing_pks:
+                            existing_info = existing_map.get(str(gpk))
+                            # Skip if already has ATS computed (fully predicted)
+                            if existing_info and existing_info.get("has_ats"):
                                 continue
                             try:
                                 res = predict_mlb_full({"game_id": gpk, "game_date": today_est})
@@ -1935,6 +1945,8 @@ def route_mlb_daily():
                                     margin = res.get("ml_margin", 0) or 0
                                     wp = res.get("ml_win_prob_home", 0.5) or 0.5
                                     pt = res.get("pred_total")
+                                    ds = res.get("data_sources", {})
+                                    total_base = pt if pt else 9.0
                                     row = {
                                         "game_date": today_est, "game_pk": gpk,
                                         "home_team": res["home_team"], "away_team": res["away_team"],
@@ -1943,14 +1955,29 @@ def route_mlb_daily():
                                         "ml_win_prob_home": round(wp, 4),
                                         "spread_home": round(margin, 2),
                                         "confidence": "HIGH",
-                                        "pred_home_runs": round(4.5 + margin / 2, 2),
-                                        "pred_away_runs": round(4.5 - margin / 2, 2),
+                                        "pred_home_runs": round(total_base / 2 + margin / 2, 2),
+                                        "pred_away_runs": round(total_base / 2 - margin / 2, 2),
                                         "ou_total": round(pt, 1) if pt else 9.0,
                                         "ml_ou_pred_total": round(pt, 2) if pt else None,
+                                        # Display stats from predict function
+                                        "home_starter": res.get("home_starter"),
+                                        "away_starter": res.get("away_starter"),
+                                        "umpire": res.get("umpire"),
+                                        "home_sp_fip": ds.get("home_sp_fip"),
+                                        "away_sp_fip": ds.get("away_sp_fip"),
+                                        "home_woba": ds.get("home_woba"),
+                                        "away_woba": ds.get("away_woba"),
+                                        "park_factor": ds.get("park_factor"),
+                                        "home_team_era": ds.get("home_team_era"),
+                                        "away_team_era": ds.get("away_team_era"),
+                                        "is_dome": res.get("is_dome", False),
+                                        "ml_feature_coverage": res.get("feature_coverage"),
                                     }
-                                    # Market odds from ESPN
+                                    # ── Market odds from ESPN ──
                                     try:
-                                        espn_s = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event={gpk}", timeout=8)
+                                        espn_s = _req.get(
+                                            f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event={gpk}",
+                                            headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
                                         if espn_s.ok:
                                             for pc in espn_s.json().get("pickcenter", []):
                                                 hto = pc.get("homeTeamOdds", {})
@@ -1963,9 +1990,10 @@ def route_mlb_daily():
                                                     if pc.get("overUnder") is not None:
                                                         row["market_ou_total"] = pc["overUnder"]
                                                     break
-                                    except:
+                                    except Exception:
                                         pass
-                                    # Compute ML edge
+
+                                    # ── Compute ML edge ──
                                     hml = row.get("market_home_ml")
                                     aml = row.get("market_away_ml")
                                     if hml and aml:
@@ -1976,18 +2004,70 @@ def route_mlb_daily():
                                         ml_edge = wp - h_true
                                         row["ml_edge_pct"] = round(abs(ml_edge) * 100, 2)
                                         row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
-                                    sv = _req.post(f"{SUPABASE_URL}/rest/v1/mlb_predictions",
-                                        headers={**headers, "Content-Type": "application/json",
-                                                 "Prefer": "return=representation"}, json=row, timeout=15)
-                                    if sv.ok:
-                                        predicted += 1
-                                        print(f"  [cron/mlb] Predicted {res['away_team']}@{res['home_team']}: m={margin:.1f} wp={wp:.3f}")
+
+                                    # ── Compute ATS (run line) with direction flip ──
+                                    # MLB thresholds (runs): 0.5→1u, 1.0→2u, 1.5→3u
+                                    mkt_spread = row.get("market_spread_home")
+                                    if mkt_spread is not None:
+                                        mkt_implied = -float(mkt_spread)
+                                        disagree = abs(margin - mkt_implied)
+                                        # Direction flip: model and market disagree on winner
+                                        direction_flip = (margin > 0) != (mkt_implied > 0) and abs(margin) > 0.25 and abs(mkt_implied) > 0.25
+                                        if direction_flip:
+                                            # Lower thresholds for flips (validated: MLB flip ≥0.5 = stronger signal)
+                                            ats_units = 3 if disagree >= 1.5 else (2 if disagree >= 1.0 else (1 if disagree >= 0.5 else 0))
+                                        else:
+                                            # Same direction: standard thresholds
+                                            ats_units = 3 if disagree >= 1.5 else (2 if disagree >= 1.0 else (1 if disagree >= 0.5 else 0))
+                                        if ats_units > 0:
+                                            row["ats_disagree"] = round(disagree, 2)
+                                            row["ats_units"] = ats_units
+                                            row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
+                                            row["ats_direction_flip"] = direction_flip
+
+                                    # ── Compute O/U pick (asymmetric thresholds) ──
+                                    mkt_ou = row.get("market_ou_total")
+                                    if mkt_ou and pt:
+                                        ou_edge = pt - float(mkt_ou)
+                                        row["ou_edge"] = round(ou_edge, 2)
+                                        if ou_edge < -2.0:
+                                            row["ou_pick"], row["ou_tier"] = "UNDER", 3
+                                        elif ou_edge < -1.5:
+                                            row["ou_pick"], row["ou_tier"] = "UNDER", 2
+                                        elif ou_edge < -1.0:
+                                            row["ou_pick"], row["ou_tier"] = "UNDER", 1
+                                        elif ou_edge > 2.0:
+                                            row["ou_pick"], row["ou_tier"] = "OVER", 1
+
+                                    # ── Save: PATCH existing or POST new ──
+                                    if existing_info:
+                                        # PATCH existing row — update with ATS/display/odds
+                                        patch_row = {k: v for k, v in row.items() if k != "game_date" and k != "game_pk"}
+                                        sv = _req.patch(
+                                            f"{SUPABASE_URL}/rest/v1/mlb_predictions?id=eq.{existing_info['id']}",
+                                            headers={**headers, "Content-Type": "application/json"},
+                                            json=patch_row, timeout=15)
+                                        if sv.ok:
+                                            patched += 1
+                                            print(f"  [cron/mlb] PATCHED {res['away_team']}@{res['home_team']}: m={margin:.1f} ats={row.get('ats_units', 0)}u")
+                                    else:
+                                        sv = _req.post(
+                                            f"{SUPABASE_URL}/rest/v1/mlb_predictions",
+                                            headers={**headers, "Content-Type": "application/json",
+                                                     "Prefer": "return=representation"},
+                                            json=row, timeout=15)
+                                        if sv.ok:
+                                            predicted += 1
+                                            print(f"  [cron/mlb] Predicted {res['away_team']}@{res['home_team']}: m={margin:.1f} wp={wp:.3f} ats={row.get('ats_units', 0)}u")
+                                        else:
+                                            print(f"  [cron/mlb] POST failed {gpk}: {sv.status_code} {sv.text[:100]}")
                             except Exception as e:
                                 print(f"  [cron/mlb] Predict error {gpk}: {e}")
             except Exception as e:
                 print(f"  [cron/mlb] Predict mode error: {e}")
                 results["predict_error"] = str(e)[:200]
             results["predicted"] = predicted
+            results["patched"] = patched
 
         # ── GRADE: Fill final scores ──
         graded = 0
