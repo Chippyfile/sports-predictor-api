@@ -1670,6 +1670,39 @@ def route_nba_daily():
                     if pred and not pred.get("error") and pred.get("ml_win_prob_home") is not None:
                         margin = pred["ml_margin"]; wp = pred["ml_win_prob_home"]
                         mkt_sp = pred.get("market_spread", 0); mkt_tot = pred.get("market_total", 0)
+
+                        # Fetch ESPN team display stats (PPG, pace, netRtg, record)
+                        def _fetch_nba_team_display(abbr):
+                            """Fetch display stats from ESPN teams endpoint."""
+                            try:
+                                r = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{abbr}", timeout=8)
+                                if not r.ok: return {}
+                                t = r.json().get("team", {})
+                                rec = t.get("record", {}).get("items", [{}])[0].get("summary", "0-0")
+                                w, l = rec.split("-") if "-" in rec else ("0", "0")
+                                # Get detailed stats
+                                sr = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{abbr}/statistics", timeout=8)
+                                stats = {}
+                                if sr.ok:
+                                    for cat in sr.json().get("results", {}).get("stats", {}).get("categories", []):
+                                        for s in cat.get("stats", []):
+                                            stats[s.get("name", "")] = s.get("value")
+                                return {
+                                    "wins": int(w), "losses": int(l),
+                                    "ppg": stats.get("avgPoints", stats.get("points")),
+                                    "opp_ppg": stats.get("avgPointsAgainst", stats.get("avgPointsOpponent")),
+                                    "pace": stats.get("possessions", stats.get("pace")),
+                                    "off_rtg": stats.get("offensiveRating"),
+                                    "def_rtg": stats.get("defensiveRating"),
+                                    "net_rtg": (stats.get("offensiveRating") or 0) - (stats.get("defensiveRating") or 0) if stats.get("offensiveRating") else None,
+                                }
+                            except Exception as e:
+                                print(f"  [cron/nba] ESPN stats error for {abbr}: {e}")
+                                return {}
+
+                        home_display = _fetch_nba_team_display(g["home_abbr"])
+                        away_display = _fetch_nba_team_display(g["away_abbr"])
+
                         row = {
                             "game_date": g["game_date"], "game_id": g["game_id"],
                             "home_team": g["home_abbr"], "away_team": g["away_abbr"],
@@ -1681,6 +1714,19 @@ def route_nba_daily():
                             "result_entered": False,
                             "ml_feature_coverage": pred.get("feature_coverage"),
                             "ml_model_type": pred.get("model_meta", {}).get("model_type"),
+                            # Display stats from ESPN
+                            "home_ppg": home_display.get("ppg"),
+                            "away_ppg": away_display.get("ppg"),
+                            "home_opp_ppg": home_display.get("opp_ppg"),
+                            "away_opp_ppg": away_display.get("opp_ppg"),
+                            "home_net_rtg": home_display.get("net_rtg"),
+                            "away_net_rtg": away_display.get("net_rtg"),
+                            "home_pace": home_display.get("pace"),
+                            "away_pace": away_display.get("pace"),
+                            "home_wins": home_display.get("wins"),
+                            "away_wins": away_display.get("wins"),
+                            "home_losses": home_display.get("losses"),
+                            "away_losses": away_display.get("losses"),
                         }
                         if mkt_sp: row["market_spread_home"] = mkt_sp
                         if mkt_tot: row["market_ou_total"] = mkt_tot; row["ou_total"] = mkt_tot
