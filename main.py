@@ -1974,6 +1974,8 @@ def route_mlb_daily():
                                         "ml_feature_coverage": res.get("feature_coverage"),
                                     }
                                     # ── Market odds from ESPN scoreboard (match by team) ──
+                                    # ESPN uses different abbreviations: CHW=CWS, WSN=WSH, AZ=ARI
+                                    _ESPN_ALIAS = {"CHW":"CWS","WSN":"WSH","AZ":"ARI","CWS":"CWS","WSH":"WSH","ARI":"ARI"}
                                     try:
                                         espn_s = _req.get(
                                             f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={today_est.replace('-','')}",
@@ -1981,23 +1983,31 @@ def route_mlb_daily():
                                         if espn_s.ok:
                                             for ev in espn_s.json().get("events", []):
                                                 comps = ev.get("competitions", [{}])[0].get("competitors", [])
-                                                ev_home = next((c.get("team", {}).get("abbreviation", "") for c in comps if c.get("homeAway") == "home"), "")
-                                                if ev_home.upper() == res["home_team"].upper():
+                                                ev_home_raw = next((c.get("team", {}).get("abbreviation", "") for c in comps if c.get("homeAway") == "home"), "")
+                                                ev_home = _ESPN_ALIAS.get(ev_home_raw.upper(), ev_home_raw.upper())
+                                                if ev_home == res["home_team"].upper():
                                                     odds_list = ev.get("competitions", [{}])[0].get("odds", [])
                                                     if odds_list:
                                                         odds = odds_list[0]
                                                         if odds.get("overUnder") is not None:
                                                             row["market_ou_total"] = odds["overUnder"]
-                                                        if odds.get("spread") is not None:
-                                                            row["market_spread_home"] = odds["spread"]
-                                                        hto = odds.get("homeTeamOdds", {})
-                                                        ato = odds.get("awayTeamOdds", {})
-                                                        if hto.get("moneyLine"):
-                                                            row["market_home_ml"] = hto["moneyLine"]
-                                                            row["market_away_ml"] = ato.get("moneyLine")
+                                                        # Moneylines: odds.moneyline.home/away.close.odds
+                                                        ml = odds.get("moneyline", {})
+                                                        h_ml_str = ml.get("home", {}).get("close", {}).get("odds")
+                                                        a_ml_str = ml.get("away", {}).get("close", {}).get("odds")
+                                                        if h_ml_str:
+                                                            row["market_home_ml"] = int(h_ml_str.replace("+", ""))
+                                                        if a_ml_str:
+                                                            row["market_away_ml"] = int(a_ml_str.replace("+", ""))
+                                                        # Run line: odds.pointSpread.home/away.close.line
+                                                        ps = odds.get("pointSpread", {})
+                                                        h_rl = ps.get("home", {}).get("close", {}).get("line")
+                                                        if h_rl:
+                                                            row["run_line_home"] = float(h_rl)
+                                                            row["market_spread_home"] = float(h_rl)
                                                     break
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        print(f"  [cron/mlb] ESPN odds error: {e}")
 
                                     # ── Compute ML edge ──
                                     hml = row.get("market_home_ml")

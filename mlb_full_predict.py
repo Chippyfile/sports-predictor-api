@@ -381,26 +381,37 @@ def predict_mlb_full(input_data):
     }
 
     # ── Step 4b: Fetch market odds from ESPN scoreboard (needed for O/U v2 model) ──
+    _ESPN_ALIAS = {"CHW":"CWS","WSN":"WSH","AZ":"ARI"}
     try:
         espn_sb_url = f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={game_date.replace('-','')}"
         espn_r = requests.get(espn_sb_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
         if espn_r.ok:
             for ev in espn_r.json().get("events", []):
-                # Match by team abbreviation
                 competitors = ev.get("competitions", [{}])[0].get("competitors", [])
-                ev_home = next((c.get("team", {}).get("abbreviation", "") for c in competitors if c.get("homeAway") == "home"), "")
-                ev_away = next((c.get("team", {}).get("abbreviation", "") for c in competitors if c.get("homeAway") == "away"), "")
-                if ev_home.upper() == home_abbr.upper() or ev_away.upper() == away_abbr.upper():
+                ev_home_raw = next((c.get("team", {}).get("abbreviation", "") for c in competitors if c.get("homeAway") == "home"), "")
+                ev_home = _ESPN_ALIAS.get(ev_home_raw.upper(), ev_home_raw.upper())
+                if ev_home == home_abbr.upper():
                     odds_list = ev.get("competitions", [{}])[0].get("odds", [])
                     if odds_list:
                         odds = odds_list[0]
                         if odds.get("overUnder") is not None:
                             payload["market_ou_total"] = odds["overUnder"]
-                        if odds.get("spread") is not None:
-                            payload["market_spread_home"] = odds["spread"]
+                        # Moneylines
+                        ml = odds.get("moneyline", {})
+                        h_ml = ml.get("home", {}).get("close", {}).get("odds")
+                        a_ml = ml.get("away", {}).get("close", {}).get("odds")
+                        if h_ml:
+                            payload["market_home_ml"] = int(h_ml.replace("+", ""))
+                        if a_ml:
+                            payload["market_away_ml"] = int(a_ml.replace("+", ""))
+                        # Run line
+                        ps = odds.get("pointSpread", {})
+                        h_rl = ps.get("home", {}).get("close", {}).get("line")
+                        if h_rl:
+                            payload["market_spread_home"] = float(h_rl)
                     break
             if payload["market_ou_total"]:
-                print(f"  [mlb_full] Market O/U: {payload['market_ou_total']}, Spread: {payload['market_spread_home']}")
+                print(f"  [mlb_full] Market: O/U={payload['market_ou_total']}, RL={payload.get('market_spread_home')}, ML={payload.get('market_home_ml')}/{payload.get('market_away_ml')}")
             else:
                 print(f"  [mlb_full] No ESPN odds found for {away_abbr}@{home_abbr}")
     except Exception as e:
