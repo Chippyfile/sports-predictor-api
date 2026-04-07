@@ -380,6 +380,45 @@ def predict_mlb_full(input_data):
         "away_starter_id": a_starter_id,
     }
 
+    # ── Step 4b: Fetch market odds from ESPN scoreboard (needed for O/U v2 model) ──
+    try:
+        espn_sb_url = f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={game_date.replace('-','')}"
+        espn_r = requests.get(espn_sb_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        if espn_r.ok:
+            for ev in espn_r.json().get("events", []):
+                # Match by team abbreviation
+                competitors = ev.get("competitions", [{}])[0].get("competitors", [])
+                ev_home = next((c.get("team", {}).get("abbreviation", "") for c in competitors if c.get("homeAway") == "home"), "")
+                ev_away = next((c.get("team", {}).get("abbreviation", "") for c in competitors if c.get("homeAway") == "away"), "")
+                if ev_home.upper() == home_abbr.upper() or ev_away.upper() == away_abbr.upper():
+                    odds_list = ev.get("competitions", [{}])[0].get("odds", [])
+                    if odds_list:
+                        odds = odds_list[0]
+                        if odds.get("overUnder") is not None:
+                            payload["market_ou_total"] = odds["overUnder"]
+                        if odds.get("spread") is not None:
+                            payload["market_spread_home"] = odds["spread"]
+                    break
+            if payload["market_ou_total"]:
+                print(f"  [mlb_full] Market O/U: {payload['market_ou_total']}, Spread: {payload['market_spread_home']}")
+            else:
+                print(f"  [mlb_full] No ESPN odds found for {away_abbr}@{home_abbr}")
+    except Exception as e:
+        print(f"  [mlb_full] ESPN odds fetch failed: {e}")
+
+    # ── Step 4c: Compute sp_form_combined (used by BOTH ATS and O/U models) ──
+    try:
+        from mlb_ou_v2_serve import compute_sp_form_combined
+        sp_form = compute_sp_form_combined(
+            h_starter_id, a_starter_id,
+            payload["home_sp_fip"], payload["away_sp_fip"]
+        )
+        payload["sp_form_combined"] = sp_form
+        print(f"  [mlb_full] sp_form_combined: {sp_form:+.3f}")
+    except Exception as e:
+        payload["sp_form_combined"] = 0.0
+        print(f"  [mlb_full] sp_form failed: {e} — defaulting to 0")
+
     # ── Step 5: Call both models ──
     margin_result = predict_mlb(payload)
     ou_result = predict_mlb_ou(payload)
