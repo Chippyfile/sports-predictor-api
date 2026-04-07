@@ -401,27 +401,11 @@ def _nba_backfill_heuristic(df):
         homeScore = max(85, min(155, homeScore))
         awayScore = max(85, min(155, awayScore))
 
-        # ── Win probability (logistic with dynamic sigma, mirrors JS ALIGN-9) ──
+        # ── Win probability (base-e sigmoid, validated σ=7.0) ──
+        # AUDIT FIX: was base-10 with dynamic σ=12.0 — matched JS but wrong for ML training.
+        # Base-e with σ=7.0 validated via Brier sweep in v27 retrain.
         spread = homeScore - awayScore
-        min_games = min(h_total_games, a_total_games)
-        sigma = 12.0
-        if min_games < 10:
-            sigma += 1.5
-        elif min_games < 20:
-            sigma += 0.8
-        elif min_games < 35:
-            sigma += 0.3
-        elif min_games >= 65:
-            sigma -= 0.3
-
-        # Bad-team uncertainty
-        h_wp = h_wins / max(1, h_total_games)
-        a_wp = a_wins / max(1, a_total_games)
-        if h_wp < 0.40 and a_wp < 0.40:
-            sigma += 0.5
-        sigma = max(10.5, min(14.5, sigma))
-
-        hwp = 1 / (1 + 10 ** (-spread / sigma))
+        hwp = 1 / (1 + np.exp(-spread / 7.0))
         hwp = max(0.05, min(0.95, hwp))
 
         # ── Moneyline (mirrors JS conversion) ──
@@ -727,7 +711,9 @@ def predict_nba(game: dict):
         margin = float(bundle["model"].predict(X_s)[0])
 
         # Win probability: sigmoid → isotonic calibration
-        raw_prob = 1.0 / (1.0 + np.exp(-margin / 8.0))
+        # AUDIT FIX: read σ from bundle (v27=7.0), not hardcoded 8.0
+        _sigma = bundle.get("sigma", 7.0)
+        raw_prob = 1.0 / (1.0 + np.exp(-margin / _sigma))
         calibrator = bundle.get("calibrator")
         if calibrator is not None:
             try:
