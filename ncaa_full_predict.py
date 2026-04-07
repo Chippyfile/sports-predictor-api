@@ -1915,7 +1915,8 @@ def predict_ncaa_full(request_data):
             ou_debug = f"v4:res={ou_res_avg:.2f},cls={ou_cls_avg:.3f},ats_edge={ats_edge_val:.1f},pick={ou_pick},tier={ou_tier}"
 
         elif ou_bundle and ou_bundle.get("_ensemble_models") and ou_bundle.get("scaler"):
-            # ── V2/V3 fallback: simple ensemble ──
+            # ── V2/V3 fallback: simple ensemble — NOT VALIDATED with v5 architecture ──
+            # Generate predicted total for display, but do NOT generate picks from unvalidated thresholds
             ou_feature_cols = ou_bundle.get("ou_feature_cols") or ou_bundle.get("feature_cols", [])
             available_ou = [f for f in ou_feature_cols if f in feature_cols]
             if len(available_ou) >= 15:
@@ -1933,10 +1934,9 @@ def predict_ncaa_full(request_data):
                 mkt_ou = float(game.get("espn_over_under", 0) or game.get("market_ou_total", 0) or 0)
                 if mkt_ou > 0:
                     ou_edge = round(ou_predicted_total - mkt_ou, 1)
-                    if abs(ou_edge) >= 5:
-                        ou_pick = "OVER" if ou_edge > 0 else "UNDER"
-                        ou_tier = 1
-            ou_debug = f"v2:total={ou_predicted_total},edge={ou_edge}"
+                    # v2/v3 flat threshold not validated — suppress picks, log warning
+                    print(f"  [full_predict] WARNING: O/U using v2/v3 fallback (no validated tiers). edge={ou_edge}, pick suppressed.")
+            ou_debug = f"v2_fallback:total={ou_predicted_total},edge={ou_edge},pick_suppressed=true"
 
     except Exception as e:
         ou_pick = f"ERROR: {e}"
