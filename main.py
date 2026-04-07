@@ -1684,17 +1684,29 @@ def route_nba_daily():
                                 sr = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{abbr}/statistics", timeout=8)
                                 stats = {}
                                 if sr.ok:
-                                    for cat in sr.json().get("results", {}).get("stats", {}).get("categories", []):
+                                    sj = sr.json()
+                                    # ESPN has multiple possible JSON structures
+                                    cats = (sj.get("results", {}).get("stats", {}).get("categories", [])
+                                            or sj.get("stats", {}).get("categories", [])
+                                            or sj.get("categories", []))
+                                    for cat in cats:
                                         for s in cat.get("stats", []):
                                             stats[s.get("name", "")] = s.get("value")
+                                    if not stats:
+                                        print(f"  [cron/nba] ESPN stats keys for {abbr}: {list(sj.keys())[:5]}")
+                                ppg = stats.get("avgPoints") or stats.get("points") or stats.get("pointsPerGame")
+                                opp_ppg = stats.get("avgPointsAgainst") or stats.get("avgPointsOpponent") or stats.get("opponentPointsPerGame")
+                                pace = stats.get("possessions") or stats.get("pace") or stats.get("pacePerGame")
+                                off_rtg = stats.get("offensiveRating") or stats.get("offRating")
+                                def_rtg = stats.get("defensiveRating") or stats.get("defRating")
                                 return {
                                     "wins": int(w), "losses": int(l),
-                                    "ppg": stats.get("avgPoints", stats.get("points")),
-                                    "opp_ppg": stats.get("avgPointsAgainst", stats.get("avgPointsOpponent")),
-                                    "pace": stats.get("possessions", stats.get("pace")),
-                                    "off_rtg": stats.get("offensiveRating"),
-                                    "def_rtg": stats.get("defensiveRating"),
-                                    "net_rtg": (stats.get("offensiveRating") or 0) - (stats.get("defensiveRating") or 0) if stats.get("offensiveRating") else None,
+                                    "ppg": ppg,
+                                    "opp_ppg": opp_ppg,
+                                    "pace": pace,
+                                    "off_rtg": off_rtg,
+                                    "def_rtg": def_rtg,
+                                    "net_rtg": round(float(off_rtg) - float(def_rtg), 2) if off_rtg and def_rtg else None,
                                 }
                             except Exception as e:
                                 print(f"  [cron/nba] ESPN stats error for {abbr}: {e}")
