@@ -1973,22 +1973,28 @@ def route_mlb_daily():
                                         "is_dome": res.get("is_dome", False),
                                         "ml_feature_coverage": res.get("feature_coverage"),
                                     }
-                                    # ── Market odds from ESPN ──
+                                    # ── Market odds from ESPN scoreboard (match by team) ──
                                     try:
                                         espn_s = _req.get(
-                                            f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event={gpk}",
+                                            f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={today_est.replace('-','')}",
                                             headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
                                         if espn_s.ok:
-                                            for pc in espn_s.json().get("pickcenter", []):
-                                                hto = pc.get("homeTeamOdds", {})
-                                                ato = pc.get("awayTeamOdds", {})
-                                                if hto.get("moneyLine"):
-                                                    row["market_home_ml"] = hto["moneyLine"]
-                                                    row["market_away_ml"] = ato.get("moneyLine")
-                                                    if pc.get("spread") is not None:
-                                                        row["market_spread_home"] = pc["spread"]
-                                                    if pc.get("overUnder") is not None:
-                                                        row["market_ou_total"] = pc["overUnder"]
+                                            for ev in espn_s.json().get("events", []):
+                                                comps = ev.get("competitions", [{}])[0].get("competitors", [])
+                                                ev_home = next((c.get("team", {}).get("abbreviation", "") for c in comps if c.get("homeAway") == "home"), "")
+                                                if ev_home.upper() == res["home_team"].upper():
+                                                    odds_list = ev.get("competitions", [{}])[0].get("odds", [])
+                                                    if odds_list:
+                                                        odds = odds_list[0]
+                                                        if odds.get("overUnder") is not None:
+                                                            row["market_ou_total"] = odds["overUnder"]
+                                                        if odds.get("spread") is not None:
+                                                            row["market_spread_home"] = odds["spread"]
+                                                        hto = odds.get("homeTeamOdds", {})
+                                                        ato = odds.get("awayTeamOdds", {})
+                                                        if hto.get("moneyLine"):
+                                                            row["market_home_ml"] = hto["moneyLine"]
+                                                            row["market_away_ml"] = ato.get("moneyLine")
                                                     break
                                     except Exception:
                                         pass
@@ -2025,19 +2031,28 @@ def route_mlb_daily():
                                             row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
                                             row["ats_direction_flip"] = direction_flip
 
-                                    # ── Compute O/U pick (asymmetric thresholds) ──
-                                    mkt_ou = row.get("market_ou_total")
-                                    if mkt_ou and pt:
+                                    # ── O/U pick from v2 model (sp_form residual) ──
+                                    # Always store pred_total and sp_form from predict result
+                                    if pt:
+                                        row["pred_total"] = round(pt, 2)
+                                    if res.get("sp_form_combined") is not None:
+                                        row["sp_form_combined"] = res.get("sp_form_combined")
+                                    if res.get("ou_edge") is not None:
+                                        row["ou_edge"] = res.get("ou_edge")
+                                    # Read O/U pick directly from predict result (v2 computes its own thresholds)
+                                    if res.get("ou_pick"):
+                                        row["ou_pick"] = res["ou_pick"]
+                                        row["ou_tier"] = res.get("ou_tier")
+                                        row["ou_units"] = res.get("ou_units")
+                                        row["ou_edge"] = res.get("ou_edge")
+                                        row["pred_total"] = res.get("pred_total")
+                                        row["sp_form_combined"] = res.get("sp_form_combined")
+                                    elif row.get("market_ou_total") and pt:
+                                        # Fallback: simple edge if v2 didn't fire
+                                        mkt_ou = row["market_ou_total"]
                                         ou_edge = pt - float(mkt_ou)
                                         row["ou_edge"] = round(ou_edge, 2)
-                                        if ou_edge < -2.0:
-                                            row["ou_pick"], row["ou_tier"] = "UNDER", 3
-                                        elif ou_edge < -1.5:
-                                            row["ou_pick"], row["ou_tier"] = "UNDER", 2
-                                        elif ou_edge < -1.0:
-                                            row["ou_pick"], row["ou_tier"] = "UNDER", 1
-                                        elif ou_edge > 2.0:
-                                            row["ou_pick"], row["ou_tier"] = "OVER", 1
+                                        row["pred_total"] = round(pt, 2) if pt else None
 
                                     # ── Save: PATCH existing or POST new ──
                                     if existing_info:
@@ -2049,7 +2064,8 @@ def route_mlb_daily():
                                             json=patch_row, timeout=15)
                                         if sv.ok:
                                             patched += 1
-                                            print(f"  [cron/mlb] PATCHED {res['away_team']}@{res['home_team']}: m={margin:.1f} ats={row.get('ats_units', 0)}u")
+                                            ou_info = f" ou={row.get('ou_pick','—')}" if row.get("ou_pick") else ""
+                                            print(f"  [cron/mlb] PATCHED {res['away_team']}@{res['home_team']}: m={margin:.1f} ats={row.get('ats_units', 0)}u{ou_info}")
                                     else:
                                         sv = _req.post(
                                             f"{SUPABASE_URL}/rest/v1/mlb_predictions",
