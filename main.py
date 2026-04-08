@@ -1702,21 +1702,9 @@ def route_nba_daily():
                         if mkt_tot: row["market_ou_total"] = mkt_tot; row["ou_total"] = mkt_tot
                         if mkt_sp: row["ats_disagree"] = round(abs(margin - (-mkt_sp)), 2)
 
-                        # ML odds from ESPN summary
-                        nba_home_ml = None
-                        nba_away_ml = None
-                        try:
-                            summ = _req.get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={g['game_id']}", timeout=8)
-                            if summ.ok:
-                                for pc in summ.json().get("pickcenter", []):
-                                    hto = pc.get("homeTeamOdds", {})
-                                    ato = pc.get("awayTeamOdds", {})
-                                    if hto.get("moneyLine"):
-                                        nba_home_ml = hto["moneyLine"]
-                                        nba_away_ml = ato.get("moneyLine")
-                                        break
-                        except:
-                            pass
+                        # ML odds — already extracted by predict_nba_full (no extra ESPN call)
+                        nba_home_ml = pred.get("market_home_ml")
+                        nba_away_ml = pred.get("market_away_ml")
                         if nba_home_ml is not None:
                             row["market_home_ml"] = nba_home_ml
                         if nba_away_ml is not None:
@@ -1732,6 +1720,15 @@ def route_nba_daily():
                         # O/U v2 fields
                         for fld in ["ou_predicted_total","ou_edge","ou_pick","ou_tier","ou_res_avg"]:
                             if pred.get(fld) is not None: row[fld] = pred[fld]
+                        # Player impact (BPM/VORP injury adjustment)
+                        if pred.get("impact_adjustment"):
+                            row["impact_adjustment"] = pred["impact_adjustment"]
+                        if pred.get("missing_margin_diff"):
+                            row["missing_margin_diff"] = pred["missing_margin_diff"]
+                        if pred.get("home_out_players"):
+                            row["home_out_players"] = pred["home_out_players"]
+                        if pred.get("away_out_players"):
+                            row["away_out_players"] = pred["away_out_players"]
                         # ATS signals — with data quality gate + direction flip
                         mkt_implied = -(mkt_sp or 0)
                         disagree = abs(margin - mkt_implied)
@@ -1767,7 +1764,9 @@ def route_nba_daily():
                             _req.post(f"{SUPABASE_URL}/rest/v1/nba_predictions",
                                 headers={**headers, "Content-Type": "application/json"},
                                 json=row, timeout=15)
-                        print(f"  [cron/nba] ✅ {g['away_abbr']}@{g['home_abbr']}: margin={margin:+.1f}, wp={wp:.3f}")
+                        _impact_str = f", impact={pred.get('impact_adjustment', 0):+.1f}" if pred.get("impact_adjustment") else ""
+                        _out_str = f", out={pred.get('home_out_players', [])}" if pred.get("home_out_players") else ""
+                        print(f"  [cron/nba] ✅ {g['away_abbr']}@{g['home_abbr']}: margin={margin:+.1f}, wp={wp:.3f}{_impact_str}{_out_str}")
                         return "ok"
                     return "empty"
                 except Exception as e:

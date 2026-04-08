@@ -439,15 +439,20 @@ def _parse_espn_summary(data, home_abbr, away_abbr, game_date_str=""):
     except Exception as _e:
         diag.append(f"Section 7 (last5): {_e}")
 
-    # ── 8. Injuries ──
+    # ── 8. Injuries (extract OUT player NAMES for impact model) ──
     try:
         for inj in data.get("injuries", []):
             abbr = _safe_abbr(inj.get("team", {}))
             side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
             if not side: continue
-            out = sum(1 for i in inj.get("injuries", [])
-                     if isinstance(i, dict) and _safe_get(i, "type", "abbreviation") == "O")
-            row[f"{side}_injuries_out"] = out
+            out_names = []
+            for i in inj.get("injuries", []):
+                if isinstance(i, dict) and _safe_get(i, "type", "abbreviation") == "O":
+                    name = _safe_get(i, "athlete", "displayName")
+                    if name:
+                        out_names.append(name)
+            row[f"{side}_injuries_out"] = len(out_names)
+            row[f"{side}_out_players"] = out_names  # player names for impact model
     except Exception as _e:
         diag.append(f"Section 8 (injuries): {_e}")
 
@@ -1126,15 +1131,19 @@ def predict_nba_full(game: dict):
           f"margin={margin:+.2f}, wp={wp:.4f}")
 
     # ═══ MISSING PLAYER IMPACT ADJUSTMENT (BPM/VORP) ═══
-    # Fetches ESPN injury report, sums missing player margin_impact from nba_player_impact table,
-    # and shifts the predicted margin accordingly. Pre-v28: direct post-prediction adjustment.
+    # Uses OUT player names already extracted from ESPN summary (Section 8 above).
+    # No second ESPN call needed — single source of truth.
     impact_adj = 0.0
     impact_data = {}
     if _HAS_IMPACT:
         try:
+            # Use OUT players from ESPN summary (already fetched), avoid redundant API call
+            home_out = espn.get("home_out_players") or row.get("home_out_players") or None
+            away_out = espn.get("away_out_players") or row.get("away_out_players") or None
             impact_data = compute_missing_impact(
                 home_abbr, away_abbr,
                 game_id=game_id, game_date=game_date,
+                home_out=home_out, away_out=away_out,
             )
             margin, wp, impact_adj = _adjust_impact(margin, wp, impact_data, sigma=7.0)
             if abs(impact_adj) >= 0.5:
@@ -1328,6 +1337,8 @@ def predict_nba_full(game: dict):
         "pred_home_score": round(float(row.get("home_ppg",112))+margin/2, 1),
         "pred_away_score": round(float(row.get("away_ppg",112))-margin/2, 1),
         "market_spread": mkt, "market_total": float(row.get("market_ou_total",0) or 0),
+        "market_home_ml": row.get("home_ml") or row.get("home_moneyline") or None,
+        "market_away_ml": row.get("away_ml") or row.get("away_moneyline") or None,
         "disagree": round(abs(margin-(-mkt)), 2) if mkt else 0,
         "shap": shap_out,  # all 38 features
         "feature_coverage": f"{nz}/{len(feature_cols)}",
