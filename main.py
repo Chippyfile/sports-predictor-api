@@ -2038,14 +2038,16 @@ def route_mlb_daily():
                                     #   2u: edge ≥ 2.0 + all 3 agree → 71.0% ATS, +35.5% ROI
                                     row["ats_units"] = 0
                                     mkt_spread = row.get("market_spread_home")
+                                    models_agree = res.get("models_agree", True)
                                     if mkt_spread is not None:
                                         mkt_implied = -float(mkt_spread)
                                         disagree = abs(margin - mkt_implied)
-                                        if disagree >= 1.5:
+                                        if disagree >= 1.5 and models_agree:
                                             row["ats_disagree"] = round(disagree, 2)
                                             row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
                                             row["ats_pick_spread"] = mkt_spread
                                             row["ats_units"] = 2 if disagree >= 2.0 else 1
+                                            row["ats_models_agree"] = models_agree
 
                                     # ── O/U from v2 model result ──
                                     # Always store these from predict result

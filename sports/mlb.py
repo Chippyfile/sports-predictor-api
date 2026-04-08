@@ -870,11 +870,17 @@ def predict_mlb(game: dict):
     
     # Ensemble: average predictions from all models if available
     ensemble_models = bundle.get("_ensemble_models")
+    _model_preds = []
     if ensemble_models and len(ensemble_models) > 1:
-        raw_margin = float(_np.mean([m.predict(X_s)[0] for m in ensemble_models]))
+        _model_preds = [float(m.predict(X_s)[0]) for m in ensemble_models]
+        raw_margin = float(_np.mean(_model_preds))
     else:
         reg = bundle.get("reg", bundle.get("model"))
         raw_margin = float(reg.predict(X_s)[0])
+        _model_preds = [raw_margin]
+
+    # 3-model agreement: all predict same direction (all positive or all negative)
+    _models_agree = all(p > 0 for p in _model_preds) or all(p < 0 for p in _model_preds) if len(_model_preds) > 1 else True
 
     # AUDIT FIX F7: Use Gaussian CDF instead of Elo-style formula.
     # Elo (10^(-m/σ)) compresses probabilities toward 50% compared to Gaussian,
@@ -921,6 +927,8 @@ def predict_mlb(game: dict):
         "ml_win_prob_away": round(1 - win_prob, 4),
         "ml_win_prob_raw": round(raw_win_prob, 4),
         "bias_correction": round(bias, 3),
+        "models_agree": _models_agree,
+        "model_preds": [round(p, 3) for p in _model_preds],
         "feature_coverage": f"{sum(1 for c in bundle['feature_cols'] if row_data.get(c,0)!=0)}/{len(bundle['feature_cols'])}",
         "rolling_stats_loaded": _rolling_loaded,
         "shap": shap_out,  # All features for verification panel
