@@ -93,6 +93,7 @@ def index():
             "GET  /cron/ncaa-daily?mode=predict|refresh|grade|auto",
             "GET  /cron/ncaa-backfill?season=2026  (backfill elo/form/etc.)",
             "GET  /cron/nba-daily?mode=predict|grade|auto",
+            "GET  /cron/nba-player-update  (hoopR rolling BPM/VORP)",
             "GET  /cron/mlb-daily?mode=predict|grade|auto",
             "GET  /cron/ncaa-ats-record",
         ],
@@ -1862,6 +1863,23 @@ def route_nba_daily():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
     finally:
         _nba_cron_lock = False
+
+
+# ═══════════════════════════════════════════════════════════════
+# ROUTES — NBA Player Impact Update (hoopR rolling BPM/VORP)
+# Schedule: 1:00 AM EST (06:00 UTC) via GitHub Actions
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/cron/nba-player-update", methods=["GET", "POST"])
+def route_nba_player_update():
+    """Download latest hoopR box scores, recompute rolling player impact, upload to Supabase."""
+    try:
+        from nba_player_cron import run_player_update
+        results = run_player_update()
+        return jsonify(results)
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 # ═══════════════════════════════════════════════════════════════

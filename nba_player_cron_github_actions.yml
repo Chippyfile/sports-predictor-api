@@ -1,0 +1,32 @@
+# Add this job to your existing GitHub Actions cron workflow
+# Schedule: 1:00 AM EST = 06:00 UTC (after all NBA games complete)
+#
+# If your existing workflow has separate predict/grade jobs,
+# add this as a new job that runs after grading:
+
+  nba-player-update:
+    runs-on: ubuntu-latest
+    # Run at 1:00 AM EST (06:00 UTC) — after all games complete
+    # Add to existing cron schedule or create separate schedule
+    steps:
+      - name: Update NBA player rolling impact
+        run: |
+          curl -s -X POST "${{ secrets.RAILWAY_URL }}/cron/nba-player-update" \
+            -H "Content-Type: application/json" \
+            --max-time 120
+        env:
+          RAILWAY_URL: ${{ secrets.RAILWAY_URL }}
+
+# ── OR if you want to add it to the existing schedule block: ──
+#
+# In your existing cron trigger, add this time:
+#   - cron: '0 6 * * *'    # 1:00 AM EST = 06:00 UTC
+#
+# Then in the steps, add after the NBA grade step:
+#
+#     - name: NBA player impact update
+#       if: github.event.schedule == '0 6 * * *' || contains(github.event.inputs.job, 'player')
+#       run: |
+#         curl -s -X POST "${{ secrets.RAILWAY_URL }}/cron/nba-player-update" \
+#           -H "Content-Type: application/json" \
+#           --max-time 120
