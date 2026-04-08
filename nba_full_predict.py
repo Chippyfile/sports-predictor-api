@@ -45,6 +45,14 @@ import requests
 import traceback as _tb
 from datetime import datetime, timedelta
 
+# Player impact adjustment (BPM/VORP-based missing player margin shift)
+try:
+    from nba_missing_impact import compute_missing_impact, adjust_prediction as _adjust_impact
+    _HAS_IMPACT = True
+except ImportError:
+    _HAS_IMPACT = False
+    print("  [nba_full_predict] nba_missing_impact not available — impact adjustment disabled")
+
 # ── Constants ──
 ESPN_ABBR_MAP = {
     "GS":"GSW","NY":"NYK","NO":"NOP","SA":"SAS",
@@ -1116,6 +1124,25 @@ def predict_nba_full(game: dict):
     # AUDIT-v3: Always log feature coverage for monitoring
     print(f"  [AUDIT] Features: {nz}/{len(feature_cols)} non-zero ({coverage_pct:.0%}), "
           f"margin={margin:+.2f}, wp={wp:.4f}")
+
+    # ═══ MISSING PLAYER IMPACT ADJUSTMENT (BPM/VORP) ═══
+    # Fetches ESPN injury report, sums missing player margin_impact from nba_player_impact table,
+    # and shifts the predicted margin accordingly. Pre-v28: direct post-prediction adjustment.
+    impact_adj = 0.0
+    impact_data = {}
+    if _HAS_IMPACT:
+        try:
+            impact_data = compute_missing_impact(
+                home_abbr, away_abbr,
+                game_id=game_id, game_date=game_date,
+            )
+            margin, wp, impact_adj = _adjust_impact(margin, wp, impact_data, sigma=7.0)
+            if abs(impact_adj) >= 0.5:
+                diag["sources"].append(f"injury_impact: {impact_adj:+.1f} pts")
+        except Exception as e:
+            diag["warnings"].append(f"impact_adj: {type(e).__name__}: {e}")
+            print(f"  [impact] Error: {e}")
+
     mkt = float(row.get("market_spread_home", 0) or 0)
 
     # Debug: return all features if requested
@@ -1332,4 +1359,9 @@ def predict_nba_full(game: dict):
             "home_losses": row.get("home_losses"),
             "away_losses": row.get("away_losses"),
         },
+        # v28: Missing player impact (BPM/VORP-based)
+        "impact_adjustment": round(impact_adj, 2),
+        "home_out_players": impact_data.get("_home_out", []),
+        "away_out_players": impact_data.get("_away_out", []),
+        "missing_margin_diff": impact_data.get("missing_margin_diff", 0),
     }
