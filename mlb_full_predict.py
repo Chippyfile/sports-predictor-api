@@ -452,6 +452,8 @@ def predict_mlb_full(input_data):
         "ml_win_prob_away": margin_result.get("ml_win_prob_away"),
         "bias_correction": margin_result.get("bias_correction"),
         "feature_coverage": margin_result.get("feature_coverage"),
+        "models_agree": margin_result.get("models_agree"),
+        "model_preds": margin_result.get("model_preds"),
         "rolling_stats_loaded": margin_result.get("rolling_stats_loaded"),
         # O/U model
         "pred_total": ou_result.get("pred_total"),
