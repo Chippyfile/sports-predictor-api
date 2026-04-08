@@ -4,14 +4,14 @@ on:
   schedule:
     # 10:00 AM EST (15:00 UTC) — predict today's games
     - cron: '0 15 * * *'
-    # 11:45 PM EST (04:45 UTC) — grade completed games
+    # 11:45 PM EST (04:45 UTC) — grade completed games + update player impact
     - cron: '45 4 * * *'
   workflow_dispatch:
 
 jobs:
   nba-cron:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Determine mode
         id: mode
@@ -41,3 +41,11 @@ jobs:
               "https://sports-predictor-api-production.up.railway.app/cron/nba-daily?mode=predict")
             echo "$PREDICT" | python3 -m json.tool 2>/dev/null || echo "$PREDICT"
           fi
+
+      - name: Update player rolling impact (hoopR)
+        if: steps.mode.outputs.mode == 'grade'
+        run: |
+          echo "=== Updating player impact (hoopR rolling BPM) ==="
+          RESULT=$(curl -sf --max-time 120 \
+            "https://sports-predictor-api-production.up.railway.app/cron/nba-player-update")
+          echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
