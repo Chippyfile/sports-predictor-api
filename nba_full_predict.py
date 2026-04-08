@@ -1339,6 +1339,7 @@ def predict_nba_full(game: dict):
 
     # ═══ v28 RESIDUAL ATS MODEL (CatBoost×0.7 + Lasso×0.3) ═══
     ats_result = {}
+    residual_margin = margin  # default to v27 margin
     if _HAS_ATS_RESIDUAL:
         try:
             home_out = espn.get("home_out_players") or row.get("home_out_players") or []
@@ -1348,21 +1349,35 @@ def predict_nba_full(game: dict):
                 home_out=home_out, away_out=away_out,
                 market_spread=mkt,
             )
+            # Residual-implied margin: if blend=+6.26 and spread=-23.5,
+            # implied margin = blend - spread = 6.26 - (-23.5) = 29.76
+            res_blend = ats_result.get("ats_residual_blend")
+            if res_blend is not None and abs(mkt) > 0.1:
+                residual_margin = res_blend - mkt
+                ats_result["ats_implied_margin"] = round(residual_margin, 2)
+
             if ats_result.get("ats_units", 0) > 0:
                 diag["sources"].append(
                     f"ATS_v28: {ats_result['ats_side']} {ats_result['ats_units']}u "
-                    f"(blend={ats_result.get('ats_residual_blend', 0):+.1f})")
+                    f"(blend={res_blend:+.1f}, implied={residual_margin:+.1f})")
         except Exception as e:
             diag["warnings"].append(f"ats_residual: {type(e).__name__}: {e}")
             print(f"  [ats_residual] Error: {e}")
 
+    # Use residual-implied margin for display spread and scores
+    display_margin = residual_margin if abs(mkt) > 0.1 else margin
+    pred_total = float(ou_predicted_total or (row.get("home_ppg", 112) + row.get("away_ppg", 112)))
+    display_home_score = round((pred_total + display_margin) / 2, 1)
+    display_away_score = round((pred_total - display_margin) / 2, 1)
+
     return {
         "sport": "NBA", "game_id": game_id,
         "home_team": home_abbr, "away_team": away_abbr, "game_date": game_date,
-        "ml_margin": round(margin, 2),
+        "ml_margin": round(display_margin, 2),
+        "ml_margin_raw": round(margin, 2),  # v27 raw margin (before residual adjustment)
         "ml_win_prob_home": round(wp, 4), "ml_win_prob_away": round(1-wp, 4),
-        "pred_home_score": round(float(row.get("home_ppg",112))+margin/2, 1),
-        "pred_away_score": round(float(row.get("away_ppg",112))-margin/2, 1),
+        "pred_home_score": display_home_score,
+        "pred_away_score": display_away_score,
         "market_spread": mkt, "market_total": float(row.get("market_ou_total",0) or 0),
         "market_home_ml": row.get("home_ml") or row.get("home_moneyline") or None,
         "market_away_ml": row.get("away_ml") or row.get("away_moneyline") or None,
