@@ -53,6 +53,14 @@ except ImportError:
     _HAS_IMPACT = False
     print("  [nba_full_predict] nba_missing_impact not available — impact adjustment disabled")
 
+# v28 Residual ATS model (CatBoost×0.7 + Lasso×0.3)
+try:
+    from nba_ats_residual_serve import predict_ats_residual as _predict_ats_residual
+    _HAS_ATS_RESIDUAL = True
+except ImportError:
+    _HAS_ATS_RESIDUAL = False
+    print("  [nba_full_predict] nba_ats_residual_serve not available — residual ATS disabled")
+
 # ── Constants ──
 ESPN_ABBR_MAP = {
     "GS":"GSW","NY":"NYK","NO":"NOP","SA":"SAS",
@@ -1329,6 +1337,25 @@ def predict_nba_full(game: dict):
         diag["warnings"].append(f"ou_model: {type(e).__name__}: {e}")
         print(f"  [nba_ou] Prediction error: {_tb.format_exc()}")
 
+    # ═══ v28 RESIDUAL ATS MODEL (CatBoost×0.7 + Lasso×0.3) ═══
+    ats_result = {}
+    if _HAS_ATS_RESIDUAL:
+        try:
+            home_out = espn.get("home_out_players") or row.get("home_out_players") or []
+            away_out = espn.get("away_out_players") or row.get("away_out_players") or []
+            ats_result = _predict_ats_residual(
+                feat_df, row, home_abbr, away_abbr,
+                home_out=home_out, away_out=away_out,
+                market_spread=mkt,
+            )
+            if ats_result.get("ats_units", 0) > 0:
+                diag["sources"].append(
+                    f"ATS_v28: {ats_result['ats_side']} {ats_result['ats_units']}u "
+                    f"(blend={ats_result.get('ats_residual_blend', 0):+.1f})")
+        except Exception as e:
+            diag["warnings"].append(f"ats_residual: {type(e).__name__}: {e}")
+            print(f"  [ats_residual] Error: {e}")
+
     return {
         "sport": "NBA", "game_id": game_id,
         "home_team": home_abbr, "away_team": away_abbr, "game_date": game_date,
@@ -1375,4 +1402,12 @@ def predict_nba_full(game: dict):
         "home_out_players": impact_data.get("_home_out", []),
         "away_out_players": impact_data.get("_away_out", []),
         "missing_margin_diff": impact_data.get("missing_margin_diff", 0),
+        # v28: Residual ATS model (CatBoost×0.7 + Lasso×0.3)
+        "ats_side": ats_result.get("ats_side"),
+        "ats_units": ats_result.get("ats_units", 0),
+        "ats_pick_spread": ats_result.get("ats_pick_spread"),
+        "ats_residual_blend": ats_result.get("ats_residual_blend"),
+        "ats_residual_cb": ats_result.get("ats_residual_cb"),
+        "ats_residual_lasso": ats_result.get("ats_residual_lasso"),
+        "ats_models_agree": ats_result.get("ats_models_agree"),
     }

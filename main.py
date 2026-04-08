@@ -1729,31 +1729,24 @@ def route_nba_daily():
                             row["home_out_players"] = pred["home_out_players"]
                         if pred.get("away_out_players"):
                             row["away_out_players"] = pred["away_out_players"]
-                        # ATS signals — with data quality gate + direction flip
-                        mkt_implied = -(mkt_sp or 0)
-                        disagree = abs(margin - mkt_implied)
-                        direction_flip = (margin > 0) != (mkt_implied > 0) and mkt_sp  # model & market disagree on winner
-                        fc_str = pred.get("feature_coverage", "0/1")
-                        try:
-                            fc_num, fc_den = str(fc_str).split("/")
-                            fc_pct = int(fc_num) / max(int(fc_den), 1)
-                        except (ValueError, AttributeError):
-                            fc_pct = 1.0
-                        data_ok = fc_pct >= 0.50
-                        # Direction flip at 3+ pts (64.5% ATS, +23.1% ROI validated)
-                        # Same direction at 4+ pts (62.8% ATS, +19.9% ROI validated)
-                        ats_threshold = 3 if direction_flip else 4
-                        if disagree >= ats_threshold and mkt_sp and data_ok:
-                            row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
-                            row["ats_pick_spread"] = mkt_sp
-                            if direction_flip:
-                                row["ats_units"] = 3 if disagree >= 7 else (2 if disagree >= 5 else 1)
-                            else:
-                                row["ats_units"] = 3 if disagree >= 10 else (2 if disagree >= 7 else 1)
+                        # v28 ATS — residual model (CatBoost×0.7 + Lasso×0.3)
+                        # Prediction already computed: ats_side, ats_units, ats_pick_spread from residual model
+                        if pred.get("ats_side") and pred.get("ats_units", 0) > 0:
+                            row["ats_side"] = pred["ats_side"]
+                            row["ats_units"] = pred["ats_units"]
+                            row["ats_pick_spread"] = pred.get("ats_pick_spread") or mkt_sp
                         else:
                             row["ats_units"] = 0
-                            if disagree >= ats_threshold and mkt_sp and not data_ok:
-                                print(f"  [cron/nba] ⚠ {g['away_abbr']}@{g['home_abbr']}: {disagree:.1f}pt edge SUPPRESSED — low data ({fc_str})")
+                        # Store residual model metadata
+                        if pred.get("ats_residual_blend") is not None:
+                            row["ats_residual_blend"] = pred["ats_residual_blend"]
+                        if pred.get("ats_residual_cb") is not None:
+                            row["ats_residual_cb"] = pred["ats_residual_cb"]
+                        if pred.get("ats_residual_lasso") is not None:
+                            row["ats_residual_lasso"] = pred["ats_residual_lasso"]
+                        if pred.get("ats_models_agree") is not None:
+                            row["ats_models_agree"] = pred["ats_models_agree"]
+                        row["ats_disagree"] = abs(pred.get("ats_residual_blend", 0) or 0)
 
                         # Save: PATCH existing, POST new
                         if g["game_id"] in existing_ids:
@@ -1766,7 +1759,8 @@ def route_nba_daily():
                                 json=row, timeout=15)
                         _impact_str = f", impact={pred.get('impact_adjustment', 0):+.1f}" if pred.get("impact_adjustment") else ""
                         _out_str = f", out={pred.get('home_out_players', [])}" if pred.get("home_out_players") else ""
-                        print(f"  [cron/nba] ✅ {g['away_abbr']}@{g['home_abbr']}: margin={margin:+.1f}, wp={wp:.3f}{_impact_str}{_out_str}")
+                        _ats_str = f", ATS={pred.get('ats_side')} {pred.get('ats_units', 0)}u (blend={pred.get('ats_residual_blend', 0):+.1f})" if pred.get("ats_units", 0) > 0 else ""
+                        print(f"  [cron/nba] ✅ {g['away_abbr']}@{g['home_abbr']}: margin={margin:+.1f}, wp={wp:.3f}{_ats_str}{_impact_str}{_out_str}")
                         return "ok"
                     return "empty"
                 except Exception as e:
