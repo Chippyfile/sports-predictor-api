@@ -162,7 +162,7 @@ def predict_mlb_ou_v2(game, bundle):
     # ── Determine pick and tier using thresholds from bundle ──
     under_thresholds = bundle.get("under_thresholds", {1: -0.3, 2: -0.3, 3: -0.8})
     ats_threshold = bundle.get("ats_threshold", -0.8)
-    over_thresholds = bundle.get("over_thresholds", {1: 0.5})
+    over_thresholds = bundle.get("over_thresholds", {1: 1.5, 2: 2.5})
     
     ou_pick = None
     ou_tier = 0
