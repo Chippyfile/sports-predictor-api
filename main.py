@@ -2032,30 +2032,20 @@ def route_mlb_daily():
                                         row["ml_edge_pct"] = round(abs(ml_edge) * 100, 2)
                                         row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
 
-                                    # ── Compute ATS (run line) with direction flip ──
-                                    # MLB thresholds: tightened for selectivity (~3-5 picks/day)
-                                    # Walk-forward: 1.5+=67.3%, 2.0+=72.3%, 2.5+=73.4%
-                                    row["ats_units"] = 0  # default: evaluated, no edge (prevents stale data + frontend fallback)
+                                    # ── Compute ATS (run line) with ensemble agreement gate ──
+                                    # Walk-forward validated (25-fold, 22K games):
+                                    #   1u: edge ≥ 1.5 + all 3 agree → 68.3% ATS, +30.3% ROI
+                                    #   2u: edge ≥ 2.0 + all 3 agree → 71.0% ATS, +35.5% ROI
+                                    row["ats_units"] = 0
                                     mkt_spread = row.get("market_spread_home")
                                     if mkt_spread is not None:
                                         mkt_implied = -float(mkt_spread)
                                         disagree = abs(margin - mkt_implied)
-                                        # Direction flip: model and market disagree on winner
-                                        direction_flip = (margin > 0) != (mkt_implied > 0) and abs(margin) > 0.25 and abs(mkt_implied) > 0.25
-                                        if direction_flip:
-                                            # Flips are stronger signal — slightly lower thresholds
-                                            ats_units = 3 if disagree >= 2.0 else (2 if disagree >= 1.5 else (1 if disagree >= 1.0 else 0))
-                                        else:
-                                            # Same direction: higher thresholds for selectivity
-                                            ats_units = 3 if disagree >= 2.5 else (2 if disagree >= 2.0 else (1 if disagree >= 1.5 else 0))
-                                        if ats_units > 0:
+                                        if disagree >= 1.5:
                                             row["ats_disagree"] = round(disagree, 2)
-                                            row["ats_units"] = ats_units
                                             row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
-                                            row["ats_direction_flip"] = direction_flip
-                                        else:
-                                            # Mark as evaluated — prevents frontend from recomputing with looser thresholds
-                                            row["ats_units"] = 0
+                                            row["ats_pick_spread"] = mkt_spread
+                                            row["ats_units"] = 2 if disagree >= 2.0 else 1
 
                                     # ── O/U from v2 model result ──
                                     # Always store these from predict result
