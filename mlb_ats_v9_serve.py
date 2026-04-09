@@ -22,7 +22,7 @@ MLB_API = "https://statsapi.mlb.com/api/v1"
 _v9_bundle = None
 _v9_load_error = ""
 _batter_cache = {}
-_team_rolling_cache = {}  # team_id -> list of recent lineup wOBAs
+_team_rolling_cache = {}  # team_abbr -> rolling_lineup_woba (float)
 _ump_profile_cache = {}   # ump_name -> home_win_pct
 
 # ── Team ID <-> Abbreviation ──
@@ -131,62 +131,32 @@ def _fetch_batter_season_stats(season=2026):
         return {}
 
 
-def _fetch_team_rolling_lineup(team_id, n_recent=10):
-    """Fetch recent boxscores for a team to compute rolling lineup wOBA.
-    Uses 10 games to match training pipeline. Cached per session."""
+def _load_team_rolling_cache():
+    """Load all 30 teams' pre-cached rolling lineup wOBA from Supabase. Once per session."""
     global _team_rolling_cache
-    if team_id in _team_rolling_cache:
-        return _team_rolling_cache[team_id]
-
+    if _team_rolling_cache:
+        return
     try:
-        from datetime import datetime, timedelta
-        end = datetime.now().strftime("%Y-%m-%d")
-        start = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        r = requests.get(f"{MLB_API}/schedule", params={
-            "sportId": 1, "teamId": team_id,
-            "startDate": start, "endDate": end,
-            "gameType": "R",
-        }, timeout=10)
-        if not r.ok:
-            _team_rolling_cache[team_id] = []
-            return []
-
-        # Get completed game_pks (most recent last)
-        game_pks = []
-        for d in r.json().get("dates", []):
-            for g in d.get("games", []):
-                if g.get("status", {}).get("abstractGameCode") == "F":
-                    game_pks.append(g["gamePk"])
-
-        if not game_pks:
-            _team_rolling_cache[team_id] = []
-            return []
-
-        # Only fetch last N boxscores to limit API calls
-        batter_stats = _fetch_batter_season_stats()
-        lineup_wobas = []
-
-        for gpk in game_pks[-n_recent:]:
-            try:
-                r2 = requests.get(f"{MLB_API}/game/{gpk}/boxscore", timeout=8)
-                if not r2.ok:
-                    continue
-                data = r2.json()
-                home_id = data.get("teams", {}).get("home", {}).get("team", {}).get("id")
-                side = "home" if home_id == team_id else "away"
-                order = data.get("teams", {}).get(side, {}).get("battingOrder", [])[:9]
-                if order:
-                    wobas = [batter_stats.get(pid, {}).get("woba", 0.315) for pid in order]
-                    lineup_wobas.append(np.mean(wobas))
-            except Exception:
-                continue
-
-        _team_rolling_cache[team_id] = lineup_wobas
-        return lineup_wobas
+        from config import SUPABASE_URL, SUPABASE_KEY
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/mlb_team_lineup_rolling?select=team_abbr,rolling_lineup_woba",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            timeout=10,
+        )
+        if r.ok:
+            for row in r.json():
+                _team_rolling_cache[row["team_abbr"]] = float(row.get("rolling_lineup_woba", 0) or 0)
+            print(f"  [mlb_v9] Loaded {len(_team_rolling_cache)} team lineup rolling from Supabase")
+        else:
+            print(f"  [mlb_v9] Lineup rolling fetch failed: {r.status_code}")
     except Exception as e:
-        print(f"  [mlb_v9] Rolling lineup error for team {team_id}: {e}")
-        _team_rolling_cache[team_id] = []
-        return []
+        print(f"  [mlb_v9] Lineup rolling error: {e}")
+
+
+def _get_team_rolling_woba(abbr):
+    """Get pre-cached rolling lineup wOBA for a team. Returns float or None."""
+    _load_team_rolling_cache()
+    return _team_rolling_cache.get(abbr)
 
 
 def fetch_pregame_lineups(game_pk=None, game_date=None, home_abbr=None, away_abbr=None):
@@ -273,14 +243,9 @@ def compute_lineup_features(home_lineup, away_lineup, batter_stats,
         feats[f"{prefix}_matched"] = matched
 
         # ── Rolling comparison (lineup change signal) ──
-        team_id = _ABBR_TO_TEAM_ID.get(abbr)
-        if team_id:
-            history = _fetch_team_rolling_lineup(team_id)
-            if len(history) >= 3:
-                rolling_avg = np.mean(history)
-                feats[f"{prefix}_woba_vs_rolling"] = round(lineup_woba - rolling_avg, 4)
-            else:
-                feats[f"{prefix}_woba_vs_rolling"] = 0
+        rolling_avg = _get_team_rolling_woba(abbr)
+        if rolling_avg and rolling_avg > 0.1:
+            feats[f"{prefix}_woba_vs_rolling"] = round(lineup_woba - rolling_avg, 4)
         else:
             feats[f"{prefix}_woba_vs_rolling"] = 0
 

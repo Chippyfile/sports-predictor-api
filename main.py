@@ -2221,6 +2221,19 @@ def route_mlb_daily():
                 print(f"  [cron/mlb] rolling stats error: {e}")
                 results["rolling_stats"] = f"error: {str(e)[:100]}"
 
+        # Refresh lineup rolling wOBA (pre-cache for v9 serve)
+        if graded > 0:
+            try:
+                from mlb_lineup_cron import refresh_all_teams as _mlb_lineup_refresh
+                print("  [cron/mlb] Refreshing lineup rolling wOBA...")
+                lineup_result = _mlb_lineup_refresh()
+                results["lineup_rolling"] = lineup_result
+            except ImportError:
+                results["lineup_rolling"] = "skipped (module not deployed)"
+            except Exception as e:
+                print(f"  [cron/mlb] lineup rolling error: {e}")
+                results["lineup_rolling"] = f"error: {str(e)[:100]}"
+
         # ABS challenge data collection (runs after grading)
         try:
             from mlb_abs_collector import collect_date_range, build_team_stats, build_ump_stats, upload_to_supabase
@@ -2258,6 +2271,23 @@ def route_mlb_rolling():
         return jsonify({"status": "complete", "duration_sec": round(_time.time() - start, 1)})
     except ImportError:
         return jsonify({"error": "mlb_rolling_stats.py not deployed"}), 500
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/cron/mlb-lineup-rolling", methods=["GET", "POST"])
+def route_mlb_lineup_rolling():
+    """Manually refresh MLB lineup rolling wOBA."""
+    import time as _time
+    start = _time.time()
+    try:
+        from mlb_lineup_cron import refresh_all_teams
+        result = refresh_all_teams()
+        result["duration_sec"] = round(_time.time() - start, 1)
+        return jsonify(result)
+    except ImportError:
+        return jsonify({"error": "mlb_lineup_cron.py not deployed"}), 500
     except Exception as e:
         import traceback
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
