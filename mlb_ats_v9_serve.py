@@ -277,6 +277,7 @@ def predict_mlb_ats_v9(game_features, lineup_features=None, market_spread=0):
     result = {
         "ats_v9_side": None, "ats_v9_units": 0, "ats_v9_blend": None,
         "ats_v9_cb": None, "ats_v9_lasso": None, "ats_v9_models_agree": None,
+        "lineup_available": bool(lineup_features),
     }
 
     if not market_spread or abs(market_spread) < 0.1:
@@ -292,6 +293,11 @@ def predict_mlb_ats_v9(game_features, lineup_features=None, market_spread=0):
         feature_sets = bundle.get("feature_sets", [])
         model_names = bundle.get("model_names", [])
         weights = bundle.get("model_weights", [0.2, 0.8])
+
+        # Read tier thresholds from bundle (set at deploy time)
+        tiers = bundle.get("tiers", {1: {"edge_min": 2.0}, 2: {"edge_min": 2.5}})
+        tier_1_min = tiers.get(1, {}).get("edge_min", 2.0)
+        tier_2_min = tiers.get(2, {}).get("edge_min", 2.5)
 
         if len(models) < 2:
             return result
@@ -323,9 +329,10 @@ def predict_mlb_ats_v9(game_features, lineup_features=None, market_spread=0):
         mkt_implied = -market_spread
         edge = abs(margin - mkt_implied)
 
-        if edge >= 2.5 and agree:
+        # Tiers from bundle
+        if edge >= tier_2_min and agree:
             units = 2
-        elif edge >= 2.0 and agree:
+        elif edge >= tier_1_min and agree:
             units = 1
         else:
             units = 0
@@ -338,7 +345,7 @@ def predict_mlb_ats_v9(game_features, lineup_features=None, market_spread=0):
         n_nz = sum(1 for f in feature_sets[1] if abs(all_feats.get(f, 0) or 0) > 1e-6)
         print(f"  [mlb_v9] margin={margin:+.2f}, edge={edge:.2f}, cb={cb_pred:+.2f}, "
               f"lasso={lasso_pred:+.2f}, agree={agree}, units={units}, "
-              f"coverage={n_nz}/{len(feature_sets[1])}")
+              f"coverage={n_nz}/{len(feature_sets[1])}, lineup={'Y' if lineup_features else 'N'}")
 
     except Exception as e:
         print(f"  [mlb_v9] Error: {e}")

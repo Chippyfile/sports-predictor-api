@@ -1,0 +1,16 @@
+k_bb_diff
+woba_x_park
+woba_diff
+market_spread
+sp_relative_fip_diff
+sp_ip_diff
+lineup_delta_sum
+home_woba_vs_rolling
+away_woba_vs_rolling
+is_warm
+first_inn_rate_diff
+opp_adj_form_diff
+ump_run_env
+sp_form_combined
+lineup_delta_diff
+lineup_consistency_diff

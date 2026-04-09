@@ -527,6 +527,7 @@ def predict_mlb_full(input_data):
         "ats_v9_lasso": v9_result.get("ats_v9_lasso"),
         "ats_v9_models_agree": v9_result.get("ats_v9_models_agree"),
         "ats_v9_edge": v9_result.get("ats_v9_edge"),
+        "lineup_available": v9_result.get("lineup_available", False),
     }
 
     return combined

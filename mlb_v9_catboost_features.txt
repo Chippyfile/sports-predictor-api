@@ -1,0 +1,11 @@
+k_bb_diff
+woba_x_park
+woba_diff
+market_spread
+sp_relative_fip_diff
+away_woba_vs_rolling
+is_warm
+sp_form_combined
+lineup_ops_diff
+lineup_delta_diff
+lineup_total_top3

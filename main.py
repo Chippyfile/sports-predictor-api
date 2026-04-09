@@ -1749,6 +1749,13 @@ def route_nba_daily():
                             row["ats_models_agree"] = pred["ats_models_agree"]
                         row["ats_disagree"] = abs(pred.get("ats_residual_blend", 0) or 0)
 
+                        # ── Data availability flags ──
+                        row["lineup_available"] = bool(
+                            pred.get("lineup_value_diff") or
+                            pred.get("home_out_players") or
+                            pred.get("away_out_players")
+                        )
+
                         # Save: PATCH existing, POST new
                         if g["game_id"] in existing_ids:
                             _req.patch(f"{SUPABASE_URL}/rest/v1/nba_predictions?game_id=eq.{g['game_id']}",
@@ -2069,6 +2076,9 @@ def route_mlb_daily():
                                     row["ou_tier"] = res.get("ou_tier")
                                     row["ou_units"] = res.get("ou_units")
                                     row["market_ou_total"] = res.get("market_ou_total") or row.get("market_ou_total")
+
+                                    # ── Data availability flags ──
+                                    row["lineup_available"] = res.get("lineup_available", False)
 
                                     # ── Save: PATCH existing or POST new ──
                                     if existing_info:
