@@ -1823,7 +1823,8 @@ def route_nba_daily():
                     pred_total = (matched.get("pred_home_score") or 0) + (matched.get("pred_away_score") or 0)
                     ou_correct = None
                     if ou_line and total != ou_line:
-                        ou_correct = "OVER" if (total > ou_line) == (pred_total > ou_line) else "UNDER"
+                        # Store actual result side — DailyBets compares ou_correct vs pick side
+                        ou_correct = "OVER" if total > ou_line else "UNDER"
                     patch = {"actual_home_score": home_score, "actual_away_score": away_score,
                              "result_entered": True, "ml_correct": ml_correct, "rl_correct": rl_correct, "ou_correct": ou_correct}
                     # ATS pick grading (did our specific bet win?)
@@ -2195,9 +2196,8 @@ def route_mlb_daily():
                     ou_correct = None
                     if ou_line and pred_total and total != float(ou_line):
                         actual_over = total > float(ou_line)
-                        model_over = pred_total > float(ou_line)
-                        if actual_over == model_over:
-                            ou_correct = "OVER" if actual_over else "UNDER"
+                        # Always record the actual side — DailyBets compares ou_correct vs pick side
+                        ou_correct = "OVER" if actual_over else "UNDER"
                     elif ou_line and total == float(ou_line):
                         ou_correct = "PUSH"
                     # ATS pick — compute model margin from pred runs or spread_home
