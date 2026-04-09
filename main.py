@@ -1926,6 +1926,9 @@ def route_mlb_daily():
         # ── PREDICT: Create server-side predictions for today ──
         predicted = 0
         patched = 0
+        predict_errors = []
+        games_found = 0
+        games_skipped = 0
         if mode in ("predict", "auto"):
             try:
                 from mlb_full_predict import predict_mlb_full
@@ -1951,11 +1954,14 @@ def route_mlb_daily():
                         for g in dt.get("games", []):
                             status = g.get("status", {}).get("abstractGameState", "")
                             if status in ("Final", "Live"):
+                                games_skipped += 1
                                 continue
                             gpk = g.get("gamePk")
+                            games_found += 1
                             existing_info = existing_map.get(str(gpk))
                             # Skip if already has ATS computed (fully predicted)
                             if existing_info and existing_info.get("has_ats"):
+                                games_skipped += 1
                                 continue
                             try:
                                 res = predict_mlb_full({"game_id": gpk, "game_date": today_est})
@@ -2103,13 +2109,26 @@ def route_mlb_daily():
                                             print(f"  [cron/mlb] Predicted {res['away_team']}@{res['home_team']}: m={margin:.1f} wp={wp:.3f} ats={row.get('ats_units', 0)}u")
                                         else:
                                             print(f"  [cron/mlb] POST failed {gpk}: {sv.status_code} {sv.text[:100]}")
+                                else:
+                                    err_msg = res.get("error", "no result") if res else "None returned"
+                                    print(f"  [cron/mlb] predict_mlb_full error for {gpk}: {err_msg}")
+                                    if len(predict_errors) < 3:
+                                        predict_errors.append(f"{gpk}: {err_msg}")
                             except Exception as e:
                                 print(f"  [cron/mlb] Predict error {gpk}: {e}")
+                                if len(predict_errors) < 3:
+                                    predict_errors.append(f"{gpk}: {str(e)[:150]}")
+                else:
+                    results["sched_status"] = sched.status_code if sched else "no_response"
             except Exception as e:
                 print(f"  [cron/mlb] Predict mode error: {e}")
                 results["predict_error"] = str(e)[:200]
             results["predicted"] = predicted
             results["patched"] = patched
+            results["games_found"] = games_found
+            results["games_skipped"] = games_skipped
+            if predict_errors:
+                results["predict_errors"] = predict_errors
 
         # ── GRADE: Fill final scores ──
         graded = 0
