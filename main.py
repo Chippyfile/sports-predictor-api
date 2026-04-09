@@ -2221,6 +2221,21 @@ def route_mlb_daily():
                 print(f"  [cron/mlb] rolling stats error: {e}")
                 results["rolling_stats"] = f"error: {str(e)[:100]}"
 
+        # ABS challenge data collection (runs after grading)
+        try:
+            from mlb_abs_collector import collect_date_range, build_team_stats, build_ump_stats, upload_to_supabase
+            abs_games = collect_date_range("2026-03-25", today_est)
+            if abs_games:
+                upload_to_supabase(build_team_stats(abs_games), build_ump_stats(abs_games))
+                results["abs_data"] = f"updated ({len(abs_games)} games)"
+            else:
+                results["abs_data"] = "no games"
+        except ImportError:
+            results["abs_data"] = "skipped (module not deployed)"
+        except Exception as e:
+            print(f"  [cron/mlb] ABS collection error: {e}")
+            results["abs_data"] = f"error: {str(e)[:100]}"
+
         duration = _time.time() - start
         results["duration_sec"] = round(duration, 1)
         results["status"] = "complete"
