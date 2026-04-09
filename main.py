@@ -2109,6 +2109,8 @@ def route_mlb_daily():
                                             print(f"  [cron/mlb] Predicted {res['away_team']}@{res['home_team']}: m={margin:.1f} wp={wp:.3f} ats={row.get('ats_units', 0)}u")
                                         else:
                                             print(f"  [cron/mlb] POST failed {gpk}: {sv.status_code} {sv.text[:100]}")
+                                            if len(predict_errors) < 3:
+                                                predict_errors.append(f"POST {gpk}: {sv.status_code} {sv.text[:150]}")
                                 else:
                                     err_msg = res.get("error", "no result") if res else "None returned"
                                     print(f"  [cron/mlb] predict_mlb_full error for {gpk}: {err_msg}")
