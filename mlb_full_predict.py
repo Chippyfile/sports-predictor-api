@@ -438,11 +438,55 @@ def predict_mlb_full(input_data):
         payload["sp_form_combined"] = 0.0
         print(f"  [mlb_full] sp_form failed: {e} — defaulting to 0")
 
-    # ── Step 5: Call both models ──
+    # ── Step 4d: Compute lineup features EARLY (needed by BOTH O/U v3 and ATS v9) ──
+    lineup_feats = {}
+    if _HAS_V9:
+        try:
+            season = int(game_date[:4]) if game_date else datetime.now().year
+            batter_stats = _fetch_batter_season_stats(season)
+            game_pk = game.get("gamePk")
+            h_lineup, a_lineup = fetch_pregame_lineups(
+                game_pk=game_pk, game_date=game_date,
+                home_abbr=home_abbr, away_abbr=away_abbr)
+            if h_lineup and a_lineup and batter_stats:
+                lineup_feats = compute_lineup_features(
+                    h_lineup, a_lineup, batter_stats,
+                    home_abbr=home_abbr, away_abbr=away_abbr)
+                print(f"  [mlb_full] Lineup: {lineup_feats.get('home_matched',0)}/{lineup_feats.get('away_matched',0)} matched")
+            else:
+                print(f"  [mlb_full] No lineups available — lineup features = 0")
+        except Exception as e:
+            print(f"  [mlb_full] Lineup fetch error: {e}")
+
+    # Pass lineup features to O/U payload (v3 uses these)
+    payload["lineup_delta_sum"] = lineup_feats.get("lineup_delta_sum", 0)
+    payload["lineup_total_top3"] = lineup_feats.get("lineup_total_top3", 0)
+    payload["lineup_total_woba"] = lineup_feats.get("lineup_total_woba", 0)
+
+    # ── Step 4e: Look up ump career RPG for O/U v3 ──
+    try:
+        from config import SUPABASE_URL, SUPABASE_KEY
+        import requests as _req
+        ump_career = _req.get(
+            f"{SUPABASE_URL}/rest/v1/mlb_ump_career?ump_name=eq.{ump_name}&select=career_rpg",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            timeout=5).json() if ump_name else []
+        if ump_career and ump_career[0].get("career_rpg"):
+            payload["ump_career_rpg"] = float(ump_career[0]["career_rpg"])
+            payload["ump_career_bb"] = 6.5  # TODO: add to table
+            print(f"  [mlb_full] Ump {ump_name}: career_rpg={payload['ump_career_rpg']:.2f}")
+        else:
+            payload["ump_career_rpg"] = 8.5
+            payload["ump_career_bb"] = 6.5
+    except Exception:
+        payload["ump_career_rpg"] = 8.5
+        payload["ump_career_bb"] = 6.5
+
+    # ── Step 5: Call margin + O/U models ──
     margin_result = predict_mlb(payload)
     ou_result = predict_mlb_ou(payload)
 
-    # ── Step 5b: v9 ATS model (with lineup features) ──
+    # ── Step 5b: v9 ATS model (reuse lineup features from step 4d) ──
     v9_result = {}
     if _HAS_V9:
         try:
@@ -455,22 +499,6 @@ def predict_mlb_full(input_data):
             game_features["ump_home_win_pct"] = ump_hwp
             if ump_hwp > 0:
                 print(f"  [mlb_v9] Ump {ump_name}: home_win_pct={ump_hwp:.3f}")
-
-            # Fetch lineups using game_pk (most reliable) or date+teams
-            lineup_feats = {}
-            season = int(game_date[:4]) if game_date else datetime.now().year
-            batter_stats = _fetch_batter_season_stats(season)
-            game_pk = game.get("gamePk")
-            h_lineup, a_lineup = fetch_pregame_lineups(
-                game_pk=game_pk, game_date=game_date,
-                home_abbr=home_abbr, away_abbr=away_abbr)
-            if h_lineup and a_lineup and batter_stats:
-                lineup_feats = compute_lineup_features(
-                    h_lineup, a_lineup, batter_stats,
-                    home_abbr=home_abbr, away_abbr=away_abbr)
-                print(f"  [mlb_v9] Lineup: {lineup_feats.get('home_matched',0)}/{lineup_feats.get('away_matched',0)} matched")
-            else:
-                print(f"  [mlb_v9] No lineups available — lineup features = 0")
 
             v9_result = predict_mlb_ats_v9(
                 game_features, lineup_feats,
@@ -533,7 +561,10 @@ def predict_mlb_full(input_data):
         "ats_v9_lasso": v9_result.get("ats_v9_lasso"),
         "ats_v9_models_agree": v9_result.get("ats_v9_models_agree"),
         "ats_v9_edge": v9_result.get("ats_v9_edge"),
-        "lineup_available": v9_result.get("lineup_available", False),
+        "lineup_available": bool(lineup_feats),
+        "lineup_delta_sum": lineup_feats.get("lineup_delta_sum", 0),
+        # O/U v3 extra fields
+        "ou_res_avg": ou_result.get("ou_res_avg") or ou_result.get("residual"),
     }
 
     return combined
