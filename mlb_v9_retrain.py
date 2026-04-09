@@ -41,13 +41,34 @@ V8_FEATURES = [
     "scoring_entropy_combined", "first_inn_rate_combined",
 ]
 
-# v9 adds lineup features
-LINEUP_FEATURES = [
+# v9 adds lineup features (raw + advanced)
+LINEUP_RAW = [
     "lineup_woba_diff",
     "lineup_ops_diff",
     "lineup_iso_diff",
     "top3_woba_diff",
 ]
+
+LINEUP_ADVANCED = [
+    # CHANGE signals (key batter missing proxy)
+    "lineup_delta_diff",       # r=0.034 with margin (ATS)
+    "lineup_delta_sum",        # r=0.144 with total (O/U) ⭐
+    "home_woba_vs_rolling",    # r=0.106 with total (O/U) ⭐
+    "away_woba_vs_rolling",    # r=0.112 with total (O/U) ⭐
+    # STRUCTURE signals
+    "lineup_bot3_diff",        # r=0.074 with margin (ATS) ⭐
+    "lineup_top_heavy_diff",
+    "lineup_consistency_diff",
+    # FORM signals
+    "lineup_trend_diff",
+    "lineup_trend_sum",
+    # O/U totals
+    "lineup_total_woba",
+    "lineup_total_iso",
+    "lineup_total_top3",
+]
+
+LINEUP_FEATURES = LINEUP_RAW + LINEUP_ADVANCED
 
 
 def load_data():
@@ -56,36 +77,42 @@ def load_data():
     df = _load()
     X = build_features(df)
 
-    # Merge lineup backfill
+    # ── Merge raw lineup features ──
     lineup_file = "mlb_lineup_backfill.parquet"
     if not os.path.exists(lineup_file):
-        print(f"  ERROR: {lineup_file} not found — run mlb_lineup_backfill.py first")
+        print(f"  ERROR: {lineup_file} not found")
         sys.exit(1)
 
     lineup = pd.read_parquet(lineup_file)
     print(f"  Lineup data: {len(lineup)} games")
 
-    # Match on game_pk if available, else on date+teams
-    if "game_pk" in df.columns and "game_pk" in lineup.columns:
-        lineup_cols = ["game_pk"] + LINEUP_FEATURES
-        lineup_sub = lineup[lineup_cols].drop_duplicates(subset="game_pk", keep="first")
-        df["game_pk"] = pd.to_numeric(df["game_pk"], errors="coerce")
-        lineup_sub["game_pk"] = pd.to_numeric(lineup_sub["game_pk"], errors="coerce")
-        merged = df[["game_pk"]].merge(lineup_sub, on="game_pk", how="left")
-        for col in LINEUP_FEATURES:
-            X[col] = merged[col].fillna(0).values
-        matched = merged[LINEUP_FEATURES[0]].notna().sum()
-    else:
-        # Fallback: match on date + home team
-        lineup["_key"] = lineup["game_date"] + "|" + lineup["home_abbr"]
-        df["_key"] = df["game_date"].astype(str) + "|" + df.get("home_team", df.get("home_abbr", "")).astype(str)
-        lineup_sub = lineup[["_key"] + LINEUP_FEATURES].drop_duplicates(subset="_key", keep="first")
-        merged = df[["_key"]].merge(lineup_sub, on="_key", how="left")
-        for col in LINEUP_FEATURES:
-            X[col] = merged[col].fillna(0).values
-        matched = merged[LINEUP_FEATURES[0]].notna().sum()
+    lineup["_key"] = lineup["game_date"] + "|" + lineup["home_abbr"]
+    df["_key"] = df["game_date"].astype(str) + "|" + df["home_team"].astype(str)
 
-    print(f"  Lineup matched: {matched}/{len(df)} ({matched/len(df)*100:.1f}%)")
+    raw_cols = [c for c in LINEUP_RAW if c in lineup.columns]
+    if raw_cols:
+        lineup_sub = lineup[["_key"] + raw_cols].drop_duplicates(subset="_key", keep="first")
+        merged = df[["_key"]].merge(lineup_sub, on="_key", how="left")
+        for col in raw_cols:
+            X[col] = merged[col].fillna(0).values
+        print(f"  Raw lineup matched: {merged[raw_cols[0]].notna().sum()}/{len(df)}")
+
+    # ── Merge advanced lineup features ──
+    adv_file = "mlb_lineup_features_advanced.parquet"
+    if os.path.exists(adv_file):
+        adv = pd.read_parquet(adv_file)
+        adv["_key"] = adv["game_date"] + "|" + adv["home_abbr"]
+        adv_cols = [c for c in LINEUP_ADVANCED if c in adv.columns]
+        if adv_cols:
+            adv_sub = adv[["_key"] + adv_cols].drop_duplicates(subset="_key", keep="first")
+            merged_adv = df[["_key"]].merge(adv_sub, on="_key", how="left")
+            for col in adv_cols:
+                X[col] = merged_adv[col].fillna(0).values
+            print(f"  Advanced lineup matched: {merged_adv[adv_cols[0]].notna().sum()}/{len(df)}")
+    else:
+        print(f"  WARNING: {adv_file} not found — advanced features zero")
+        for col in LINEUP_ADVANCED:
+            X[col] = 0
 
     y = (df["actual_home_runs"].astype(float) - df["actual_away_runs"].astype(float)).values
     spreads = X["market_spread"].values if "market_spread" in X.columns else np.zeros(len(X))

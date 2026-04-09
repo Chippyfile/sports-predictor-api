@@ -18,6 +18,14 @@ import traceback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# v9 ATS model (CatBoost×0.8 + Lasso×0.2 with lineup features)
+try:
+    from mlb_ats_v9_serve import predict_mlb_ats_v9, compute_lineup_features, _fetch_batter_season_stats, fetch_pregame_lineups
+    _HAS_V9 = True
+except ImportError:
+    _HAS_V9 = False
+    print("  [mlb_full] mlb_ats_v9_serve not available — v9 ATS disabled")
+
 MLB_API = "https://statsapi.mlb.com/api/v1"
 REQUEST_TIMEOUT = 10
 
@@ -434,6 +442,37 @@ def predict_mlb_full(input_data):
     margin_result = predict_mlb(payload)
     ou_result = predict_mlb_ou(payload)
 
+    # ── Step 5b: v9 ATS model (with lineup features) ──
+    v9_result = {}
+    if _HAS_V9:
+        try:
+            game_features = margin_result.get("_features", {})
+            game_features["sp_form_combined"] = payload.get("sp_form_combined", 0)
+            game_features["market_spread"] = payload.get("market_spread_home", 0)
+
+            # Fetch lineups using game_pk (most reliable) or date+teams
+            lineup_feats = {}
+            season = int(game_date[:4]) if game_date else datetime.now().year
+            batter_stats = _fetch_batter_season_stats(season)
+            game_pk = game.get("gamePk")
+            h_lineup, a_lineup = fetch_pregame_lineups(
+                game_pk=game_pk, game_date=game_date,
+                home_abbr=home_abbr, away_abbr=away_abbr)
+            if h_lineup and a_lineup and batter_stats:
+                lineup_feats = compute_lineup_features(
+                    h_lineup, a_lineup, batter_stats,
+                    home_abbr=home_abbr, away_abbr=away_abbr)
+                print(f"  [mlb_v9] Lineup: {lineup_feats.get('home_matched',0)}/{lineup_feats.get('away_matched',0)} matched")
+            else:
+                print(f"  [mlb_v9] No lineups available — lineup features = 0")
+
+            v9_result = predict_mlb_ats_v9(
+                game_features, lineup_feats,
+                market_spread=float(payload.get("market_spread_home", 0) or 0))
+        except Exception as e:
+            print(f"  [mlb_v9] Error: {e}")
+            traceback.print_exc()
+
     # ── Step 6: Combine results ──
     combined = {
         "sport": "MLB",
@@ -480,6 +519,14 @@ def predict_mlb_full(input_data):
         # SHAP
         "shap": margin_result.get("shap", [])[:10],
         "model_meta": margin_result.get("model_meta"),
+        # v9 ATS (lineup-enhanced)
+        "ats_v9_side": v9_result.get("ats_v9_side"),
+        "ats_v9_units": v9_result.get("ats_v9_units", 0),
+        "ats_v9_blend": v9_result.get("ats_v9_blend"),
+        "ats_v9_cb": v9_result.get("ats_v9_cb"),
+        "ats_v9_lasso": v9_result.get("ats_v9_lasso"),
+        "ats_v9_models_agree": v9_result.get("ats_v9_models_agree"),
+        "ats_v9_edge": v9_result.get("ats_v9_edge"),
     }
 
     return combined

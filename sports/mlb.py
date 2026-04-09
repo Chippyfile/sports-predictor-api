@@ -941,6 +941,7 @@ def predict_mlb(game: dict):
             "model_type": bundle["model_type"],
             "has_isotonic": bundle.get("isotonic") is not None,
         },
+        "_features": row_data,  # expose for v9 ATS model
     }
 
 

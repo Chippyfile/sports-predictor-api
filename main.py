@@ -2032,22 +2032,33 @@ def route_mlb_daily():
                                         row["ml_edge_pct"] = round(abs(ml_edge) * 100, 2)
                                         row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
 
-                                    # ── Compute ATS (run line) with ensemble agreement gate ──
-                                    # Walk-forward validated (25-fold, 22K games):
-                                    #   1u: edge ≥ 1.5 + all 3 agree → 68.3% ATS, +30.3% ROI
-                                    #   2u: edge ≥ 2.0 + all 3 agree → 71.0% ATS, +35.5% ROI
+                                    # ── ATS: prefer v9 (lineup-enhanced), fall back to v8 ──
+                                    # v9: CB(d8)×0.8+Lasso×0.2, 2022+ training, lineup features
+                                    #   1u: edge ≥ 2.0 + agree → 75.2% ATS
+                                    #   2u: edge ≥ 2.5 + agree → 76.7% ATS
                                     row["ats_units"] = 0
-                                    mkt_spread = row.get("market_spread_home")
-                                    models_agree = res.get("models_agree", True)
-                                    if mkt_spread is not None:
-                                        mkt_implied = -float(mkt_spread)
-                                        disagree = abs(margin - mkt_implied)
-                                        if disagree >= 1.5 and models_agree:
-                                            row["ats_disagree"] = round(disagree, 2)
-                                            row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
-                                            row["ats_pick_spread"] = mkt_spread
-                                            row["ats_units"] = 2 if disagree >= 2.0 else 1
-                                            row["ats_models_agree"] = models_agree
+                                    if res.get("ats_v9_units", 0) > 0:
+                                        # v9 produced a pick
+                                        row["ats_side"] = res["ats_v9_side"]
+                                        row["ats_units"] = res["ats_v9_units"]
+                                        row["ats_disagree"] = res.get("ats_v9_edge", 0)
+                                        row["ats_pick_spread"] = row.get("market_spread_home")
+                                        row["ats_models_agree"] = res.get("ats_v9_models_agree", True)
+                                        row["ats_model_version"] = "v9"
+                                    else:
+                                        # v9 no pick — fall back to v8 agreement gate
+                                        mkt_spread = row.get("market_spread_home")
+                                        models_agree = res.get("models_agree", True)
+                                        if mkt_spread is not None:
+                                            mkt_implied = -float(mkt_spread)
+                                            disagree = abs(margin - mkt_implied)
+                                            if disagree >= 2.0 and models_agree:
+                                                row["ats_disagree"] = round(disagree, 2)
+                                                row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
+                                                row["ats_pick_spread"] = mkt_spread
+                                                row["ats_units"] = 2 if disagree >= 2.5 else 1
+                                                row["ats_models_agree"] = models_agree
+                                                row["ats_model_version"] = "v8_fallback"
 
                                     # ── O/U from v2 model result ──
                                     # Always store these from predict result
