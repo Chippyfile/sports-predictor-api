@@ -23,6 +23,7 @@ _v9_bundle = None
 _v9_load_error = ""
 _batter_cache = {}
 _team_rolling_cache = {}  # team_id -> list of recent lineup wOBAs
+_ump_profile_cache = {}   # ump_name -> home_win_pct
 
 # ── Team ID <-> Abbreviation ──
 _TEAM_ID_TO_ABBR = {
@@ -54,6 +55,33 @@ def _load_v9_model():
         _v9_load_error = str(e)
         print(f"  [mlb_v9] Load error: {e}")
         return None
+
+
+def fetch_ump_home_win_pct(ump_name):
+    """Look up umpire's career home_win_pct. Cached per session."""
+    global _ump_profile_cache
+    if not ump_name:
+        return 0.0
+
+    # Load all profiles on first call
+    if not _ump_profile_cache:
+        try:
+            from config import SUPABASE_URL, SUPABASE_KEY
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/mlb_ump_career?select=ump_name,home_win_pct",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                timeout=10,
+            )
+            if r.ok:
+                for row in r.json():
+                    _ump_profile_cache[row["ump_name"]] = float(row.get("home_win_pct", 0) or 0)
+                print(f"  [mlb_v9] Loaded {len(_ump_profile_cache)} ump career profiles")
+            else:
+                print(f"  [mlb_v9] Ump profile fetch failed: {r.status_code}")
+        except Exception as e:
+            print(f"  [mlb_v9] Ump profile error: {e}")
+
+    return _ump_profile_cache.get(ump_name, 0.0)
 
 
 def _fetch_batter_season_stats(season=2026):

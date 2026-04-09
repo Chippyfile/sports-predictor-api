@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # v9 ATS model (CatBoost×0.8 + Lasso×0.2 with lineup features)
 try:
-    from mlb_ats_v9_serve import predict_mlb_ats_v9, compute_lineup_features, _fetch_batter_season_stats, fetch_pregame_lineups
+    from mlb_ats_v9_serve import predict_mlb_ats_v9, compute_lineup_features, _fetch_batter_season_stats, fetch_pregame_lineups, fetch_ump_home_win_pct
     _HAS_V9 = True
 except ImportError:
     _HAS_V9 = False
@@ -449,6 +449,12 @@ def predict_mlb_full(input_data):
             game_features = margin_result.get("_features", {})
             game_features["sp_form_combined"] = payload.get("sp_form_combined", 0)
             game_features["market_spread"] = payload.get("market_spread_home", 0)
+
+            # Ump home win pct (v9.1 — CatBoost feature)
+            ump_hwp = fetch_ump_home_win_pct(ump_name)
+            game_features["ump_home_win_pct"] = ump_hwp
+            if ump_hwp > 0:
+                print(f"  [mlb_v9] Ump {ump_name}: home_win_pct={ump_hwp:.3f}")
 
             # Fetch lineups using game_pk (most reliable) or date+teams
             lineup_feats = {}
