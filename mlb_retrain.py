@@ -248,17 +248,31 @@ def load_data(refresh=False):
     if n_covid > 0:
         print(f"  Dropped {n_covid} games from 2020 (COVID shortened season)")
 
-    # ── Filter: skip games before April 15 of any season ──
-    # Early-season stats are unreliable (small sample, cold weather, roster flux)
-    n_before = len(df)
-    apr15_mask = ~((df["game_date_dt"].dt.month < 4) |
-                   ((df["game_date_dt"].dt.month == 4) & (df["game_date_dt"].dt.day < 15)))
-    df = df[apr15_mask].copy()
-    n_early = n_before - len(df)
-    if n_early > 0:
-        print(f"  Dropped {n_early} games before April 15 (early-season noise)")
+    # ── Early-season games INCLUDED (clamps handle OOD inputs for train/serve parity) ──
+    # Previously filtered Apr 1-14; now kept so model learns "uncertain = small edge".
 
     df = df.drop(columns=["game_date_dt"])
+
+    # ── Clamp early-season stats to training-realistic ranges ──
+    # Same clamps applied at serve time in mlb_full_predict.py step 4f.
+    # This ensures the model trains on identical feature distributions.
+    _CLAMPS = {
+        "home_sp_fip": (2.5, 6.5), "away_sp_fip": (2.5, 6.5),
+        "home_fip": (2.5, 6.5), "away_fip": (2.5, 6.5),
+        "home_bullpen_era": (2.5, 6.5), "away_bullpen_era": (2.5, 6.5),
+        "home_woba": (0.260, 0.370), "away_woba": (0.260, 0.370),
+        "home_k9": (5.0, 13.0), "away_k9": (5.0, 13.0),
+        "home_bb9": (1.5, 5.5), "away_bb9": (1.5, 5.5),
+    }
+    clamped_count = 0
+    for col, (lo, hi) in _CLAMPS.items():
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce")
+            before = ((vals < lo) | (vals > hi)).sum()
+            df[col] = vals.clip(lo, hi)
+            clamped_count += before
+    if clamped_count > 0:
+        print(f"  Clamped {clamped_count} out-of-range values (early-season + outliers)")
 
     # Season weight
     if "season_weight" not in df.columns or df["season_weight"].isna().all():
