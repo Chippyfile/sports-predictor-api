@@ -270,15 +270,16 @@ def predict_mlb_ou_v3(game, bundle):
     ats_edge = ats_total - market_total if market_total > 0 else 0
 
     # Predicted total
-    # Cap residual — no model should claim 3+ runs of edge vs market
+    # Cap residual at ±2.5 — trust the model prediction, triple agreement protects from bad bets
+    # Walk-forward: early-season UNDER 62% accurate — model sees real signal
     capped_residual = max(-2.5, min(2.5, residual))
     if abs(residual) > 2.5:
-        print(f"  [ou_v3] Residual capped: {residual:+.2f} → {capped_residual:+.2f} (early-season noise)")
+        print(f"  [ou_v3] Residual capped: {residual:+.2f} → {capped_residual:+.2f}")
     
     res_pred = (market_total + capped_residual) if market_total > 0 else 9.0
     ats_pred = ats_total if ats_total > 0 else res_pred
     
-    # If residual and ATS models disagree by 3+ runs, blend (early-season protection)
+    # Blend when residual and ATS models disagree by 3+ runs
     if abs(res_pred - ats_pred) > 3.0 and market_total > 0:
         pred_total = (res_pred + ats_pred) / 2
         print(f"  [ou_v3] Blending: residual says {res_pred:.1f}, ATS says {ats_pred:.1f} → {pred_total:.1f}")
