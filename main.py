@@ -2076,6 +2076,38 @@ def route_mlb_daily():
                                         row["ml_edge_pct"] = round(abs(ml_edge) * 100, 2)
                                         row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
 
+                                    # ── ML bet signal (raw margin + ATS agreement) ──
+                                    # Walk-forward validated (check highest tier first):
+                                    #   2u: |margin| 2.5+ standalone → 81.4% ML (167 games)
+                                    #   2u: |margin| 1.5+ AND ATS edge 1.0+ agree → 81.9% ML (171 games)
+                                    #   1u: |margin| 1.0+ AND ATS edge 1.0+ agree → 80.4% ML (189 games)
+                                    row["ml_bet_units"] = 0
+                                    abs_margin = abs(margin)
+                                    margin_side_home = margin > 0
+
+                                    # Compute ATS edge direction agreement
+                                    mkt_spread_ml = row.get("market_spread_home")
+                                    ats_edge_val = 0
+                                    ats_agrees = False
+                                    if mkt_spread_ml is not None:
+                                        mkt_implied = -float(mkt_spread_ml)
+                                        ats_edge_val = abs(margin - mkt_implied)
+                                        ats_side_home = margin > mkt_implied
+                                        ats_agrees = (margin_side_home == ats_side_home) and ats_edge_val >= 1.0
+
+                                    # 2u: margin 2.5+ standalone (81.4%)
+                                    if abs_margin >= 2.5:
+                                        row["ml_bet_units"] = 2
+                                        row["ml_bet_side"] = "HOME" if margin_side_home else "AWAY"
+                                    # 2u: margin 1.5+ AND ATS edge 1.0+ same direction (81.9%)
+                                    elif abs_margin >= 1.5 and ats_agrees:
+                                        row["ml_bet_units"] = 2
+                                        row["ml_bet_side"] = "HOME" if margin_side_home else "AWAY"
+                                    # 1u: margin 1.0+ AND ATS edge 1.0+ same direction (80.4%)
+                                    elif abs_margin >= 1.0 and ats_agrees:
+                                        row["ml_bet_units"] = 1
+                                        row["ml_bet_side"] = "HOME" if margin_side_home else "AWAY"
+
                                     # ── ATS: prefer v9 (lineup-enhanced), fall back to v8 ──
                                     # v9.1 Sniper: CB(d8)×0.8+Lasso×0.2, 2022+, ump_home_win_pct
                                     #   1u: edge ≥ 2.5 + agree → 75.7% ATS
@@ -2173,7 +2205,8 @@ def route_mlb_daily():
                 f"{SUPABASE_URL}/rest/v1/mlb_predictions?game_date=eq.{check_date}"
                 f"&result_entered=eq.false"
                 f"&select=id,game_pk,home_team,away_team,win_pct_home,spread_home,"
-                f"market_spread_home,market_ou_total,ou_total,pred_home_runs,pred_away_runs,ml_ou_pred_total",
+                f"market_spread_home,market_ou_total,ou_total,pred_home_runs,pred_away_runs,ml_ou_pred_total,"
+                f"ats_units,ats_side,ml_bet_units,ml_bet_side",
                 headers=headers, timeout=15)
             pending = pending_resp.json() if pending_resp.ok else []
             if not isinstance(pending, list) or not pending:
@@ -2248,6 +2281,12 @@ def route_mlb_daily():
                     }
                     if ats_correct is not None:
                         patch["ats_correct"] = ats_correct
+                    # ML bet grading (margin-based picks only)
+                    if matched.get("ml_bet_units") and matched["ml_bet_units"] > 0 and matched.get("ml_bet_side"):
+                        if home_score != away_score:
+                            home_won = home_score > away_score
+                            picked_home = matched["ml_bet_side"] == "HOME"
+                            patch["ml_bet_correct"] = picked_home == home_won
                     _req.patch(f"{SUPABASE_URL}/rest/v1/mlb_predictions?id=eq.{matched['id']}",
                         headers={**headers, "Content-Type": "application/json"}, json=patch, timeout=15)
                     graded += 1
