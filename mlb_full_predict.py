@@ -487,6 +487,23 @@ def predict_mlb_full(input_data):
         payload["ump_career_rpg"] = 8.5
         payload["ump_career_bb"] = 6.5
 
+    # ── Step 4f: Clamp early-season stats to training data range ──
+    # Training drops games before Apr 15 — these ranges match what models have seen.
+    # Prevents out-of-distribution extrapolation (FIP 1.5 → model breaks).
+    _CLAMPS = {
+        "home_sp_fip": (2.5, 6.5), "away_sp_fip": (2.5, 6.5),
+        "home_bullpen_era": (2.5, 6.5), "away_bullpen_era": (2.5, 6.5),
+        "home_woba": (0.260, 0.370), "away_woba": (0.260, 0.370),
+        "home_k9": (5.0, 13.0), "away_k9": (5.0, 13.0),
+        "home_bb9": (1.5, 5.5), "away_bb9": (1.5, 5.5),
+    }
+    for key, (lo, hi) in _CLAMPS.items():
+        raw = float(payload.get(key, 0) or 0)
+        if raw > 0 and (raw < lo or raw > hi):
+            clamped = max(lo, min(hi, raw))
+            print(f"  [mlb_full] Clamped {key}: {raw:.3f} → {clamped:.3f}")
+            payload[key] = clamped
+
     # ── Step 5: Call margin + O/U models ──
     margin_result = predict_mlb(payload)
     ou_result = predict_mlb_ou(payload)
