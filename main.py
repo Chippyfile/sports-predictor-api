@@ -1098,15 +1098,17 @@ def route_ncaa_daily():
                                 timeout=30
                             )
                         else:
-                            # POST new row with merge-duplicates
+                            # POST new row (no merge-duplicates — it silently fails)
                             upsert_resp = _req.post(
                                 f"{SUPABASE_URL}/rest/v1/ncaa_predictions",
-                                headers={**headers, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"},
+                                headers={**headers, "Content-Type": "application/json"},
                                 json=row,
                                 timeout=30
                             )
                         if upsert_resp.status_code >= 400:
+                            errors += 1
                             print(f"  [cron/ncaa] ⚠ Supabase save failed {game_id}: {upsert_resp.status_code} {upsert_resp.text[:200]}")
+                            continue
 
                         if mode == "predict":
                             predicted += 1
@@ -1124,7 +1126,7 @@ def route_ncaa_daily():
         elif mode == "grade":
             # Grade all ungraded games (today and recent days)
             graded = 0
-            for days_ago in range(0, 3):  # check today + last 2 days
+            for days_ago in range(0, 7):  # check today + last 6 days
                 check_date = (now_est - timedelta(days=days_ago)).strftime("%Y-%m-%d")
                 pending = _req.get(
                     f"{SUPABASE_URL}/rest/v1/ncaa_predictions?game_date=eq.{check_date}&result_entered=eq.false"
@@ -1758,13 +1760,19 @@ def route_nba_daily():
 
                         # Save: PATCH existing, POST new
                         if g["game_id"] in existing_ids:
-                            _req.patch(f"{SUPABASE_URL}/rest/v1/nba_predictions?game_id=eq.{g['game_id']}",
+                            sv = _req.patch(f"{SUPABASE_URL}/rest/v1/nba_predictions?game_id=eq.{g['game_id']}",
                                 headers={**headers, "Content-Type": "application/json"},
                                 json=row, timeout=15)
+                            if not sv.ok:
+                                print(f"  [cron/nba] PATCH failed {g['game_id']}: {sv.status_code} {sv.text[:150]}")
+                                return "error"
                         else:
-                            _req.post(f"{SUPABASE_URL}/rest/v1/nba_predictions",
+                            sv = _req.post(f"{SUPABASE_URL}/rest/v1/nba_predictions",
                                 headers={**headers, "Content-Type": "application/json"},
                                 json=row, timeout=15)
+                            if not sv.ok:
+                                print(f"  [cron/nba] POST failed {g['game_id']}: {sv.status_code} {sv.text[:150]}")
+                                return "error"
                         _impact_str = f", impact={pred.get('impact_adjustment', 0):+.1f}" if pred.get("impact_adjustment") else ""
                         _out_str = f", out={pred.get('home_out_players', [])}" if pred.get("home_out_players") else ""
                         _ats_str = f", ATS={pred.get('ats_side')} {pred.get('ats_units', 0)}u (blend={pred.get('ats_residual_blend', 0):+.1f})" if pred.get("ats_units", 0) > 0 else ""
@@ -1788,7 +1796,7 @@ def route_nba_daily():
         elif mode == "grade":
             from nba_game_stats import process_completed_game
             graded, stats_extracted = 0, 0
-            for days_ago in range(0, 3):
+            for days_ago in range(0, 7):
                 check_date = (now_est - timedelta(days=days_ago)).strftime("%Y-%m-%d")
                 compact_date = check_date.replace("-", "")
                 pending = _req.get(
@@ -1910,7 +1918,7 @@ def route_mlb_daily():
     _mlb_cron_lock = True
     start = _time.time()
     try:
-        mode = request.args.get("mode", "grade")
+        mode = request.args.get("mode", "auto")
         now_utc = datetime.now(timezone.utc)
         now_est = now_utc - timedelta(hours=5)
         today_est = now_est.strftime("%Y-%m-%d")
@@ -2135,7 +2143,7 @@ def route_mlb_daily():
 
         # ── GRADE: Fill final scores ──
         graded = 0
-        for days_ago in range(0, 4):
+        for days_ago in range(0, 7):
             check_date = (now_est - timedelta(days=days_ago)).strftime("%Y-%m-%d")
             pending_resp = _req.get(
                 f"{SUPABASE_URL}/rest/v1/mlb_predictions?game_date=eq.{check_date}"
@@ -2194,7 +2202,7 @@ def route_mlb_daily():
                         else float(matched.get("pred_home_runs") or 0) + float(matched.get("pred_away_runs") or 0)
                     )
                     ou_correct = None
-                    if ou_line and pred_total and total != float(ou_line):
+                    if ou_line and total != float(ou_line):
                         actual_over = total > float(ou_line)
                         # Always record the actual side — DailyBets compares ou_correct vs pick side
                         ou_correct = "OVER" if actual_over else "UNDER"
@@ -2258,7 +2266,8 @@ def route_mlb_daily():
         # ABS challenge data collection (runs after grading)
         try:
             from mlb_abs_collector import collect_date_range, build_team_stats, build_ump_stats, upload_to_supabase
-            abs_games = collect_date_range("2026-03-25", today_est)
+            season_start = f"{now_est.year}-03-20"  # ABS data from spring training onward
+            abs_games = collect_date_range(season_start, today_est)
             if abs_games:
                 upload_to_supabase(build_team_stats(abs_games), build_ump_stats(abs_games))
                 results["abs_data"] = f"updated ({len(abs_games)} games)"
