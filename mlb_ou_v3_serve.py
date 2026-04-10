@@ -57,6 +57,87 @@ def fetch_pitcher_recent_form(pitcher_id, n_starts=3, timeout=8):
         return None
 
 
+def _parse_ip(ip_str):
+    """Parse innings pitched string (e.g., '6.1' = 6.333)."""
+    ip_str = str(ip_str or "0")
+    if "." in ip_str:
+        whole, frac = ip_str.split(".")
+        return int(whole) + int(frac) / 3.0
+    return float(ip_str)
+
+
+def fetch_rolling_fip(pitcher_id, target_ip=60, timeout=8):
+    """Compute rolling FIP over last ~60 IP, crossing into previous season if needed.
+    
+    FIP = (13*HR + 3*BB - 2*K) / IP + 3.10
+    
+    Returns: float FIP, or None if insufficient data.
+    """
+    if not pitcher_id:
+        return None
+    try:
+        from datetime import datetime
+        season = datetime.now().year
+        all_starts = []
+
+        # Fetch current + previous season game logs
+        for yr in [season, season - 1]:
+            url = (f"{MLB_API}/people/{pitcher_id}/stats"
+                   f"?stats=gameLog&season={yr}&group=pitching")
+            r = requests.get(url, timeout=timeout)
+            if not r.ok:
+                continue
+            splits = r.json().get("stats", [{}])[0].get("splits", [])
+            # Reverse so most recent first
+            for s in reversed(splits):
+                stat = s.get("stat", {})
+                if int(stat.get("gamesStarted", 0)) > 0:
+                    ip = _parse_ip(stat.get("inningsPitched", "0"))
+                    if ip <= 0:
+                        continue
+                    all_starts.append({
+                        "ip": ip,
+                        "hr": float(stat.get("homeRuns", 0)),
+                        "bb": float(stat.get("baseOnBalls", 0)),
+                        "k": float(stat.get("strikeOuts", 0)),
+                        "season": yr,
+                    })
+
+        if not all_starts:
+            return None
+
+        # Accumulate starts until we hit target IP
+        total_ip = 0
+        total_hr = 0
+        total_bb = 0
+        total_k = 0
+        n_starts = 0
+
+        for s in all_starts:
+            total_ip += s["ip"]
+            total_hr += s["hr"]
+            total_bb += s["bb"]
+            total_k += s["k"]
+            n_starts += 1
+            if total_ip >= target_ip:
+                break
+
+        if total_ip < 10:  # Need at least 10 IP for any signal
+            return None
+
+        fip = (13 * total_hr + 3 * total_bb - 2 * total_k) / total_ip + 3.10
+        fip = max(1.5, min(7.0, fip))  # Sanity clamp
+
+        print(f"  [ou_v3] Rolling FIP for {pitcher_id}: {fip:.2f} "
+              f"({n_starts} starts, {total_ip:.0f} IP, "
+              f"spans {'2 seasons' if any(s['season'] != all_starts[0]['season'] for s in all_starts[:n_starts]) else '1 season'})")
+        return round(fip, 3)
+
+    except Exception as e:
+        print(f"  [ou_v3] Rolling FIP fetch failed for {pitcher_id}: {e}")
+        return None
+
+
 def compute_sp_form_combined(home_pitcher_id, away_pitcher_id, home_fip, away_fip):
     """sp_form_combined = sum of (recent ERA - season FIP) for both starters."""
     sp_form = 0.0
@@ -76,75 +157,31 @@ def compute_sp_form_combined(home_pitcher_id, away_pitcher_id, home_fip, away_fi
 def _build_feature_dict(game, sp_form):
     """Build full feature dict for all 3 components.
     
-    Early-season regression: all stats regressed toward league means based on
-    sample size. With 12 games, ~40% actual + 60% league avg. By game 80, ~85% actual.
-    Prevents early-season noise from producing absurd predictions.
+    Clamps early-season stats to training data range (Apr 15+ full-season values).
+    Training never sees FIP < 2.5 or bullpen ERA < 2.5, so we clamp to prevent
+    out-of-distribution extrapolation while preserving real signal.
     """
     _f = lambda k, d=0: float(game.get(k, d) or d)
 
-    # ── Regression helper ──
-    # adjusted = (actual * n + league_avg * k) / (n + k)
-    # k = stabilization constant (games needed for stat to be ~50% signal)
-    def _regress(actual, league_avg, n_games, stabilization):
-        if n_games <= 0:
-            return league_avg
-        return (actual * n_games + league_avg * stabilization) / (n_games + stabilization)
-
-    # League averages (2022-2025 training data means)
-    LG_FIP = 4.00
-    LG_BP_ERA = 4.10
-    LG_WOBA = 0.315
-    LG_K9 = 8.5
-    LG_BB9 = 3.2
-
-    # Stabilization constants (games for stat to be ~50% signal)
-    STAB_FIP = 15       # ~12-15 starts for starter FIP
-    STAB_BP = 30        # ~30 team games for bullpen ERA
-    STAB_WOBA = 30      # ~30 team games for team wOBA
-    STAB_K_BB = 15      # ~15 starts for K/BB rates
-
-    # Team games played (proxy for sample size)
-    home_games = _f("home_games", 0)
-    away_games = _f("away_games", 0)
-
     market_total = _f("market_ou_total", 0) or _f("market_total", 0)
 
-    # ── Regressed stats ──
-    raw_home_fip = _f("home_sp_fip", LG_FIP) or LG_FIP
-    raw_away_fip = _f("away_sp_fip", LG_FIP) or LG_FIP
-    home_fip = max(2.5, min(6.5, _regress(raw_home_fip, LG_FIP, home_games / 5, STAB_FIP)))  # /5 = approx starts
-    away_fip = max(2.5, min(6.5, _regress(raw_away_fip, LG_FIP, away_games / 5, STAB_FIP)))
-
-    raw_home_bp = _f("home_bullpen_era", LG_BP_ERA)
-    raw_away_bp = _f("away_bullpen_era", LG_BP_ERA)
-    home_bp = _regress(raw_home_bp, LG_BP_ERA, home_games, STAB_BP)
-    away_bp = _regress(raw_away_bp, LG_BP_ERA, away_games, STAB_BP)
-
-    raw_home_woba = _f("home_woba", LG_WOBA)
-    raw_away_woba = _f("away_woba", LG_WOBA)
-    home_woba = _regress(raw_home_woba, LG_WOBA, home_games, STAB_WOBA)
-    away_woba = _regress(raw_away_woba, LG_WOBA, away_games, STAB_WOBA)
-
-    raw_home_k9 = _f("home_k9", LG_K9)
-    raw_away_k9 = _f("away_k9", LG_K9)
-    raw_home_bb9 = _f("home_bb9", LG_BB9)
-    raw_away_bb9 = _f("away_bb9", LG_BB9)
-    home_k9 = _regress(raw_home_k9, LG_K9, home_games / 5, STAB_K_BB)
-    away_k9 = _regress(raw_away_k9, LG_K9, away_games / 5, STAB_K_BB)
-    home_bb9 = _regress(raw_home_bb9, LG_BB9, home_games / 5, STAB_K_BB)
-    away_bb9 = _regress(raw_away_bb9, LG_BB9, away_games / 5, STAB_K_BB)
-
+    # Clamp to training data range — preserves "elite" vs "bad" signal
+    home_fip = max(2.5, min(6.5, _f("home_sp_fip", 4.0) or 4.0))
+    away_fip = max(2.5, min(6.5, _f("away_sp_fip", 4.0) or 4.0))
+    home_woba = max(0.260, min(0.370, _f("home_woba", 0.315)))
+    away_woba = max(0.260, min(0.370, _f("away_woba", 0.315)))
+    home_bp = max(2.5, min(6.5, _f("home_bullpen_era", 4.10)))
+    away_bp = max(2.5, min(6.5, _f("away_bullpen_era", 4.10)))
+    home_k9 = max(5.0, min(13.0, _f("home_k9", 8.5)))
+    away_k9 = max(5.0, min(13.0, _f("away_k9", 8.5)))
+    home_bb9 = max(1.5, min(5.5, _f("home_bb9", 3.2)))
+    away_bb9 = max(1.5, min(5.5, _f("away_bb9", 3.2)))
     home_sp_ip = _f("home_sp_ip", 5.5)
     away_sp_ip = _f("away_sp_ip", 5.5)
     park_factor = _f("park_factor", 1.0)
     temp_f = _f("temp_f", 72)
     wind_mph = _f("wind_mph", 5)
     wind_out = int(_f("wind_out_flag", 0))
-
-    if home_games > 0 and home_games <= 30:
-        print(f"  [ou_v3] Early-season regression: {int(home_games)} games → "
-              f"FIP {raw_home_fip:.2f}→{home_fip:.2f}, wOBA {raw_home_woba:.3f}→{home_woba:.3f}, "
-              f"BP {raw_home_bp:.2f}→{home_bp:.2f}")
 
     return {
         "market_total": market_total if market_total > 0 else 9.0,
@@ -187,14 +224,29 @@ def predict_mlb_ou_v3(game, bundle):
 
     # ── Early-season regression applied in _build_feature_dict (no hard cutoff needed) ──
 
-    # Compute sp_form_combined
+    # ── Compute rolling 60-IP FIP (crosses into last season for early-year pitchers) ──
+    home_rolling_fip = fetch_rolling_fip(game.get("home_starter_id"))
+    away_rolling_fip = fetch_rolling_fip(game.get("away_starter_id"))
+    
+    # sp_form uses SEASON FIP as baseline (measures recent vs season average)
+    # Save originals before override
+    orig_home_fip = game.get("home_sp_fip", 4.25)
+    orig_away_fip = game.get("away_sp_fip", 4.25)
+    
+    # Override season FIP with rolling FIP for feature dict (fip_combined/fip_diff)
+    if home_rolling_fip is not None:
+        game["home_sp_fip"] = home_rolling_fip
+    if away_rolling_fip is not None:
+        game["away_sp_fip"] = away_rolling_fip
+
+    # Compute sp_form_combined using ORIGINAL season FIP as baseline
     sp_form = game.get("sp_form_combined")
     if sp_form is None:
         sp_form = compute_sp_form_combined(
             game.get("home_starter_id"),
             game.get("away_starter_id"),
-            game.get("home_sp_fip", 4.25),
-            game.get("away_sp_fip", 4.25),
+            orig_home_fip,
+            orig_away_fip,
         )
 
     feats = _build_feature_dict(game, sp_form)
