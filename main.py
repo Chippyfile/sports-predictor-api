@@ -1947,15 +1947,19 @@ def route_mlb_daily():
                 # Fetch existing predictions WITH id for PATCH support
                 existing_resp = _req.get(
                     f"{SUPABASE_URL}/rest/v1/mlb_predictions?game_date=eq.{today_est}"
-                    f"&select=id,game_pk,ats_units",
+                    f"&select=id,game_pk,ats_units,market_ou_total,market_home_ml,market_away_ml,market_spread_home",
                     headers=headers, timeout=15)
-                existing_map = {}  # game_pk → {id, has_ats}
+                existing_map = {}  # game_pk → {id, has_ats, market_*}
                 if existing_resp.ok:
                     for r in existing_resp.json():
                         if r.get("game_pk"):
                             existing_map[str(r["game_pk"])] = {
                                 "id": r["id"],
                                 "has_ats": r.get("ats_units") is not None,
+                                "market_ou_total": r.get("market_ou_total"),
+                                "market_home_ml": r.get("market_home_ml"),
+                                "market_away_ml": r.get("market_away_ml"),
+                                "market_spread_home": r.get("market_spread_home"),
                             }
 
                 if sched.ok:
@@ -1974,7 +1978,13 @@ def route_mlb_daily():
                                 games_skipped += 1
                                 continue
                             try:
-                                res = predict_mlb_full({"game_id": gpk, "game_date": today_est})
+                                predict_input = {"game_id": gpk, "game_date": today_est}
+                                # Pass stored market data so predict doesn't rely on ESPN (may be stripped)
+                                if existing_info:
+                                    for mf in ["market_ou_total", "market_home_ml", "market_away_ml", "market_spread_home"]:
+                                        if existing_info.get(mf):
+                                            predict_input[mf] = existing_info[mf]
+                                res = predict_mlb_full(predict_input)
                                 if res and "error" not in res:
                                     margin = res.get("ml_margin", 0) or 0
                                     wp = res.get("ml_win_prob_home", 0.5) or 0.5
@@ -2042,6 +2052,17 @@ def route_mlb_daily():
                                                     break
                                     except Exception as e:
                                         print(f"  [cron/mlb] ESPN odds error: {e}")
+
+                                    # ── Preserve existing market data if ESPN didn't return new odds ──
+                                    if existing_info:
+                                        if not row.get("market_ou_total") and existing_info.get("market_ou_total"):
+                                            row["market_ou_total"] = existing_info["market_ou_total"]
+                                        if not row.get("market_home_ml") and existing_info.get("market_home_ml"):
+                                            row["market_home_ml"] = existing_info["market_home_ml"]
+                                        if not row.get("market_away_ml") and existing_info.get("market_away_ml"):
+                                            row["market_away_ml"] = existing_info["market_away_ml"]
+                                        if not row.get("market_spread_home") and existing_info.get("market_spread_home"):
+                                            row["market_spread_home"] = existing_info["market_spread_home"]
 
                                     # ── Compute ML edge ──
                                     hml = row.get("market_home_ml")

@@ -421,7 +421,14 @@ def predict_mlb_full(input_data):
             if payload["market_ou_total"]:
                 print(f"  [mlb_full] Market: O/U={payload['market_ou_total']}, RL={payload.get('market_spread_home')}, ML={payload.get('market_home_ml')}/{payload.get('market_away_ml')}")
             else:
-                print(f"  [mlb_full] No ESPN odds found for {away_abbr}@{home_abbr}")
+                # Fall back to market data passed in from caller (e.g., stored in Supabase)
+                for mf in ["market_ou_total", "market_home_ml", "market_away_ml", "market_spread_home"]:
+                    if input_data.get(mf) and not payload.get(mf):
+                        payload[mf] = input_data[mf]
+                if payload.get("market_ou_total"):
+                    print(f"  [mlb_full] Market (from stored): O/U={payload['market_ou_total']}, RL={payload.get('market_spread_home')}")
+                else:
+                    print(f"  [mlb_full] No ESPN odds found for {away_abbr}@{home_abbr}")
     except Exception as e:
         print(f"  [mlb_full] ESPN odds fetch failed: {e}")
 
