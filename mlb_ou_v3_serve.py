@@ -78,8 +78,8 @@ def _build_feature_dict(game, sp_form):
     _f = lambda k, d=0: float(game.get(k, d) or d)
 
     market_total = _f("market_ou_total", 0) or _f("market_total", 0)
-    home_fip = _f("home_sp_fip", 4.25) or _f("home_fip", 4.25)
-    away_fip = _f("away_sp_fip", 4.25) or _f("away_fip", 4.25)
+    home_fip = max(2.5, min(6.5, _f("home_sp_fip", 4.25) or _f("home_fip", 4.25)))
+    away_fip = max(2.5, min(6.5, _f("away_sp_fip", 4.25) or _f("away_fip", 4.25)))
     home_woba = _f("home_woba", 0.315)
     away_woba = _f("away_woba", 0.315)
     home_bp = _f("home_bullpen_era", 4.10)
