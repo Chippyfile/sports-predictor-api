@@ -2233,21 +2233,14 @@ def route_mlb_daily():
                     elif ou_line and total == float(ou_line):
                         ou_correct = "PUSH"
                     # ATS pick — compute model margin from pred runs or spread_home
+                    # ATS pick grading — ONLY for games where we made a pick
                     ats_correct = None
-                    model_margin = matched.get("spread_home")
-                    if model_margin is None:
-                        # Fallback: compute from predicted runs
-                        phr = matched.get("pred_home_runs")
-                        par = matched.get("pred_away_runs")
-                        if phr is not None and par is not None:
-                            model_margin = float(phr) - float(par)
-                    if model_margin is not None and mkt_spread is not None:
-                        disagree = abs(float(model_margin) - (-float(mkt_spread)))
-                        if disagree >= 0.5:
-                            model_side_home = float(model_margin) > (-float(mkt_spread))
-                            ats_r = margin + float(mkt_spread)
-                            if ats_r != 0:
-                                ats_correct = model_side_home == (ats_r > 0)
+                    if matched.get("ats_units") and matched["ats_units"] > 0 and matched.get("ats_side") and mkt_spread is not None:
+                        ats_r = margin + float(mkt_spread)
+                        if ats_r != 0:
+                            home_covered = ats_r > 0
+                            picked_home = matched["ats_side"] == "HOME"
+                            ats_correct = picked_home == home_covered
                     patch = {
                         "actual_home_runs": home_score, "actual_away_runs": away_score,
                         "result_entered": True, "ml_correct": ml_correct,
