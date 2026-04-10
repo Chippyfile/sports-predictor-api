@@ -438,22 +438,7 @@ def predict_mlb_full(input_data):
         payload["sp_form_combined"] = 0.0
         print(f"  [mlb_full] sp_form failed: {e} — defaulting to 0")
 
-    # ── Step 4c2: Compute rolling 60-IP FIP (used by ALL models — fixes early-season noise) ──
-    # Note: sp_form_combined (step 4c) already computed using season FIP — correct
-    orig_home_fip = payload.get("home_sp_fip")
-    orig_away_fip = payload.get("away_sp_fip")
-    try:
-        from mlb_ou_v3_serve import fetch_rolling_fip
-        home_rfip = fetch_rolling_fip(h_starter_id)
-        away_rfip = fetch_rolling_fip(a_starter_id)
-        if home_rfip is not None:
-            payload["home_rolling_fip"] = home_rfip
-            payload["home_sp_fip"] = home_rfip  # Override for ATS + O/U models
-        if away_rfip is not None:
-            payload["away_rolling_fip"] = away_rfip
-            payload["away_sp_fip"] = away_rfip  # Override for ATS + O/U models
-    except Exception as e:
-        print(f"  [mlb_full] Rolling FIP failed: {e}")
+    # ── (Rolling FIP tested: r≈0 vs residual — market already prices it. Clamps handle edge cases.) ──
 
     # ── Step 4d: Compute lineup features EARLY (needed by BOTH O/U v3 and ATS v9) ──
     lineup_feats = {}

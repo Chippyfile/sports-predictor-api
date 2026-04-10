@@ -224,33 +224,17 @@ def predict_mlb_ou_v3(game, bundle):
 
     # ── Early-season regression applied in _build_feature_dict (no hard cutoff needed) ──
 
-    # ── Use rolling 60-IP FIP (pre-computed in mlb_full_predict, or fetch live as fallback) ──
-    home_rolling_fip = game.get("home_rolling_fip")
-    away_rolling_fip = game.get("away_rolling_fip")
-    if home_rolling_fip is None:
-        home_rolling_fip = fetch_rolling_fip(game.get("home_starter_id"))
-    if away_rolling_fip is None:
-        away_rolling_fip = fetch_rolling_fip(game.get("away_starter_id"))
-    
-    # sp_form uses SEASON FIP as baseline (measures recent vs season average)
-    # Save originals before override
-    orig_home_fip = game.get("home_sp_fip", 4.25)
-    orig_away_fip = game.get("away_sp_fip", 4.25)
-    
-    # Override season FIP with rolling FIP for feature dict (fip_combined/fip_diff)
-    if home_rolling_fip is not None:
-        game["home_sp_fip"] = home_rolling_fip
-    if away_rolling_fip is not None:
-        game["away_sp_fip"] = away_rolling_fip
+    # ── Clamps in _build_feature_dict handle out-of-distribution inputs ──
+    # Rolling FIP tested: r≈0 against residual — market already prices pitcher quality.
 
-    # Compute sp_form_combined using ORIGINAL season FIP as baseline
+    # Compute sp_form_combined using season FIP as baseline
     sp_form = game.get("sp_form_combined")
     if sp_form is None:
         sp_form = compute_sp_form_combined(
             game.get("home_starter_id"),
             game.get("away_starter_id"),
-            orig_home_fip,
-            orig_away_fip,
+            game.get("home_sp_fip", 4.25),
+            game.get("away_sp_fip", 4.25),
         )
 
     feats = _build_feature_dict(game, sp_form)
