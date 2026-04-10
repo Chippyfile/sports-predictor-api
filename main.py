@@ -1636,20 +1636,40 @@ def route_nba_daily():
             if not events:
                 results["status"] = "no_games_today"
                 return jsonify(results)
-            existing = _req.get(f"{SUPABASE_URL}/rest/v1/nba_predictions?game_date=eq.{today_est}&select=game_id", headers=headers, timeout=15)
-            existing_ids = {r["game_id"] for r in (existing.json() if existing.ok else [])}
+            existing = _req.get(
+                f"{SUPABASE_URL}/rest/v1/nba_predictions?game_date=eq.{today_est}"
+                f"&select=id,game_id,ats_units,market_spread_home,market_ou_total,opening_home_ml,opening_away_ml",
+                headers=headers, timeout=15)
+            existing_map = {}  # game_id → {id, has_ats, market_*}
+            if existing.ok:
+                for r in existing.json():
+                    if r.get("game_id"):
+                        existing_map[str(r["game_id"])] = {
+                            "id": r["id"],
+                            "has_ats": r.get("ats_units") is not None,
+                            "market_spread_home": r.get("market_spread_home"),
+                            "market_ou_total": r.get("market_ou_total"),
+                            "opening_home_ml": r.get("opening_home_ml"),
+                            "opening_away_ml": r.get("opening_away_ml"),
+                        }
+            existing_ids = set(existing_map.keys())
             results["existing"] = len(existing_ids)
             predicted, errors = 0, 0
 
-            # Collect games to predict
+            # Collect games to predict + extract ESPN scoreboard odds (same pattern as MLB)
             games_to_predict = []
+            odds_found = 0
             for event in events:
                 comp = event.get("competitions", [{}])[0]
                 if comp.get("status", {}).get("type", {}).get("completed"): continue
                 state = comp.get("status", {}).get("type", {}).get("state", "")
                 if state == "in": continue  # skip Live games
                 game_id = str(event.get("id", ""))
-                if game_id in existing_ids: continue
+                existing_info = existing_map.get(game_id)
+                # Skip if already fully predicted (has ATS + market data) — unless force
+                force = request.args.get("force", "").lower() in ("true", "1")
+                if existing_info and existing_info.get("has_ats") and existing_info.get("market_spread_home") is not None and not force:
+                    continue
                 competitors = comp.get("competitors", [])
                 home_c = next((c for c in competitors if c.get("homeAway") == "home"), None)
                 away_c = next((c for c in competitors if c.get("homeAway") == "away"), None)
@@ -1658,11 +1678,43 @@ def route_nba_daily():
                 away_abbr = _m(away_c.get("team", {}).get("abbreviation", ""))
                 home_name = home_c.get("team", {}).get("displayName", "")
                 away_name = away_c.get("team", {}).get("displayName", "")
+
+                # ── Extract market odds from ESPN scoreboard (same as MLB) ──
+                espn_odds = {}
+                try:
+                    odds_list = comp.get("odds", [])
+                    if odds_list:
+                        odds = odds_list[0]
+                        if odds.get("overUnder") is not None:
+                            espn_odds["market_ou_total"] = odds["overUnder"]
+                        # Spread: odds.spread (NBA uses points, not run line)
+                        if odds.get("spread") is not None:
+                            espn_odds["market_spread_home"] = float(odds["spread"])
+                        # Also check pointSpread block
+                        ps = odds.get("pointSpread", {})
+                        h_sp = ps.get("home", {}).get("close", {}).get("line")
+                        if h_sp and "market_spread_home" not in espn_odds:
+                            espn_odds["market_spread_home"] = float(h_sp)
+                        # Moneylines
+                        ml = odds.get("moneyline", {})
+                        h_ml_str = ml.get("home", {}).get("close", {}).get("odds")
+                        a_ml_str = ml.get("away", {}).get("close", {}).get("odds")
+                        if h_ml_str:
+                            espn_odds["opening_home_ml"] = int(str(h_ml_str).replace("+", ""))
+                        if a_ml_str:
+                            espn_odds["opening_away_ml"] = int(str(a_ml_str).replace("+", ""))
+                        if espn_odds:
+                            odds_found += 1
+                except Exception as oe:
+                    print(f"  [cron/nba] ESPN odds parse error {game_id}: {oe}")
+
                 games_to_predict.append({
                     "game_id": game_id, "home_abbr": home_abbr, "away_abbr": away_abbr,
                     "home_name": home_name, "away_name": away_name, "game_date": today_est,
+                    "espn_odds": espn_odds, "existing_info": existing_info,
                 })
             results["games_to_predict"] = len(games_to_predict)
+            results["espn_odds_found"] = odds_found
 
             def _predict_one(g):
                 try:
@@ -1670,115 +1722,153 @@ def route_nba_daily():
                         "game_id": g["game_id"], "home_team": g["home_abbr"],
                         "away_team": g["away_abbr"], "game_date": g["game_date"],
                     })
-                    if pred and not pred.get("error") and pred.get("ml_win_prob_home") is not None:
-                        margin = pred["ml_margin"]; wp = pred["ml_win_prob_home"]
-                        mkt_sp = pred.get("market_spread", 0); mkt_tot = pred.get("market_total", 0)
+                    if not pred or pred.get("error") or pred.get("ml_win_prob_home") is None:
+                        return "empty"
 
-                        # Display stats from predict_nba_full audit_data (zero extra API calls)
-                        audit = pred.get("audit_data", {})
+                    margin = pred["ml_margin"]; wp = pred["ml_win_prob_home"]
+                    audit = pred.get("audit_data", {})
 
-                        row = {
-                            "game_date": g["game_date"], "game_id": g["game_id"],
-                            "home_team": g["home_abbr"], "away_team": g["away_abbr"],
-                            "home_team_name": g["home_name"], "away_team_name": g["away_name"],
-                            "spread_home": round(margin, 1), "win_pct_home": round(wp, 4),
-                            "ml_win_prob_home": round(wp, 4),
-                            "pred_home_score": pred.get("pred_home_score"),
-                            "pred_away_score": pred.get("pred_away_score"),
-                            "result_entered": False,
-                            "ml_feature_coverage": pred.get("feature_coverage"),
-                            "ml_model_type": pred.get("model_meta", {}).get("model_type"),
-                            "home_ppg": audit.get("home_ppg"),
-                            "away_ppg": audit.get("away_ppg"),
-                            "home_opp_ppg": audit.get("home_opp_ppg"),
-                            "away_opp_ppg": audit.get("away_opp_ppg"),
-                            "home_net_rtg": audit.get("home_net_rtg"),
-                            "away_net_rtg": audit.get("away_net_rtg"),
-                            "home_pace": audit.get("home_pace"),
-                            "away_pace": audit.get("away_pace"),
-                            "home_wins": audit.get("home_wins"),
-                            "away_wins": audit.get("away_wins"),
-                            "home_losses": audit.get("home_losses"),
-                            "away_losses": audit.get("away_losses"),
-                        }
-                        if mkt_sp: row["market_spread_home"] = mkt_sp
-                        if mkt_tot: row["market_ou_total"] = mkt_tot; row["ou_total"] = mkt_tot
-                        if mkt_sp: row["ats_disagree"] = round(abs(margin - (-mkt_sp)), 2)
+                    row = {
+                        "game_date": g["game_date"], "game_id": g["game_id"],
+                        "home_team": g["home_abbr"], "away_team": g["away_abbr"],
+                        "home_team_name": g["home_name"], "away_team_name": g["away_name"],
+                        "spread_home": round(margin, 1), "win_pct_home": round(wp, 4),
+                        "ml_win_prob_home": round(wp, 4),
+                        "pred_home_score": pred.get("pred_home_score"),
+                        "pred_away_score": pred.get("pred_away_score"),
+                        "result_entered": False,
+                        "ml_feature_coverage": pred.get("feature_coverage"),
+                        "ml_model_type": pred.get("model_meta", {}).get("model_type"),
+                        "home_ppg": audit.get("home_ppg"),
+                        "away_ppg": audit.get("away_ppg"),
+                        "home_opp_ppg": audit.get("home_opp_ppg"),
+                        "away_opp_ppg": audit.get("away_opp_ppg"),
+                        "home_net_rtg": audit.get("home_net_rtg"),
+                        "away_net_rtg": audit.get("away_net_rtg"),
+                        "home_pace": audit.get("home_pace"),
+                        "away_pace": audit.get("away_pace"),
+                        "home_wins": audit.get("home_wins"),
+                        "away_wins": audit.get("away_wins"),
+                        "home_losses": audit.get("home_losses"),
+                        "away_losses": audit.get("away_losses"),
+                    }
 
-                        # ML odds — already extracted by predict_nba_full (no extra ESPN call)
-                        nba_home_ml = pred.get("market_home_ml")
-                        nba_away_ml = pred.get("market_away_ml")
-                        if nba_home_ml is not None:
-                            row["market_home_ml"] = nba_home_ml
-                        if nba_away_ml is not None:
-                            row["market_away_ml"] = nba_away_ml
-                        if nba_home_ml and nba_away_ml:
-                            h_imp = abs(nba_home_ml) / (abs(nba_home_ml) + 100) if nba_home_ml < 0 else 100 / (nba_home_ml + 100)
-                            a_imp = abs(nba_away_ml) / (abs(nba_away_ml) + 100) if nba_away_ml < 0 else 100 / (nba_away_ml + 100)
-                            vig_t = h_imp + a_imp
-                            h_true = h_imp / vig_t if vig_t > 0 else 0.5
-                            ml_edge = wp - h_true
-                            row["ml_edge_pct"] = round(abs(ml_edge) * 100, 2)
-                            row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
-                        # O/U v2 fields
-                        for fld in ["ou_predicted_total","ou_edge","ou_pick","ou_tier","ou_res_avg"]:
-                            if pred.get(fld) is not None: row[fld] = pred[fld]
-                        # Player impact (BPM/VORP injury adjustment)
-                        if pred.get("impact_adjustment"):
-                            row["impact_adjustment"] = pred["impact_adjustment"]
-                        if pred.get("missing_margin_diff"):
-                            row["missing_margin_diff"] = pred["missing_margin_diff"]
-                        if pred.get("home_out_players"):
-                            row["home_out_players"] = pred["home_out_players"]
-                        if pred.get("away_out_players"):
-                            row["away_out_players"] = pred["away_out_players"]
-                        # v28 ATS — residual model (CatBoost×0.7 + Lasso×0.3)
-                        # Prediction already computed: ats_side, ats_units, ats_pick_spread from residual model
-                        if pred.get("ats_side") and pred.get("ats_units", 0) > 0:
-                            row["ats_side"] = pred["ats_side"]
-                            row["ats_units"] = pred["ats_units"]
-                            row["ats_pick_spread"] = pred.get("ats_pick_spread") or mkt_sp
-                        else:
-                            row["ats_units"] = 0
-                        # Store residual model metadata
-                        if pred.get("ats_residual_blend") is not None:
-                            row["ats_residual_blend"] = pred["ats_residual_blend"]
-                        if pred.get("ats_residual_cb") is not None:
-                            row["ats_residual_cb"] = pred["ats_residual_cb"]
-                        if pred.get("ats_residual_lasso") is not None:
-                            row["ats_residual_lasso"] = pred["ats_residual_lasso"]
-                        if pred.get("ats_models_agree") is not None:
-                            row["ats_models_agree"] = pred["ats_models_agree"]
-                        row["ats_disagree"] = abs(pred.get("ats_residual_blend", 0) or 0)
+                    # ── Market odds from ESPN scoreboard (same pattern as MLB) ──
+                    espn_odds = g.get("espn_odds", {})
+                    existing_info = g.get("existing_info")
 
-                        # ── Data availability flags ──
-                        row["lineup_available"] = bool(
-                            pred.get("lineup_value_diff") or
-                            pred.get("home_out_players") or
-                            pred.get("away_out_players")
-                        )
+                    # 1. ESPN scoreboard odds (primary — from pre-fetched events)
+                    if espn_odds.get("market_spread_home") is not None:
+                        row["market_spread_home"] = espn_odds["market_spread_home"]
+                    if espn_odds.get("market_ou_total") is not None:
+                        row["market_ou_total"] = espn_odds["market_ou_total"]
+                        row["ou_total"] = espn_odds["market_ou_total"]
+                    if espn_odds.get("opening_home_ml") is not None:
+                        row["opening_home_ml"] = espn_odds["opening_home_ml"]
+                    if espn_odds.get("opening_away_ml") is not None:
+                        row["opening_away_ml"] = espn_odds["opening_away_ml"]
 
-                        # Save: PATCH existing, POST new
-                        if g["game_id"] in existing_ids:
-                            sv = _req.patch(f"{SUPABASE_URL}/rest/v1/nba_predictions?game_id=eq.{g['game_id']}",
-                                headers={**headers, "Content-Type": "application/json"},
-                                json=row, timeout=15)
-                            if not sv.ok:
-                                print(f"  [cron/nba] PATCH failed {g['game_id']}: {sv.status_code} {sv.text[:150]}")
-                                return "error"
-                        else:
-                            sv = _req.post(f"{SUPABASE_URL}/rest/v1/nba_predictions",
-                                headers={**headers, "Content-Type": "application/json"},
-                                json=row, timeout=15)
-                            if not sv.ok:
-                                print(f"  [cron/nba] POST failed {g['game_id']}: {sv.status_code} {sv.text[:150]}")
-                                return "error"
-                        _impact_str = f", impact={pred.get('impact_adjustment', 0):+.1f}" if pred.get("impact_adjustment") else ""
-                        _out_str = f", out={pred.get('home_out_players', [])}" if pred.get("home_out_players") else ""
-                        _ats_str = f", ATS={pred.get('ats_side')} {pred.get('ats_units', 0)}u (blend={pred.get('ats_residual_blend', 0):+.1f})" if pred.get("ats_units", 0) > 0 else ""
-                        print(f"  [cron/nba] ✅ {g['away_abbr']}@{g['home_abbr']}: margin={margin:+.1f}, wp={wp:.3f}{_ats_str}{_impact_str}{_out_str}")
-                        return "ok"
-                    return "empty"
+                    # 2. Fallback: predict_nba_full ESPN pickcenter (if scoreboard missed)
+                    if row.get("market_spread_home") is None:
+                        mkt_sp = pred.get("market_spread")
+                        if mkt_sp is not None and mkt_sp != 0:
+                            row["market_spread_home"] = mkt_sp
+                    if row.get("market_ou_total") is None:
+                        mkt_tot = pred.get("market_total")
+                        if mkt_tot is not None and mkt_tot != 0:
+                            row["market_ou_total"] = mkt_tot
+                            row["ou_total"] = mkt_tot
+
+                    # 3. Preserve existing market data (if ESPN didn't return new)
+                    if existing_info:
+                        if row.get("market_spread_home") is None and existing_info.get("market_spread_home") is not None:
+                            row["market_spread_home"] = existing_info["market_spread_home"]
+                        if row.get("market_ou_total") is None and existing_info.get("market_ou_total") is not None:
+                            row["market_ou_total"] = existing_info["market_ou_total"]
+                        if row.get("opening_home_ml") is None and existing_info.get("opening_home_ml") is not None:
+                            row["opening_home_ml"] = existing_info["opening_home_ml"]
+                        if row.get("opening_away_ml") is None and existing_info.get("opening_away_ml") is not None:
+                            row["opening_away_ml"] = existing_info["opening_away_ml"]
+
+                    # ── ML edge (same as MLB) ──
+                    nba_home_ml = row.get("opening_home_ml")
+                    nba_away_ml = row.get("opening_away_ml")
+                    if nba_home_ml and nba_away_ml:
+                        h_imp = abs(nba_home_ml) / (abs(nba_home_ml) + 100) if nba_home_ml < 0 else 100 / (nba_home_ml + 100)
+                        a_imp = abs(nba_away_ml) / (abs(nba_away_ml) + 100) if nba_away_ml < 0 else 100 / (nba_away_ml + 100)
+                        vig_t = h_imp + a_imp
+                        h_true = h_imp / vig_t if vig_t > 0 else 0.5
+                        ml_edge = wp - h_true
+                        row["ml_edge_pct"] = round(abs(ml_edge) * 100, 2)
+                        row["ml_bet_side"] = "HOME" if ml_edge >= 0 else "AWAY"
+
+                    # ── O/U v2 fields ──
+                    for fld in ["ou_predicted_total","ou_edge","ou_pick","ou_tier","ou_res_avg"]:
+                        if pred.get(fld) is not None: row[fld] = pred[fld]
+
+                    # Player impact (BPM/VORP injury adjustment)
+                    if pred.get("impact_adjustment"):
+                        row["impact_adjustment"] = pred["impact_adjustment"]
+                    if pred.get("missing_margin_diff"):
+                        row["missing_margin_diff"] = pred["missing_margin_diff"]
+                    if pred.get("home_out_players"):
+                        row["home_out_players"] = pred["home_out_players"]
+                    if pred.get("away_out_players"):
+                        row["away_out_players"] = pred["away_out_players"]
+
+                    # ── v28 ATS — residual model (CatBoost×0.7 + Lasso×0.3) ──
+                    if pred.get("ats_side") and pred.get("ats_units", 0) > 0:
+                        row["ats_side"] = pred["ats_side"]
+                        row["ats_units"] = pred["ats_units"]
+                        row["ats_pick_spread"] = pred.get("ats_pick_spread") or row.get("market_spread_home")
+                    else:
+                        row["ats_units"] = 0
+                    # Store residual model metadata
+                    if pred.get("ats_residual_blend") is not None:
+                        row["ats_residual_blend"] = pred["ats_residual_blend"]
+                    if pred.get("ats_residual_cb") is not None:
+                        row["ats_residual_cb"] = pred["ats_residual_cb"]
+                    if pred.get("ats_residual_lasso") is not None:
+                        row["ats_residual_lasso"] = pred["ats_residual_lasso"]
+                    if pred.get("ats_models_agree") is not None:
+                        row["ats_models_agree"] = pred["ats_models_agree"]
+                    row["ats_disagree"] = abs(pred.get("ats_residual_blend", 0) or 0)
+
+                    # Confidence
+                    row["confidence"] = pred.get("model_meta", {}).get("confidence") or (
+                        "HIGH" if abs(margin) >= 7 else "MEDIUM" if abs(margin) >= 3 else "LOW")
+
+                    # ── Data availability flags ──
+                    row["lineup_available"] = bool(
+                        pred.get("lineup_value_diff") or
+                        pred.get("home_out_players") or
+                        pred.get("away_out_players")
+                    )
+
+                    # ── Save: PATCH existing or POST new (same as MLB) ──
+                    if existing_info:
+                        patch_row = {k: v for k, v in row.items() if k not in ("game_date", "game_id")}
+                        sv = _req.patch(f"{SUPABASE_URL}/rest/v1/nba_predictions?id=eq.{existing_info['id']}",
+                            headers={**headers, "Content-Type": "application/json"},
+                            json=patch_row, timeout=15)
+                        if not sv.ok:
+                            print(f"  [cron/nba] PATCH failed {g['game_id']}: {sv.status_code} {sv.text[:150]}")
+                            return "error"
+                    else:
+                        sv = _req.post(f"{SUPABASE_URL}/rest/v1/nba_predictions",
+                            headers={**headers, "Content-Type": "application/json",
+                                     "Prefer": "return=representation"},
+                            json=row, timeout=15)
+                        if not sv.ok:
+                            print(f"  [cron/nba] POST failed {g['game_id']}: {sv.status_code} {sv.text[:150]}")
+                            return "error"
+
+                    _mkt_str = f", mktSp={row.get('market_spread_home')}, mktOU={row.get('market_ou_total')}" if row.get("market_spread_home") is not None else ", NO ODDS"
+                    _impact_str = f", impact={pred.get('impact_adjustment', 0):+.1f}" if pred.get("impact_adjustment") else ""
+                    _ats_str = f", ATS={pred.get('ats_side')} {pred.get('ats_units', 0)}u (blend={pred.get('ats_residual_blend', 0):+.1f})" if pred.get("ats_units", 0) > 0 else ""
+                    _ou_str = f", OU={row.get('ou_pick')} {row.get('ou_tier', 0)}u" if row.get("ou_pick") else ""
+                    print(f"  [cron/nba] ✅ {g['away_abbr']}@{g['home_abbr']}: margin={margin:+.1f}, wp={wp:.3f}{_mkt_str}{_ats_str}{_ou_str}{_impact_str}")
+                    return "ok"
                 except Exception as e:
                     print(f"  [cron/nba] ❌ {g['game_id']}: {e}")
                     return "error"
@@ -1801,7 +1891,7 @@ def route_nba_daily():
                 compact_date = check_date.replace("-", "")
                 pending = _req.get(
                     f"{SUPABASE_URL}/rest/v1/nba_predictions?game_date=eq.{check_date}&result_entered=eq.false"
-                    f"&select=id,game_id,home_team,away_team,win_pct_home,spread_home,market_spread_home,market_ou_total,pred_home_score,pred_away_score,ats_side,ats_units",
+                    f"&select=id,game_id,home_team,away_team,win_pct_home,spread_home,market_spread_home,market_ou_total,pred_home_score,pred_away_score,ats_side,ats_units,ou_pick,ou_predicted_total",
                     headers=headers, timeout=15)
                 pending_rows = pending.json() if pending.ok else []
                 if not pending_rows: continue
@@ -1821,26 +1911,86 @@ def route_nba_daily():
                     except: continue
                     actual_margin = home_score - away_score
                     ml_correct = ((matched.get("win_pct_home") or 0.5) >= 0.5) == (home_score > away_score)
+
+                    # ── Backfill missing odds from ESPN scoreboard (same as predict) ──
                     mkt_spread = matched.get("market_spread_home")
+                    ou_line = matched.get("market_ou_total")
+                    odds_backfill = {}
+                    try:
+                        odds_list = comp.get("odds", [])
+                        if odds_list:
+                            odds = odds_list[0]
+                            if mkt_spread is None:
+                                sp = odds.get("spread")
+                                if sp is None:
+                                    ps = odds.get("pointSpread", {})
+                                    sp_str = ps.get("home", {}).get("close", {}).get("line")
+                                    if sp_str: sp = float(sp_str)
+                                if sp is not None:
+                                    mkt_spread = float(sp)
+                                    odds_backfill["market_spread_home"] = mkt_spread
+                            if ou_line is None and odds.get("overUnder") is not None:
+                                ou_line = odds["overUnder"]
+                                odds_backfill["market_ou_total"] = ou_line
+                            # Moneylines
+                            ml_block = odds.get("moneyline", {})
+                            h_ml_str = ml_block.get("home", {}).get("close", {}).get("odds")
+                            a_ml_str = ml_block.get("away", {}).get("close", {}).get("odds")
+                            if h_ml_str and not matched.get("opening_home_ml"):
+                                odds_backfill["closing_home_ml"] = int(str(h_ml_str).replace("+", ""))
+                            if a_ml_str and not matched.get("opening_away_ml"):
+                                odds_backfill["closing_away_ml"] = int(str(a_ml_str).replace("+", ""))
+                    except Exception as oe:
+                        print(f"  [cron/nba] grade odds parse error {game_id}: {oe}")
+
                     rl_correct = None
                     if mkt_spread is not None:
                         ats = actual_margin + mkt_spread
                         rl_correct = True if ats > 0 else (False if ats < 0 else None)
                     total = home_score + away_score
-                    ou_line = matched.get("market_ou_total")
                     pred_total = (matched.get("pred_home_score") or 0) + (matched.get("pred_away_score") or 0)
                     ou_correct = None
-                    if ou_line and total != ou_line:
+                    if ou_line is not None and total != ou_line:
                         # Store actual result side — DailyBets compares ou_correct vs pick side
                         ou_correct = "OVER" if total > ou_line else "UNDER"
                     patch = {"actual_home_score": home_score, "actual_away_score": away_score,
-                             "result_entered": True, "ml_correct": ml_correct, "rl_correct": rl_correct, "ou_correct": ou_correct}
+                             "result_entered": True, "ml_correct": ml_correct, "rl_correct": rl_correct, "ou_correct": ou_correct,
+                             **odds_backfill}
+
+                    # ── ATS: compute pick on-the-fly if market data was just backfilled ──
+                    ats_side = matched.get("ats_side")
+                    ats_units = matched.get("ats_units") or 0
+                    if not ats_side and mkt_spread is not None and matched.get("spread_home") is not None:
+                        # Compute ATS pick now (wasn't computed at predict time due to missing odds)
+                        model_margin = matched["spread_home"]
+                        mkt_implied = -mkt_spread
+                        disagree = abs(model_margin - mkt_implied)
+                        patch["ats_disagree"] = round(disagree, 2)
+                        if disagree >= 2:
+                            ats_side = "HOME" if model_margin > mkt_implied else "AWAY"
+                            ats_units = 3 if disagree >= 7 else (2 if disagree >= 4 else 1)
+                            patch["ats_side"] = ats_side
+                            patch["ats_units"] = ats_units
+                            patch["ats_pick_spread"] = mkt_spread
+                        else:
+                            patch["ats_units"] = 0
+
+                    # ── O/U: compute pick on-the-fly if just backfilled ──
+                    if not matched.get("ou_pick") and ou_line is not None:
+                        model_total = matched.get("ou_predicted_total") or pred_total
+                        if model_total and model_total > 0:
+                            ou_edge = model_total - ou_line
+                            if abs(ou_edge) >= 4:
+                                patch["ou_pick"] = "OVER" if ou_edge > 0 else "UNDER"
+                                patch["ou_tier"] = 3 if abs(ou_edge) >= 10 else (2 if abs(ou_edge) >= 7 else 1)
+                                patch["ou_edge"] = round(ou_edge, 1)
+
                     # ATS pick grading (did our specific bet win?)
-                    if matched.get("ats_units") and matched["ats_units"] > 0 and matched.get("ats_side") and mkt_spread is not None:
+                    if ats_units > 0 and ats_side and mkt_spread is not None:
                         ats_result = actual_margin + mkt_spread
                         if ats_result != 0:
                             home_covered = ats_result > 0
-                            picked_home = matched["ats_side"] == "HOME"
+                            picked_home = ats_side == "HOME"
                             patch["ats_correct"] = picked_home == home_covered
                     _req.patch(f"{SUPABASE_URL}/rest/v1/nba_predictions?id=eq.{matched['id']}",
                         headers={**headers, "Content-Type": "application/json"}, json=patch, timeout=15)
