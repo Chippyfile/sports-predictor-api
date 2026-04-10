@@ -459,6 +459,9 @@ def predict_mlb_full(input_data):
             print(f"  [mlb_full] Lineup fetch error: {e}")
 
     # Pass lineup features to O/U payload (v3 uses these)
+    payload["game_date"] = game_date
+    payload["home_games"] = h_hit.get("games", 0)
+    payload["away_games"] = a_hit.get("games", 0)
     payload["lineup_delta_sum"] = lineup_feats.get("lineup_delta_sum", 0)
     payload["lineup_total_top3"] = lineup_feats.get("lineup_total_top3", 0)
     payload["lineup_total_woba"] = lineup_feats.get("lineup_total_woba", 0)

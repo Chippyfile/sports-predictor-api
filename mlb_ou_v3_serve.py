@@ -74,26 +74,77 @@ def compute_sp_form_combined(home_pitcher_id, away_pitcher_id, home_fip, away_fi
 
 
 def _build_feature_dict(game, sp_form):
-    """Build full feature dict for all 3 components."""
+    """Build full feature dict for all 3 components.
+    
+    Early-season regression: all stats regressed toward league means based on
+    sample size. With 12 games, ~40% actual + 60% league avg. By game 80, ~85% actual.
+    Prevents early-season noise from producing absurd predictions.
+    """
     _f = lambda k, d=0: float(game.get(k, d) or d)
 
+    # ── Regression helper ──
+    # adjusted = (actual * n + league_avg * k) / (n + k)
+    # k = stabilization constant (games needed for stat to be ~50% signal)
+    def _regress(actual, league_avg, n_games, stabilization):
+        if n_games <= 0:
+            return league_avg
+        return (actual * n_games + league_avg * stabilization) / (n_games + stabilization)
+
+    # League averages (2022-2025 training data means)
+    LG_FIP = 4.00
+    LG_BP_ERA = 4.10
+    LG_WOBA = 0.315
+    LG_K9 = 8.5
+    LG_BB9 = 3.2
+
+    # Stabilization constants (games for stat to be ~50% signal)
+    STAB_FIP = 15       # ~12-15 starts for starter FIP
+    STAB_BP = 30        # ~30 team games for bullpen ERA
+    STAB_WOBA = 30      # ~30 team games for team wOBA
+    STAB_K_BB = 15      # ~15 starts for K/BB rates
+
+    # Team games played (proxy for sample size)
+    home_games = _f("home_games", 0)
+    away_games = _f("away_games", 0)
+
     market_total = _f("market_ou_total", 0) or _f("market_total", 0)
-    home_fip = max(2.5, min(6.5, _f("home_sp_fip", 4.25) or _f("home_fip", 4.25)))
-    away_fip = max(2.5, min(6.5, _f("away_sp_fip", 4.25) or _f("away_fip", 4.25)))
-    home_woba = _f("home_woba", 0.315)
-    away_woba = _f("away_woba", 0.315)
-    home_bp = _f("home_bullpen_era", 4.10)
-    away_bp = _f("away_bullpen_era", 4.10)
-    home_k9 = _f("home_k9", 8.5)
-    away_k9 = _f("away_k9", 8.5)
-    home_bb9 = _f("home_bb9", 3.2)
-    away_bb9 = _f("away_bb9", 3.2)
+
+    # ── Regressed stats ──
+    raw_home_fip = _f("home_sp_fip", LG_FIP) or LG_FIP
+    raw_away_fip = _f("away_sp_fip", LG_FIP) or LG_FIP
+    home_fip = max(2.5, min(6.5, _regress(raw_home_fip, LG_FIP, home_games / 5, STAB_FIP)))  # /5 = approx starts
+    away_fip = max(2.5, min(6.5, _regress(raw_away_fip, LG_FIP, away_games / 5, STAB_FIP)))
+
+    raw_home_bp = _f("home_bullpen_era", LG_BP_ERA)
+    raw_away_bp = _f("away_bullpen_era", LG_BP_ERA)
+    home_bp = _regress(raw_home_bp, LG_BP_ERA, home_games, STAB_BP)
+    away_bp = _regress(raw_away_bp, LG_BP_ERA, away_games, STAB_BP)
+
+    raw_home_woba = _f("home_woba", LG_WOBA)
+    raw_away_woba = _f("away_woba", LG_WOBA)
+    home_woba = _regress(raw_home_woba, LG_WOBA, home_games, STAB_WOBA)
+    away_woba = _regress(raw_away_woba, LG_WOBA, away_games, STAB_WOBA)
+
+    raw_home_k9 = _f("home_k9", LG_K9)
+    raw_away_k9 = _f("away_k9", LG_K9)
+    raw_home_bb9 = _f("home_bb9", LG_BB9)
+    raw_away_bb9 = _f("away_bb9", LG_BB9)
+    home_k9 = _regress(raw_home_k9, LG_K9, home_games / 5, STAB_K_BB)
+    away_k9 = _regress(raw_away_k9, LG_K9, away_games / 5, STAB_K_BB)
+    home_bb9 = _regress(raw_home_bb9, LG_BB9, home_games / 5, STAB_K_BB)
+    away_bb9 = _regress(raw_away_bb9, LG_BB9, away_games / 5, STAB_K_BB)
+
     home_sp_ip = _f("home_sp_ip", 5.5)
     away_sp_ip = _f("away_sp_ip", 5.5)
     park_factor = _f("park_factor", 1.0)
     temp_f = _f("temp_f", 72)
     wind_mph = _f("wind_mph", 5)
     wind_out = int(_f("wind_out_flag", 0))
+
+    if home_games > 0 and home_games <= 30:
+        print(f"  [ou_v3] Early-season regression: {int(home_games)} games → "
+              f"FIP {raw_home_fip:.2f}→{home_fip:.2f}, wOBA {raw_home_woba:.3f}→{home_woba:.3f}, "
+              f"BP {raw_home_bp:.2f}→{home_bp:.2f}")
 
     return {
         "market_total": market_total if market_total > 0 else 9.0,
@@ -113,7 +164,6 @@ def _build_feature_dict(game, sp_form):
         "woba_combined": home_woba + away_woba,
         "woba_diff": home_woba - away_woba,
         "ump_run_env": _f("ump_run_env", 8.5),
-        # v3: Umpire career runs per game (r=+0.126 with O/U residual)
         "ump_career_rpg": _f("ump_career_rpg", 8.5),
         "ump_career_bb": _f("ump_career_bb", 6.5),
         "scoring_entropy_combined": _f("scoring_entropy_combined", 5.0),
@@ -122,10 +172,8 @@ def _build_feature_dict(game, sp_form):
         "series_game_num": _f("series_game_num", 1),
         "lg_rpg": _f("lg_rpg", 9.0),
         "sp_form_combined": sp_form,
-        # v3: Lineup features (from mlb_ats_v9_serve.compute_lineup_features)
         "lineup_delta_sum": _f("lineup_delta_sum", 0),
         "lineup_total_top3": _f("lineup_total_top3", 0.68),
-        "lineup_total_woba": _f("lineup_total_woba", 0.630),
         "lineup_total_woba": _f("lineup_total_woba", 0.630),
     }
 
@@ -135,6 +183,9 @@ def predict_mlb_ou_v3(game, bundle):
     V3 O/U prediction: triple agreement + lineup features.
     """
     market_total = float(game.get("market_ou_total", 0) or game.get("market_total", 0) or 0)
+    game_date = game.get("game_date", "")
+
+    # ── Early-season regression applied in _build_feature_dict (no hard cutoff needed) ──
 
     # Compute sp_form_combined
     sp_form = game.get("sp_form_combined")
