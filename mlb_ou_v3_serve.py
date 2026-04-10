@@ -224,9 +224,13 @@ def predict_mlb_ou_v3(game, bundle):
 
     # ── Early-season regression applied in _build_feature_dict (no hard cutoff needed) ──
 
-    # ── Compute rolling 60-IP FIP (crosses into last season for early-year pitchers) ──
-    home_rolling_fip = fetch_rolling_fip(game.get("home_starter_id"))
-    away_rolling_fip = fetch_rolling_fip(game.get("away_starter_id"))
+    # ── Use rolling 60-IP FIP (pre-computed in mlb_full_predict, or fetch live as fallback) ──
+    home_rolling_fip = game.get("home_rolling_fip")
+    away_rolling_fip = game.get("away_rolling_fip")
+    if home_rolling_fip is None:
+        home_rolling_fip = fetch_rolling_fip(game.get("home_starter_id"))
+    if away_rolling_fip is None:
+        away_rolling_fip = fetch_rolling_fip(game.get("away_starter_id"))
     
     # sp_form uses SEASON FIP as baseline (measures recent vs season average)
     # Save originals before override

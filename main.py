@@ -1968,8 +1968,9 @@ def route_mlb_daily():
                             gpk = g.get("gamePk")
                             games_found += 1
                             existing_info = existing_map.get(str(gpk))
-                            # Skip if already has ATS computed (fully predicted)
-                            if existing_info and existing_info.get("has_ats"):
+                            # Skip if already has ATS computed (fully predicted) — unless force
+                            force = request.args.get("force", "").lower() in ("true", "1")
+                            if existing_info and existing_info.get("has_ats") and not force:
                                 games_skipped += 1
                                 continue
                             try:
@@ -2082,7 +2083,7 @@ def route_mlb_daily():
                                                 row["ats_models_agree"] = models_agree
                                                 row["ats_model_version"] = "v8_fallback"
 
-                                    # ── O/U from v2 model result ──
+                                    # ── O/U from v3 model result ──
                                     # Always store these from predict result
                                     row["pred_total"] = round(pt, 2) if pt else None
                                     row["sp_form_combined"] = res.get("sp_form_combined")
@@ -2090,6 +2091,8 @@ def route_mlb_daily():
                                     row["ou_pick"] = res.get("ou_pick")     # None clears stale picks
                                     row["ou_tier"] = res.get("ou_tier")
                                     row["ou_units"] = res.get("ou_units")
+                                    row["ou_res_avg"] = res.get("ou_res_avg")
+                                    row["lineup_delta_sum"] = res.get("lineup_delta_sum", 0)
                                     row["market_ou_total"] = res.get("market_ou_total") or row.get("market_ou_total")
 
                                     # ── Data availability flags ──
