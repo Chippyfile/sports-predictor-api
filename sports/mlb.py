@@ -828,7 +828,39 @@ def predict_mlb(game: dict):
     row_data["home_bp_fatigue"] = _f(game.get("home_bp_fatigue"), 0)
     row_data["away_bp_fatigue"] = _f(game.get("away_bp_fatigue"), 0)
     # Market moneyline — adds signal beyond run line
-    row_data["market_home_ml"] = _f(game.get("market_home_ml") or game.get("home_moneyline") or game.get("market_home_ml"), 0)
+    row_data["market_home_ml"] = _f(game.get("market_home_ml") or game.get("home_moneyline"), 0)
+
+    # ── Derived features (computed by mlb_build_features in training, must match at serve) ──
+    # Interaction features
+    row_data["fip_x_bullpen"] = fip_diff * bullpen_era_diff
+    row_data["wind_x_fip"] = float(wind_out) * fip_diff
+    
+    # SP flags
+    row_data["has_sp_fip"] = 1 if (home_sp_fip != _lg_fip and away_sp_fip != _lg_fip) else 0
+    
+    # League context
+    row_data["lg_rpg"] = _sc.get("lg_rpg", 8.6)
+    
+    # Heuristic signal (from mlb_full_predict or frontend)
+    row_data["run_diff_pred"] = _f(game.get("run_diff_pred") or game.get("pred_home_runs", 0), 0) - \
+                                 _f(game.get("pred_away_runs", 0), 0) if game.get("pred_home_runs") else 0
+    row_data["has_heuristic"] = 1 if abs(row_data["run_diff_pred"]) > 0.01 else 0
+    
+    # Market features (must come after run_diff_pred)
+    _mkt_spread = row_data.get("market_spread", 0)
+    _mkt_total = _f(game.get("market_ou_total") or game.get("market_total"), 0)
+    row_data["market_total"] = _mkt_total
+    row_data["has_market"] = 1 if (abs(_mkt_spread) > 0.1 or _mkt_total > 0) else 0
+    row_data["spread_vs_market"] = (row_data["run_diff_pred"] - _mkt_spread) if row_data["has_market"] else 0
+    
+    # Travel diff
+    row_data["travel_diff"] = _f(game.get("home_travel"), 0) - _f(game.get("away_travel"), 0)
+    
+    # SP form combined (computed by mlb_full_predict via pitcher game logs)
+    row_data["sp_form_combined"] = _f(game.get("sp_form_combined"), 0)
+    
+    # Lineup confirmation
+    row_data["both_lineups_confirmed"] = 1 if (home_lineup_confirmed and away_lineup_confirmed) else 0
     # AUDIT FIX F-08: Compute series game number from schedule
     _sgn = _f(game.get("series_game_num"), 0)
     row_data["series_game_num"] = _sgn if _sgn > 0 else float(
