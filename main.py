@@ -2258,33 +2258,18 @@ def route_mlb_daily():
                                         row["ml_bet_units"] = 1
                                         row["ml_bet_side"] = "HOME" if margin_side_home else "AWAY"
 
-                                    # ── ATS: prefer v9 (lineup-enhanced), fall back to v8 ──
-                                    # v9.1 Sniper: CB(d8)×0.8+Lasso×0.2, 2022+, ump_home_win_pct
-                                    #   1u: edge ≥ 2.5 + agree → 75.7% ATS
-                                    #   2u: edge ≥ 3.0 + agree → 78.9% ATS
+                                    # ── ATS: v9 only — no fallback ──
+                                    # If v9 sniper doesn't see enough edge, skip.
+                                    # v8_fallback produced 29% ATS live — worse than coin flip.
                                     row["ats_units"] = 0
+                                    row["ats_models_agree"] = res.get("models_agree")
                                     if res.get("ats_v9_units", 0) > 0:
-                                        # v9 produced a pick
                                         row["ats_side"] = res["ats_v9_side"]
                                         row["ats_units"] = res["ats_v9_units"]
                                         row["ats_disagree"] = res.get("ats_v9_edge", 0)
                                         row["ats_pick_spread"] = row.get("market_spread_home")
                                         row["ats_models_agree"] = res.get("ats_v9_models_agree", True)
                                         row["ats_model_version"] = "v9"
-                                    else:
-                                        # v9 no pick — fall back to v8 agreement gate (sniper tiers)
-                                        mkt_spread = row.get("market_spread_home")
-                                        models_agree = res.get("models_agree", True)
-                                        if mkt_spread is not None:
-                                            mkt_implied = -float(mkt_spread)
-                                            disagree = abs(margin - mkt_implied)
-                                            if disagree >= 2.5 and models_agree:
-                                                row["ats_disagree"] = round(disagree, 2)
-                                                row["ats_side"] = "HOME" if margin > mkt_implied else "AWAY"
-                                                row["ats_pick_spread"] = mkt_spread
-                                                row["ats_units"] = 2 if disagree >= 3.0 else 1
-                                                row["ats_models_agree"] = models_agree
-                                                row["ats_model_version"] = "v8_fallback"
 
                                     # ── O/U from v3 model result ──
                                     # Always store these from predict result
