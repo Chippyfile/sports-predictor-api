@@ -201,7 +201,7 @@ def _compute_fip(hr, bb, k, ip, lg_fip=4.10):
     """Compute FIP from counting stats."""
     if ip <= 0:
         return lg_fip
-    cFIP = lg_fip - (13 * 1.0 + 3 * 3.2 - 2 * 8.5)  # approximate constant
+    cFIP = lg_fip - (13 * 1.0 + 3 * 3.2 - 2 * 8.5) / 9  # FIP constant (per-IP basis)
     return max(1.5, min(7.0, (13 * hr + 3 * bb - 2 * k) / ip + cFIP))
 
 
