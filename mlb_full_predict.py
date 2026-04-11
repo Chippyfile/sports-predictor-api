@@ -398,8 +398,14 @@ def predict_mlb_full(input_data):
         "home_rest_days": home_rest,
         "away_rest_days": away_rest,
         "ump_name": ump_name,
-        "pred_home_runs": 0,  # no heuristic in full mode
-        "pred_away_runs": 0,
+        # Heuristic prediction (server-side — no frontend dependency)
+        # Simple model: (team_woba / lg_woba) * lg_rpg/2 * park * (lg_fip / opp_sp_fip)
+        "pred_home_runs": round(
+            (home_woba / sc["lg_woba"]) * (sc["lg_rpg"] / 2) * park_factor * (sc["lg_fip"] / max(away_sp_fip, 2.0)) + 0.08,  # +0.08 HFA
+            2),
+        "pred_away_runs": round(
+            (away_woba / sc["lg_woba"]) * (sc["lg_rpg"] / 2) * park_factor * (sc["lg_fip"] / max(home_sp_fip, 2.0)) - 0.08,  # -0.08 HFA
+            2),
         # Market data — filled below if available
         "market_spread_home": 0,
         "market_ou_total": 0,
