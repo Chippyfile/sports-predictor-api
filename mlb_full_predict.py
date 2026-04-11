@@ -239,6 +239,62 @@ def _fetch_rest_days(team_id, game_date_str):
     return 1  # default: played yesterday
 
 
+def _blend_pitcher_stats(current, prior, label=""):
+    """Blend current season stats with prior season, weighted by IP.
+    
+    Early season: starter has 12 IP in 2026, 180 IP in 2025.
+    Blend = (12 × current + 180 × prior) / 192 → heavily weighted to prior.
+    Mid season: 100 IP in 2026 → mostly current.
+    
+    This prevents 2-start FIPs from dominating predictions.
+    """
+    if not current and not prior:
+        return None
+    if not current:
+        return prior  # No current season data — use prior as-is
+    if not prior:
+        return current  # No prior — use current as-is (veteran moved leagues, rookie)
+    
+    c_ip = current.get("ip_total", 0) or 0
+    p_ip = prior.get("ip_total", 0) or 0
+    
+    if c_ip + p_ip == 0:
+        return current
+    
+    # Blend rate stats by IP
+    blended = dict(current)  # Start with current, override blended fields
+    for stat in ["era", "k9", "bb9", "whip"]:
+        c_val = current.get(stat, 0) or 0
+        p_val = prior.get(stat, 0) or 0
+        if c_ip > 0 and p_ip > 0:
+            blended[stat] = round((c_ip * c_val + p_ip * p_val) / (c_ip + p_ip), 3)
+        elif c_ip > 0:
+            blended[stat] = c_val
+        else:
+            blended[stat] = p_val
+    
+    # For FIP components (hr, k, bb), keep current season raw counts
+    # but store blended IP for FIP calculation
+    blended["_blended_ip"] = c_ip + p_ip
+    blended["_current_ip"] = c_ip
+    blended["_prior_ip"] = p_ip
+    
+    # Blend IP per start (use current if enough starts, else blend)
+    c_gs = current.get("games_started", 0) or 0
+    p_gs = prior.get("games_started", 0) or 0
+    if c_gs >= 3:
+        blended["ip_per_start"] = current["ip_per_start"]
+    elif c_gs > 0 and p_gs > 0:
+        blended["ip_per_start"] = round(
+            (c_gs * current.get("ip_per_start", 5.5) + p_gs * prior.get("ip_per_start", 5.5)) 
+            / (c_gs + p_gs), 2)
+    
+    if c_ip < 30:  # Early season — log the blend
+        print(f"  [mlb_full] {label} SP blended: {c_ip:.0f} IP (current) + {p_ip:.0f} IP (prior) → FIP components weighted")
+    
+    return blended
+
+
 def _compute_bp_fatigue(team_id, game_date_str):
     """Estimate bullpen fatigue: IP thrown by relievers in last 3 days."""
     try:
@@ -309,14 +365,17 @@ def predict_mlb_full(input_data):
 
     print(f"  [mlb_full] {away_abbr}@{home_abbr} | SP: {a_starter_name} vs {h_starter_name} | Ump: {ump_name}")
 
-    # ── Step 2: Parallel data fetching ──
+    # ── Step 2: Parallel data fetching (includes prior season for blending) ──
+    prior_season = season - 1
     results = {}
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {
             pool.submit(_fetch_team_stats, h_id, season): "home_stats",
             pool.submit(_fetch_team_stats, a_id, season): "away_stats",
             pool.submit(_fetch_pitcher_stats, h_starter_id, season): "home_sp",
             pool.submit(_fetch_pitcher_stats, a_starter_id, season): "away_sp",
+            pool.submit(_fetch_pitcher_stats, h_starter_id, prior_season): "home_sp_prior",
+            pool.submit(_fetch_pitcher_stats, a_starter_id, prior_season): "away_sp_prior",
             pool.submit(_fetch_rest_days, h_id, game_date): "home_rest",
             pool.submit(_fetch_rest_days, a_id, game_date): "away_rest",
         }
@@ -330,8 +389,8 @@ def predict_mlb_full(input_data):
 
     home_stats = results.get("home_stats") or {"hitting": {}, "pitching": {}}
     away_stats = results.get("away_stats") or {"hitting": {}, "pitching": {}}
-    home_sp = results.get("home_sp")
-    away_sp = results.get("away_sp")
+    home_sp = _blend_pitcher_stats(results.get("home_sp"), results.get("home_sp_prior"), "home")
+    away_sp = _blend_pitcher_stats(results.get("away_sp"), results.get("away_sp_prior"), "away")
     home_rest = results.get("home_rest") or 1
     away_rest = results.get("away_rest") or 1
 
@@ -347,22 +406,34 @@ def predict_mlb_full(input_data):
     home_team_era = h_pitch.get("era", sc["lg_fip"])
     away_team_era = a_pitch.get("era", sc["lg_fip"])
 
-    # Starter FIP — compute from stats if available, else use ERA
-    if home_sp and home_sp.get("ip_total", 0) > 0:
-        home_sp_fip = _compute_fip(home_sp["hr"], home_sp["bb"], home_sp["k"],
-                                     home_sp["ip_total"], sc["lg_fip"])
-    elif home_sp:
-        home_sp_fip = home_sp.get("era", sc["lg_fip"])
-    else:
-        home_sp_fip = home_team_era
-
-    if away_sp and away_sp.get("ip_total", 0) > 0:
-        away_sp_fip = _compute_fip(away_sp["hr"], away_sp["bb"], away_sp["k"],
-                                     away_sp["ip_total"], sc["lg_fip"])
-    elif away_sp:
-        away_sp_fip = away_sp.get("era", sc["lg_fip"])
-    else:
-        away_sp_fip = away_team_era
+    # Starter FIP — blend current + prior season for stability
+    # Early season: 2 starts of data is noise. Prior season adds real signal.
+    for side, sp, sp_prior_key, team_era, fip_var in [
+        ("home", home_sp, "home_sp_prior", home_team_era, "home_sp_fip"),
+        ("away", away_sp, "away_sp_prior", away_team_era, "away_sp_fip"),
+    ]:
+        prior = results.get(sp_prior_key)
+        if sp and sp.get("ip_total", 0) > 0:
+            c_ip = sp.get("_current_ip", sp.get("ip_total", 0))
+            # If early season (<30 IP) and prior exists, combine raw counts for FIP
+            if c_ip < 30 and prior and prior.get("ip_total", 0) > 0:
+                total_hr = sp.get("hr", 0) + prior.get("hr", 0)
+                total_bb = sp.get("bb", 0) + prior.get("bb", 0)
+                total_k = sp.get("k", 0) + prior.get("k", 0)
+                total_ip = sp.get("ip_total", 0) + prior.get("ip_total", 0)
+                fip = _compute_fip(total_hr, total_bb, total_k, total_ip, sc["lg_fip"])
+                print(f"  [mlb_full] {side} SP FIP blended: {c_ip:.0f}+{prior['ip_total']:.0f} IP → FIP={fip:.2f}")
+            else:
+                fip = _compute_fip(sp["hr"], sp["bb"], sp["k"], sp["ip_total"], sc["lg_fip"])
+        elif sp:
+            fip = sp.get("era", sc["lg_fip"])
+        else:
+            fip = team_era
+        
+        if side == "home":
+            home_sp_fip = fip
+        else:
+            away_sp_fip = fip
 
     # Weather — dome parks get neutral defaults
     if is_dome:
@@ -546,22 +617,10 @@ def predict_mlb_full(input_data):
         payload["ump_career_rpg"] = 8.5
         payload["ump_career_bb"] = 6.5
 
-    # ── Step 4f: Clamp early-season stats to training data range ──
-    # Training drops games before Apr 15 — these ranges match what models have seen.
-    # Prevents out-of-distribution extrapolation (FIP 1.5 → model breaks).
-    _CLAMPS = {
-        "home_sp_fip": (2.5, 6.5), "away_sp_fip": (2.5, 6.5),
-        "home_bullpen_era": (2.5, 6.5), "away_bullpen_era": (2.5, 6.5),
-        "home_woba": (0.260, 0.370), "away_woba": (0.260, 0.370),
-        "home_k9": (5.0, 13.0), "away_k9": (5.0, 13.0),
-        "home_bb9": (1.5, 5.5), "away_bb9": (1.5, 5.5),
-    }
-    if False:  # DISABLED FOR TEST
-        raw = float(payload.get(key, 0) or 0)
-        if raw > 0 and (raw < lo or raw > hi):
-            clamped = max(lo, min(hi, raw))
-            print(f"  [mlb_full] Clamped {key}: {raw:.3f} → {clamped:.3f}")
-            payload[key] = clamped
+    # ── Step 4f: Clamps REMOVED — blended FIP handles early-season extremes ──
+    # Previously clamped all SP FIPs to 2.5-6.5, which compressed all early-season
+    # starters to identical values (37.1% ML). Blended prior+current FIP replaces this.
+    # _CLAMPS = { ... }  # REMOVED
 
     # ── Step 5: Call margin + O/U models ──
     margin_result = predict_mlb(payload)
