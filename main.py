@@ -2120,10 +2120,37 @@ def route_mlb_daily():
                                 games_skipped += 1
                                 continue
                             gpk = g.get("gamePk")
+                            force = request.args.get("force", "").lower() in ("true", "1")
+
+                            # ── Smart timing: only predict games starting within 3 hours ──
+                            if not force:
+                                try:
+                                    game_start = g.get("gameDate", "")
+                                    if game_start:
+                                        from dateutil.parser import parse as _dt_parse
+                                        start_dt = _dt_parse(game_start)
+                                        hours_until = (start_dt - now_utc).total_seconds() / 3600
+                                        if hours_until > 3:
+                                            games_skipped += 1
+                                            continue
+                                        if hours_until < 0:
+                                            games_skipped += 1
+                                            continue
+                                except Exception:
+                                    pass  # If parsing fails, proceed with prediction
+
+                            # ── Starter gate: no starters = no prediction ──
+                            h_sp = g.get("teams", {}).get("home", {}).get("probablePitcher", {})
+                            a_sp = g.get("teams", {}).get("away", {}).get("probablePitcher", {})
+                            if not h_sp.get("id") or not a_sp.get("id"):
+                                if not force:
+                                    print(f"  [mlb-cron] Skipping {gpk}: starters not announced")
+                                    games_skipped += 1
+                                    continue
+
                             games_found += 1
                             existing_info = existing_map.get(str(gpk))
-                            # Skip if already has ATS computed (fully predicted) — unless force
-                            force = request.args.get("force", "").lower() in ("true", "1")
+                            # Skip if already fully predicted — unless force
                             if existing_info and existing_info.get("has_ats") and not force:
                                 games_skipped += 1
                                 continue

@@ -430,6 +430,11 @@ def predict_mlb_full(input_data):
     h_starter_name = h_starter.get("fullName", "TBD")
     a_starter_name = a_starter.get("fullName", "TBD")
 
+    # No starters = no prediction — sp_form_delta (strongest feature) would be zero
+    if not h_starter_id or not a_starter_id:
+        print(f"  [mlb_full] ⚠️ Starters not announced for {away_abbr}@{home_abbr} — skipping")
+        return {"error": "Starters not announced", "skip": True, "home_team": home_abbr, "away_team": away_abbr}
+
     # Umpire
     ump_name = _extract_umpire(game)
 
@@ -769,7 +774,6 @@ def predict_mlb_full(input_data):
         "bias_correction": margin_result.get("bias_correction"),
         "feature_coverage": margin_result.get("feature_coverage"),
         "models_agree": margin_result.get("models_agree"),
-        "vegas_agrees": margin_result.get("vegas_agrees"),
         "model_preds": margin_result.get("model_preds"),
         "rolling_stats_loaded": margin_result.get("rolling_stats_loaded"),
         # O/U model
