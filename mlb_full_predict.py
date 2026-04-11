@@ -556,7 +556,7 @@ def predict_mlb_full(input_data):
         "home_k9": (5.0, 13.0), "away_k9": (5.0, 13.0),
         "home_bb9": (1.5, 5.5), "away_bb9": (1.5, 5.5),
     }
-    for key, (lo, hi) in _CLAMPS.items():
+    if False:  # DISABLED FOR TEST
         raw = float(payload.get(key, 0) or 0)
         if raw > 0 and (raw < lo or raw > hi):
             clamped = max(lo, min(hi, raw))
