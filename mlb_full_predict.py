@@ -617,6 +617,9 @@ def predict_mlb_full(input_data):
         payload["ump_career_rpg"] = 8.5
         payload["ump_career_bb"] = 6.5
 
+    # Wire ump_career_rpg to the key predict_mlb expects
+    payload["ump_run_env"] = payload.get("ump_career_rpg", 8.5)
+
     # ── Step 4f: Clamps REMOVED — blended FIP handles early-season extremes ──
     # Previously clamped all SP FIPs to 2.5-6.5, which compressed all early-season
     # starters to identical values (37.1% ML). Blended prior+current FIP replaces this.
