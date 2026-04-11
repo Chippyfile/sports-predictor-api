@@ -66,12 +66,12 @@ def _fetch_schedule_game(game_id=None, home_team=None, away_team=None, game_date
     if game_id:
         data = _mlb_get(f"schedule", {
             "sportId": 1, "gamePk": game_id,
-            "hydrate": "probablePitcher,teams,venue,linescore,officials",
+            "hydrate": "probablePitcher,teams,venue,linescore,officials,weather",
         })
     elif game_date:
         data = _mlb_get("schedule", {
             "sportId": 1, "date": game_date,
-            "hydrate": "probablePitcher,teams,venue,linescore,officials",
+            "hydrate": "probablePitcher,teams,venue,linescore,officials,weather",
         })
     else:
         return None
@@ -511,13 +511,32 @@ def predict_mlb_full(input_data):
         else:
             away_sp_fip = fip
 
-    # Weather — dome parks get neutral defaults
+    # Weather — extract from MLB API schedule hydration
     if is_dome:
         temp_f, wind_mph, wind_out_flag = 70.0, 0.0, 0.0
     else:
-        temp_f = 70.0   # TODO: integrate weather API
-        wind_mph = 5.0
-        wind_out_flag = 0.0
+        weather = game.get("weather", {})
+        try:
+            temp_f = float(weather.get("temp", 70))
+        except (ValueError, TypeError):
+            temp_f = 70.0
+        
+        # Parse wind: "14 mph, In From LF" → speed=14, direction=in
+        wind_str = weather.get("wind", "")
+        try:
+            wind_mph = float(wind_str.split(" mph")[0]) if "mph" in wind_str else 5.0
+        except (ValueError, TypeError):
+            wind_mph = 5.0
+        
+        # Wind out = blowing toward outfield (increases scoring)
+        wind_lower = wind_str.lower()
+        if "out to" in wind_lower or "out from" in wind_lower:
+            wind_out_flag = 1.0
+        else:
+            wind_out_flag = 0.0
+        
+        if temp_f != 70 or wind_mph != 5:
+            print(f"  [mlb_full] Weather: {temp_f:.0f}°F, wind {wind_mph:.0f} mph {'OUT' if wind_out_flag else 'in'} ({weather.get('condition', '')})")
 
     # ── Step 4: Build payload for predict_mlb ──
     payload = {
