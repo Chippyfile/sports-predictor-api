@@ -2127,8 +2127,8 @@ def route_mlb_daily():
                                 try:
                                     game_start = g.get("gameDate", "")
                                     if game_start:
-                                        from dateutil.parser import parse as _dt_parse
-                                        start_dt = _dt_parse(game_start)
+                                        pass  # use datetime.fromisoformat
+                                        start_dt = datetime.fromisoformat(game_start.replace("Z", "+00:00"))
                                         hours_until = (start_dt - now_utc).total_seconds() / 3600
                                         if hours_until > 3:
                                             games_skipped += 1
