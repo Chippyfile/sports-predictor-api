@@ -295,6 +295,57 @@ def _blend_pitcher_stats(current, prior, label=""):
     return blended
 
 
+def _compute_platoon_delta(lineup_ids, opp_pitcher_id):
+    """Compute platoon advantage for a lineup vs opposing starter's throw hand.
+    
+    Opposite hand matchup = advantage (+1 per batter)
+    Same hand = disadvantage (0)
+    Switch hitter = partial advantage (+0.5)
+    Returns: average platoon score across lineup (range ~ -1.0 to +1.0)
+    """
+    if not lineup_ids or not opp_pitcher_id:
+        return 0.0
+    
+    try:
+        # Batch fetch all player handedness in one call
+        all_ids = [str(opp_pitcher_id)] + [str(bid) for bid in lineup_ids if bid]
+        id_str = ",".join(all_ids[:20])  # Cap at 20
+        data = _mlb_get("people", {"personIds": id_str})
+        if not data:
+            return 0.0
+        
+        # Build handedness lookup
+        hand_map = {}
+        for p in data.get("people", []):
+            pid = p.get("id")
+            hand_map[pid] = {
+                "bat": p.get("batSide", {}).get("code", "R"),
+                "throw": p.get("pitchHand", {}).get("code", "R"),
+            }
+        
+        # Get pitcher throw hand
+        sp_throw = hand_map.get(int(opp_pitcher_id), {}).get("throw", "R")
+        
+        # Score each batter
+        scores = []
+        for bid in lineup_ids:
+            if not bid:
+                continue
+            batter = hand_map.get(int(bid), {})
+            bat_side = batter.get("bat", "R")
+            if bat_side == "S":  # Switch hitter
+                scores.append(0.5)
+            elif bat_side != sp_throw:  # Opposite hand = advantage
+                scores.append(1.0)
+            else:  # Same hand = no advantage
+                scores.append(0.0)
+        
+        return round(sum(scores) / len(scores), 4) if scores else 0.0
+    except Exception as e:
+        print(f"  [mlb_full] Platoon compute error: {e}")
+        return 0.0
+
+
 def _compute_bp_fatigue(team_id, game_date_str):
     """Estimate bullpen fatigue: IP thrown by relievers in last 3 days."""
     try:
@@ -585,6 +636,14 @@ def predict_mlb_full(input_data):
                     h_lineup, a_lineup, batter_stats,
                     home_abbr=home_abbr, away_abbr=away_abbr)
                 print(f"  [mlb_full] Lineup: {lineup_feats.get('home_matched',0)}/{lineup_feats.get('away_matched',0)} matched")
+                
+                # Compute platoon advantage from lineup handedness vs opposing SP
+                home_platoon = _compute_platoon_delta(h_lineup, a_starter_id)
+                away_platoon = _compute_platoon_delta(a_lineup, h_starter_id)
+                payload["home_platoon_delta"] = home_platoon
+                payload["away_platoon_delta"] = away_platoon
+                if abs(home_platoon - away_platoon) > 0.01:
+                    print(f"  [mlb_full] Platoon: home={home_platoon:+.3f} away={away_platoon:+.3f} diff={home_platoon-away_platoon:+.3f}")
             else:
                 print(f"  [mlb_full] No lineups available — lineup features = 0")
         except Exception as e:
@@ -616,9 +675,6 @@ def predict_mlb_full(input_data):
     except Exception:
         payload["ump_career_rpg"] = 8.5
         payload["ump_career_bb"] = 6.5
-
-    # Wire ump_career_rpg to the key predict_mlb expects
-    payload["ump_run_env"] = payload.get("ump_career_rpg", 8.5)
 
     # ── Step 4f: Clamps REMOVED — blended FIP handles early-season extremes ──
     # Previously clamped all SP FIPs to 2.5-6.5, which compressed all early-season
