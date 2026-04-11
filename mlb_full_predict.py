@@ -295,6 +295,29 @@ def _blend_pitcher_stats(current, prior, label=""):
     return blended
 
 
+def _fetch_team_relief_era(team_id, season=None):
+    """Fetch team bullpen ERA from MLB API relief-only stats."""
+    if not team_id:
+        return None
+    if not season:
+        season = datetime.utcnow().year
+    try:
+        data = _mlb_get(f"teams/{team_id}/stats", {
+            "stats": "season", "season": season, "group": "pitching",
+            "sitCodes": "rp",
+        })
+        if data:
+            for split in data.get("stats", []):
+                for s in split.get("splits", []):
+                    st = s.get("stat", {})
+                    era = float(st.get("era", 0))
+                    if era > 0:
+                        return era
+    except Exception:
+        pass
+    return None
+
+
 def _compute_platoon_delta(lineup_ids, opp_pitcher_id):
     """Compute platoon advantage for a lineup vs opposing starter's throw hand.
     
@@ -419,7 +442,7 @@ def predict_mlb_full(input_data):
     # ── Step 2: Parallel data fetching (includes prior season for blending) ──
     prior_season = season - 1
     results = {}
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {
             pool.submit(_fetch_team_stats, h_id, season): "home_stats",
             pool.submit(_fetch_team_stats, a_id, season): "away_stats",
@@ -427,6 +450,8 @@ def predict_mlb_full(input_data):
             pool.submit(_fetch_pitcher_stats, a_starter_id, season): "away_sp",
             pool.submit(_fetch_pitcher_stats, h_starter_id, prior_season): "home_sp_prior",
             pool.submit(_fetch_pitcher_stats, a_starter_id, prior_season): "away_sp_prior",
+            pool.submit(_fetch_team_relief_era, h_id, season): "home_bp_era",
+            pool.submit(_fetch_team_relief_era, a_id, season): "away_bp_era",
             pool.submit(_fetch_rest_days, h_id, game_date): "home_rest",
             pool.submit(_fetch_rest_days, a_id, game_date): "away_rest",
         }
@@ -505,8 +530,8 @@ def predict_mlb_full(input_data):
         "away_sp_fip": round(away_sp_fip, 2),
         "home_fip": round(home_team_era, 2),
         "away_fip": round(away_team_era, 2),
-        "home_bullpen_era": round(home_team_era, 2),  # team ERA as proxy
-        "away_bullpen_era": round(away_team_era, 2),
+        "home_bullpen_era": round(results.get("home_bp_era") or home_team_era, 2),
+        "away_bullpen_era": round(results.get("away_bp_era") or away_team_era, 2),
         "park_factor": park_factor,
         "temp_f": temp_f,
         "wind_mph": wind_mph,
@@ -725,6 +750,7 @@ def predict_mlb_full(input_data):
         "bias_correction": margin_result.get("bias_correction"),
         "feature_coverage": margin_result.get("feature_coverage"),
         "models_agree": margin_result.get("models_agree"),
+        "vegas_agrees": margin_result.get("vegas_agrees"),
         "model_preds": margin_result.get("model_preds"),
         "rolling_stats_loaded": margin_result.get("rolling_stats_loaded"),
         # O/U model

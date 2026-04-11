@@ -937,6 +937,22 @@ def predict_mlb(game: dict):
         except Exception as e:
             print(f"  [predict_mlb] Validator error: {e}")
 
+    # Vegas ML agreement — third validation layer
+    # Convert moneyline to implied probability, check if model agrees on winner
+    _vegas_agrees = None
+    _mkt_ml = row_data.get("market_home_ml", 0)
+    if _mkt_ml != 0:
+        # Convert ML to implied probability: fav -150 → 150/250=0.60, dog +150 → 100/250=0.40
+        if _mkt_ml < 0:
+            vegas_prob = abs(_mkt_ml) / (abs(_mkt_ml) + 100)
+        else:
+            vegas_prob = 100 / (_mkt_ml + 100)
+        vegas_home_favored = vegas_prob > 0.5
+        model_home_favored = raw_margin > 0
+        _vegas_agrees = vegas_home_favored == model_home_favored
+        if not _vegas_agrees:
+            print(f"  [predict_mlb] ⚠️ Vegas disagrees: model={raw_margin:+.2f} vs Vegas ML={_mkt_ml} ({vegas_prob:.0%} home)")
+
     # AUDIT FIX F7: Use Gaussian CDF instead of Elo-style formula.
     # Elo (10^(-m/σ)) compresses probabilities toward 50% compared to Gaussian,
     # making confidence gates (65%/60%) harder to trigger. At margin=2.0:
@@ -982,6 +998,7 @@ def predict_mlb(game: dict):
         "ml_win_prob_raw": round(raw_win_prob, 4),
         "bias_correction": round(bias, 3),
         "models_agree": _models_agree,
+        "vegas_agrees": _vegas_agrees,
         "model_preds": [round(p, 3) for p in _model_preds],
         "feature_coverage": f"{sum(1 for c in bundle['feature_cols'] if row_data.get(c,0)!=0)}/{len(bundle['feature_cols'])}",
         "rolling_stats_loaded": _rolling_loaded,
