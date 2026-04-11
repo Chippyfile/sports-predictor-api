@@ -731,6 +731,9 @@ def predict_mlb_full(input_data):
     # starters to identical values (37.1% ML). Blended prior+current FIP replaces this.
     # _CLAMPS = { ... }  # REMOVED
 
+    # Wire ump_career_rpg to the key predict_mlb expects
+    payload["ump_run_env"] = payload.get("ump_career_rpg", 8.5)
+
     # ── Step 5: Call margin + O/U models ──
     margin_result = predict_mlb(payload)
     ou_result = predict_mlb_ou(payload)
