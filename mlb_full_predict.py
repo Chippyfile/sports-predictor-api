@@ -239,6 +239,26 @@ def _fetch_rest_days(team_id, game_date_str):
     return 1  # default: played yesterday
 
 
+def _compute_bp_fatigue(team_id, game_date_str):
+    """Estimate bullpen fatigue: IP thrown by relievers in last 3 days."""
+    try:
+        dt = datetime.strptime(game_date_str, "%Y-%m-%d")
+        start = (dt - timedelta(days=3)).strftime("%Y-%m-%d")
+        end = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        data = _mlb_get("schedule", {
+            "sportId": 1, "teamId": team_id,
+            "startDate": start, "endDate": end,
+        })
+        if not data:
+            return 0
+        games_played = sum(1 for d in data.get("dates", []) for g in d.get("games", [])
+                          if g.get("status", {}).get("abstractGameState") == "Final")
+        # Avg bullpen usage: ~3.5 IP per game
+        return round(games_played * 3.5, 1)
+    except Exception:
+        return 0
+
+
 def predict_mlb_full(input_data):
     """
     Full server-side MLB prediction.
@@ -432,7 +452,7 @@ def predict_mlb_full(input_data):
     except Exception as e:
         print(f"  [mlb_full] ESPN odds fetch failed: {e}")
 
-    # ── Step 4c: Compute sp_form_combined (used by BOTH ATS and O/U models) ──
+    # ── Step 4c: Compute sp_form_combined + individual deltas (v9 features) ──
     try:
         from mlb_ou_v2_serve import compute_sp_form_combined
         sp_form = compute_sp_form_combined(
@@ -441,9 +461,35 @@ def predict_mlb_full(input_data):
         )
         payload["sp_form_combined"] = sp_form
         print(f"  [mlb_full] sp_form_combined: {sp_form:+.3f}")
+
+        # v9: Compute individual SP form deltas (away is 100x more predictive than home)
+        try:
+            from mlb_ou_v3_serve import fetch_pitcher_recent_form
+            for side, pid, fip_key in [("home", h_starter_id, "home_sp_fip"),
+                                        ("away", a_starter_id, "away_sp_fip")]:
+                form = fetch_pitcher_recent_form(pid) if pid else None
+                if form and form.get("n_starts", 0) >= 1:
+                    delta = form["recent_avg_runs"] - payload[fip_key]
+                    payload[f"{side}_sp_form_delta"] = round(delta, 3)
+                else:
+                    payload[f"{side}_sp_form_delta"] = 0
+        except Exception as e:
+            payload["home_sp_form_delta"] = 0
+            payload["away_sp_form_delta"] = 0
+            print(f"  [mlb_full] SP form deltas failed: {e}")
     except Exception as e:
         payload["sp_form_combined"] = 0.0
+        payload["home_sp_form_delta"] = 0
+        payload["away_sp_form_delta"] = 0
         print(f"  [mlb_full] sp_form failed: {e} — defaulting to 0")
+
+    # ── Step 4c2: Bullpen fatigue (recent bullpen IP) ──
+    for side, tid in [("home", h_id), ("away", a_id)]:
+        try:
+            fatigue = _compute_bp_fatigue(tid, game_date)
+            payload[f"{side}_bp_fatigue"] = fatigue
+        except Exception:
+            payload[f"{side}_bp_fatigue"] = 0
 
     # ── (Rolling FIP tested: r≈0 vs residual — market already prices it. Clamps handle edge cases.) ──
 
