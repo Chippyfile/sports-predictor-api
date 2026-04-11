@@ -892,6 +892,19 @@ def predict_mlb(game: dict):
     # 3-model agreement: all predict same direction (all positive or all negative)
     _models_agree = all(p > 0 for p in _model_preds) or all(p < 0 for p in _model_preds) if len(_model_preds) > 1 else True
 
+    # v9: Deep model validator — d8 CatBoost cross-checks d4 prediction
+    # When agree: 73.6% ML. When disagree: 20.9% ML. Powerful filter.
+    _validator = bundle.get("_validator")
+    if _validator is not None:
+        try:
+            val_margin = float(_validator.predict(X_s)[0])
+            _val_agree = (raw_margin > 0) == (val_margin > 0)
+            _models_agree = _models_agree and _val_agree
+            if not _val_agree:
+                print(f"  [predict_mlb] ⚠️ Validator disagrees: d4={raw_margin:+.2f} vs d8={val_margin:+.2f}")
+        except Exception as e:
+            print(f"  [predict_mlb] Validator error: {e}")
+
     # AUDIT FIX F7: Use Gaussian CDF instead of Elo-style formula.
     # Elo (10^(-m/σ)) compresses probabilities toward 50% compared to Gaussian,
     # making confidence gates (65%/60%) harder to trigger. At margin=2.0:
