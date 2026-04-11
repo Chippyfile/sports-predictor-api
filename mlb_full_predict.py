@@ -775,6 +775,7 @@ def predict_mlb_full(input_data):
         "bias_correction": margin_result.get("bias_correction"),
         "feature_coverage": margin_result.get("feature_coverage"),
         "models_agree": margin_result.get("models_agree"),
+        "vegas_agrees": margin_result.get("vegas_agrees"),
         "model_preds": margin_result.get("model_preds"),
         "rolling_stats_loaded": margin_result.get("rolling_stats_loaded"),
         # O/U model
