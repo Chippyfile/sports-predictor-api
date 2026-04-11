@@ -685,7 +685,8 @@ def predict_mlb_full(input_data):
                     h_lineup, a_lineup, batter_stats,
                     home_abbr=home_abbr, away_abbr=away_abbr)
                 print(f"  [mlb_full] Lineup: {lineup_feats.get('home_matched',0)}/{lineup_feats.get('away_matched',0)} matched")
-                
+                payload["home_lineup_confirmed"] = 1
+                payload["away_lineup_confirmed"] = 1                
                 # Compute platoon advantage from lineup handedness vs opposing SP
                 home_platoon = _compute_platoon_delta(h_lineup, a_starter_id)
                 away_platoon = _compute_platoon_delta(a_lineup, h_starter_id)
