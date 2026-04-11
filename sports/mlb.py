@@ -922,25 +922,24 @@ def predict_mlb(game: dict):
     win_prob = float(_norm.cdf(margin / MLB_SIGMA))
     win_prob = max(0.20, min(0.80, win_prob))
 
-    # SHAP explanation
-    shap_vals = bundle["explainer"].shap_values(X_s)
-    if isinstance(shap_vals, list):
-        shap_vals = shap_vals[0]
-    
+    # SHAP explanation (optional — not all model bundles include explainer)
     shap_out = []
-    if len(shap_vals.shape) > 1:
-        shap_values_row = shap_vals[0]
-    else:
-        shap_values_row = shap_vals
-        
-    for f, v in zip(bundle["feature_cols"], shap_values_row):
-        shap_out.append({
-            "feature": f,
-            "shap": round(float(v), 4),
-            "value": round(float(row[f].iloc[0]), 3)
-        })
-    
-    shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+    try:
+        _explainer = bundle.get("explainer")
+        if _explainer is not None:
+            shap_vals = _explainer.shap_values(X_s)
+            if isinstance(shap_vals, list):
+                shap_vals = shap_vals[0]
+            shap_values_row = shap_vals[0] if len(shap_vals.shape) > 1 else shap_vals
+            for f, v in zip(bundle["feature_cols"], shap_values_row):
+                shap_out.append({
+                    "feature": f,
+                    "shap": round(float(v), 4),
+                    "value": round(float(row[f].iloc[0]), 3)
+                })
+            shap_out.sort(key=lambda x: abs(x["shap"]), reverse=True)
+    except Exception as e:
+        print(f"  [predict_mlb] SHAP error (non-fatal): {e}")
 
     return {
         "sport": "MLB",
@@ -956,12 +955,12 @@ def predict_mlb(game: dict):
         "rolling_stats_loaded": _rolling_loaded,
         "shap": shap_out,  # All features for verification panel
         "model_meta": {
-            "n_train": bundle["n_train"],
+            "n_train": bundle.get("n_train", 0),
             "n_historical": bundle.get("n_historical", 0),
             "n_current": bundle.get("n_current", 0),
-            "mae_cv": bundle["mae_cv"],
-            "trained_at": bundle["trained_at"],
-            "model_type": bundle["model_type"],
+            "mae_cv": bundle.get("mae_cv", 0),
+            "trained_at": bundle.get("trained_at", ""),
+            "model_type": bundle.get("model_type", "unknown"),
             "has_isotonic": bundle.get("isotonic") is not None,
         },
         "_features": row_data,  # expose for v9 ATS model
