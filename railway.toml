@@ -16,3 +16,22 @@ restartPolicyMaxRetries = 3
 [[cron]]
 schedule = "0 8 * * *"
 endpoint = "/cron/auto-train"
+
+# ── MLB predictions: every hour 10AM-8PM ET (15:00-01:00 UTC) ──
+[[cron]]
+schedule = "0 15,16,17,18,19,20,21,22,23,0,1 * * *"
+endpoint = "/cron/mlb-daily?mode=auto"
+
+# ── NBA predictions: 10AM ET ──
+[[cron]]
+schedule = "0 15 * * *"
+endpoint = "/cron/nba-daily?mode=predict"
+
+# ── Grading: 1AM ET (06:00 UTC) ──
+[[cron]]
+schedule = "0 6 * * *"
+endpoint = "/cron/mlb-daily?mode=grade"
+
+[[cron]]
+schedule = "0 6 * * *"
+endpoint = "/cron/nba-daily?mode=grade"
