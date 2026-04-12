@@ -497,7 +497,7 @@ def predict_mlb_full(input_data):
         if sp and sp.get("ip_total", 0) > 0:
             c_ip = sp.get("_current_ip", sp.get("ip_total", 0))
             # If early season (<30 IP) and prior exists, combine raw counts for FIP
-            if c_ip < 30 and prior and prior.get("ip_total", 0) > 0:
+            if False:  # DISABLED — model trained on raw FIP
                 total_hr = sp.get("hr", 0) + prior.get("hr", 0)
                 total_bb = sp.get("bb", 0) + prior.get("bb", 0)
                 total_k = sp.get("k", 0) + prior.get("k", 0)
