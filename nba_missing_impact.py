@@ -78,15 +78,17 @@ def _load_player_impact(season=2026):
 
 def get_out_players(team_abbr, game_id=None, game_date=None):
     """
-    Get list of OUT players from ESPN.
+    Get list of OUT and DAY-TO-DAY players from ESPN.
 
     Strategy:
       1. If game_id provided, check game summary injuries (most accurate, game-day)
       2. Fallback: team page injury report
 
-    Returns list of player names confirmed OUT.
+    Returns: (out_players, dtd_players) — two lists of player names.
+    OUT = confirmed out. DTD = Day-To-Day (likely resting in late season).
     """
     out_players = []
+    dtd_players = []
 
     # ── Method 1: Game summary (game-day decisions) ──
     if game_id:
@@ -104,10 +106,13 @@ def get_out_players(team_abbr, game_id=None, game_date=None):
                         continue
                     for player in team_data.get("roster", []):
                         status = (player.get("status") or "").upper()
+                        name = player.get("athlete", {}).get("displayName")
+                        if not name:
+                            continue
                         if status in ("OUT", "O", "INACTIVE"):
-                            name = player.get("athlete", {}).get("displayName")
-                            if name:
-                                out_players.append(name)
+                            out_players.append(name)
+                        elif status in ("DAY-TO-DAY", "DTD", "D2D", "DOUBTFUL"):
+                            dtd_players.append(name)
 
                 # Injuries section (separate from roster)
                 for inj_group in data.get("injuries", []):
@@ -116,49 +121,63 @@ def get_out_players(team_abbr, game_id=None, game_date=None):
                         continue
                     for item in inj_group.get("injuries", []):
                         status = (item.get("status") or item.get("type", {}).get("description", "")).upper()
-                        if "OUT" in status:
-                            name = item.get("athlete", {}).get("displayName")
-                            if name and name not in out_players:
-                                out_players.append(name)
+                        abbrev = (item.get("type", {}).get("abbreviation", "")).upper()
+                        name = item.get("athlete", {}).get("displayName")
+                        if not name:
+                            continue
+                        if name in out_players or name in dtd_players:
+                            continue
+                        if "OUT" in status or abbrev in ("O", "OFS"):
+                            out_players.append(name)
+                        elif "DAY" in status or abbrev in ("DTD", "D2D"):
+                            dtd_players.append(name)
 
-                if out_players:
-                    print(f"  [impact] {team_abbr} OUT (game summary): {out_players}")
-                    return out_players
+                if out_players or dtd_players:
+                    print(f"  [impact] {team_abbr} OUT({len(out_players)}): {out_players}")
+                    if dtd_players:
+                        print(f"  [impact] {team_abbr} DTD({len(dtd_players)}): {dtd_players}")
+                    return out_players, dtd_players
         except Exception as e:
             print(f"  [impact] Game summary fetch failed for {team_abbr}: {e}")
 
     # ── Method 2: Team page injuries ──
     espn_id = ESPN_TEAM_IDS.get(team_abbr)
     if not espn_id:
-        return []
+        return [], []
 
     try:
         url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{espn_id}?enable=roster,injuries"
         r = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if not r.ok:
-            return []
+            return [], []
 
         data = r.json()
-        # Navigate nested injury structure — ESPN format varies
         injuries_raw = data.get("team", {}).get("injuries", [])
         for entry in injuries_raw:
-            # Can be a category group (e.g., {"title": "Out", "injuries": [...]})
             items = entry.get("injuries", [entry]) if isinstance(entry, dict) else [entry]
             for item in items:
                 desc = (item.get("type", {}).get("description", "")
                         or item.get("status", "")
                         or item.get("type", {}).get("abbreviation", "")).upper()
-                if "OUT" in desc or desc in ("O", "OFS"):
-                    name = item.get("athlete", {}).get("displayName")
-                    if name and name not in out_players:
-                        out_players.append(name)
+                abbrev = item.get("type", {}).get("abbreviation", "").upper()
+                name = item.get("athlete", {}).get("displayName")
+                if not name:
+                    continue
+                if name in out_players or name in dtd_players:
+                    continue
+                if "OUT" in desc or abbrev in ("O", "OFS"):
+                    out_players.append(name)
+                elif "DAY" in desc or abbrev in ("DTD", "D2D"):
+                    dtd_players.append(name)
 
-        if out_players:
+        if out_players or dtd_players:
             print(f"  [impact] {team_abbr} OUT (team page): {out_players}")
+            if dtd_players:
+                print(f"  [impact] {team_abbr} DTD (team page): {dtd_players}")
     except Exception as e:
         print(f"  [impact] Team page fetch error for {team_abbr}: {e}")
 
-    return out_players
+    return out_players, dtd_players
 
 
 # ═══════════════════════════════════════════════════════════
@@ -220,6 +239,9 @@ def compute_missing_impact(home_abbr, away_abbr, game_id=None, game_date=None,
     """
     Compute missing player impact for a single NBA game.
 
+    DTD players are weighted at 60% impact (likely sitting in late season).
+    OUT players at 100%.
+
     Returns dict with 9 numeric features + diagnostic metadata (_prefixed).
     """
     players = _load_player_impact(season)
@@ -227,29 +249,55 @@ def compute_missing_impact(home_abbr, away_abbr, game_id=None, game_date=None,
         print("  [impact] No player impact data -- returning zeros")
         return _zero_features()
 
-    # Fetch OUT players from ESPN if not explicitly provided
+    # Fetch OUT + DTD players from ESPN if not explicitly provided
+    home_dtd, away_dtd = [], []
     if home_out is None:
-        home_out = get_out_players(home_abbr, game_id=game_id, game_date=game_date)
+        result = get_out_players(home_abbr, game_id=game_id, game_date=game_date)
+        if isinstance(result, tuple):
+            home_out, home_dtd = result
+        else:
+            home_out = result  # backwards compat
     if away_out is None:
-        away_out = get_out_players(away_abbr, game_id=game_id, game_date=game_date)
+        result = get_out_players(away_abbr, game_id=game_id, game_date=game_date)
+        if isinstance(result, tuple):
+            away_out, away_dtd = result
+        else:
+            away_out = result
 
-    hi = _sum_impact(home_abbr, home_out, players)
-    ai = _sum_impact(away_abbr, away_out, players)
-    diff = round(hi["margin"] - ai["margin"], 3)
+    # Compute impact: OUT at 100%, DTD at 60%
+    hi_out = _sum_impact(home_abbr, home_out, players)
+    hi_dtd = _sum_impact(home_abbr, home_dtd, players)
+    ai_out = _sum_impact(away_abbr, away_out, players)
+    ai_dtd = _sum_impact(away_abbr, away_dtd, players)
 
-    print(f"  [impact] {home_abbr} OUT({len(home_out)}): margin={hi['margin']:+.2f} "
-          f"| {away_abbr} OUT({len(away_out)}): margin={ai['margin']:+.2f} "
+    DTD_WEIGHT = 0.60  # DTD players have ~60% chance of sitting
+    
+    h_margin = hi_out["margin"] + hi_dtd["margin"] * DTD_WEIGHT
+    a_margin = ai_out["margin"] + ai_dtd["margin"] * DTD_WEIGHT
+    diff = round(h_margin - a_margin, 3)
+
+    all_home_out = home_out + [f"{n} (DTD)" for n in home_dtd]
+    all_away_out = away_out + [f"{n} (DTD)" for n in away_dtd]
+
+    print(f"  [impact] {home_abbr} OUT({len(home_out)})+DTD({len(home_dtd)}): margin={h_margin:+.2f} "
+          f"| {away_abbr} OUT({len(away_out)})+DTD({len(away_dtd)}): margin={a_margin:+.2f} "
           f"| NET: {diff:+.2f} pts")
 
     return {
-        "home_missing_margin": hi["margin"], "away_missing_margin": ai["margin"],
+        "home_missing_margin": round(h_margin, 3),
+        "away_missing_margin": round(a_margin, 3),
         "missing_margin_diff": diff,
-        "home_missing_bpm": hi["bpm_w"], "away_missing_bpm": ai["bpm_w"],
-        "home_missing_vorp": hi["vorp"], "away_missing_vorp": ai["vorp"],
-        "home_missing_minutes": hi["minutes"], "away_missing_minutes": ai["minutes"],
-        "_home_out": home_out, "_away_out": away_out,
-        "_home_matched": hi["matched"], "_away_matched": ai["matched"],
-        "_home_unmatched": hi.get("unmatched", []), "_away_unmatched": ai.get("unmatched", []),
+        "home_missing_bpm": round(hi_out["bpm_w"] + hi_dtd["bpm_w"] * DTD_WEIGHT, 3),
+        "away_missing_bpm": round(ai_out["bpm_w"] + ai_dtd["bpm_w"] * DTD_WEIGHT, 3),
+        "home_missing_vorp": round(hi_out["vorp"] + hi_dtd["vorp"] * DTD_WEIGHT, 3),
+        "away_missing_vorp": round(ai_out["vorp"] + ai_dtd["vorp"] * DTD_WEIGHT, 3),
+        "home_missing_minutes": round(hi_out["minutes"] + hi_dtd["minutes"] * DTD_WEIGHT, 3),
+        "away_missing_minutes": round(ai_out["minutes"] + ai_dtd["minutes"] * DTD_WEIGHT, 3),
+        "_home_out": all_home_out, "_away_out": all_away_out,
+        "_home_matched": hi_out["matched"] + hi_dtd["matched"],
+        "_away_matched": ai_out["matched"] + ai_dtd["matched"],
+        "_home_unmatched": hi_out.get("unmatched", []) + hi_dtd.get("unmatched", []),
+        "_away_unmatched": ai_out.get("unmatched", []) + ai_dtd.get("unmatched", []),
     }
 
 

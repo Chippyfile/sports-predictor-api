@@ -447,20 +447,29 @@ def _parse_espn_summary(data, home_abbr, away_abbr, game_date_str=""):
     except Exception as _e:
         diag.append(f"Section 7 (last5): {_e}")
 
-    # ── 8. Injuries (extract OUT player NAMES for impact model) ──
+    # ── 8. Injuries (extract OUT + DTD player NAMES for impact model) ──
     try:
         for inj in data.get("injuries", []):
             abbr = _safe_abbr(inj.get("team", {}))
             side = "home" if abbr == home_abbr else "away" if abbr == away_abbr else None
             if not side: continue
             out_names = []
+            dtd_names = []
             for i in inj.get("injuries", []):
-                if isinstance(i, dict) and _safe_get(i, "type", "abbreviation") == "O":
-                    name = _safe_get(i, "athlete", "displayName")
-                    if name:
-                        out_names.append(name)
-            row[f"{side}_injuries_out"] = len(out_names)
-            row[f"{side}_out_players"] = out_names  # player names for impact model
+                if not isinstance(i, dict):
+                    continue
+                abbrev = _safe_get(i, "type", "abbreviation") or ""
+                desc = (_safe_get(i, "type", "description") or "").upper()
+                name = _safe_get(i, "athlete", "displayName")
+                if not name:
+                    continue
+                if abbrev == "O" or "OUT" in desc:
+                    out_names.append(name)
+                elif abbrev in ("DTD", "D2D") or "DAY" in desc:
+                    dtd_names.append(name)
+            row[f"{side}_injuries_out"] = len(out_names) + len(dtd_names)
+            row[f"{side}_out_players"] = out_names
+            row[f"{side}_dtd_players"] = dtd_names
     except Exception as _e:
         diag.append(f"Section 8 (injuries): {_e}")
 
@@ -1145,13 +1154,13 @@ def predict_nba_full(game: dict):
     impact_data = {}
     if _HAS_IMPACT:
         try:
-            # Use OUT players from ESPN summary (already fetched), avoid redundant API call
-            home_out = espn.get("home_out_players") or row.get("home_out_players") or None
-            away_out = espn.get("away_out_players") or row.get("away_out_players") or None
+            # Let compute_missing_impact fetch OUT + DTD directly from ESPN
+            # (Section 8 already captured them, but compute_missing_impact
+            #  now handles DTD weighting internally)
             impact_data = compute_missing_impact(
                 home_abbr, away_abbr,
                 game_id=game_id, game_date=game_date,
-                home_out=home_out, away_out=away_out,
+                home_out=None, away_out=None,  # Force fresh fetch to capture DTD
             )
             margin, wp, impact_adj = _adjust_impact(margin, wp, impact_data, sigma=7.0)
             if abs(impact_adj) >= 0.5:
@@ -1161,6 +1170,20 @@ def predict_nba_full(game: dict):
             print(f"  [impact] Error: {e}")
 
     mkt = float(row.get("market_spread_home", 0) or 0)
+    
+    # ── Market safety gate: detect likely rest/load management ──
+    # After impact adjustment, if model still disagrees with market by 8+ points,
+    # something is wrong (likely resting stars not captured in injury report).
+    # Suppress ATS/O-U picks but keep ML prediction for tracking.
+    _market_rest_flag = False
+    if mkt != 0:
+        # Market uses opposite sign convention: negative = home favored
+        model_vs_market_gap = abs(margin - (-mkt))
+        if model_vs_market_gap > 8.0:
+            _market_rest_flag = True
+            diag["warnings"].append(
+                f"REST? model={margin:+.1f} vs market={-mkt:+.1f} gap={model_vs_market_gap:.1f}pts — ATS/O-U suppressed")
+            print(f"  [nba] ⚠️ Market safety gate: gap={model_vs_market_gap:.1f}pts — likely resting stars")
 
     # Debug: return all features if requested
     debug = game.get("debug", False)
@@ -1392,8 +1415,8 @@ def predict_nba_full(game: dict):
         "diagnostics": diag,
         "ou_predicted_total": round(ou_predicted_total, 1) if ou_predicted_total else None,
         "ou_edge": ou_edge,
-        "ou_pick": ou_pick,
-        "ou_tier": ou_tier,
+        "ou_pick": None if _market_rest_flag else ou_pick,
+        "ou_tier": 0 if _market_rest_flag else ou_tier,
         "ou_res_avg": round(ou_res_avg, 3) if ou_res_avg is not None else None,
         "ou_cls_avg": round(ou_cls_avg, 3) if ou_cls_avg is not None else None,
         "ou_ats_total": round(ou_ats_total, 1) if ou_ats_total is not None else None,
@@ -1417,9 +1440,10 @@ def predict_nba_full(game: dict):
         "home_out_players": impact_data.get("_home_out", []),
         "away_out_players": impact_data.get("_away_out", []),
         "missing_margin_diff": impact_data.get("missing_margin_diff", 0),
+        "market_rest_flag": _market_rest_flag,
         # v28: Residual ATS model (CatBoost×0.7 + Lasso×0.3)
-        "ats_side": ats_result.get("ats_side"),
-        "ats_units": ats_result.get("ats_units", 0),
+        "ats_side": None if _market_rest_flag else ats_result.get("ats_side"),
+        "ats_units": 0 if _market_rest_flag else ats_result.get("ats_units", 0),
         "ats_pick_spread": ats_result.get("ats_pick_spread"),
         "ats_residual_blend": ats_result.get("ats_residual_blend"),
         "ats_residual_cb": ats_result.get("ats_residual_cb"),
